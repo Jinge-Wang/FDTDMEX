@@ -20,6 +20,15 @@ def run_fdtd(
     show_progress: bool = True,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> SimulationState:
+    # FDTDMEX MLX (Metal) injection: on Apple Silicon, a supported forward-only run is
+    # handed to the native MLX time loop. Returns a completed SimulationState, or None to
+    # fall through to the unchanged JAX engine below. Local import avoids a load-time cycle.
+    from fdtdx.backend.dispatch import maybe_run_mlx_forward
+
+    _mlx_state = maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition)
+    if _mlx_state is not None:
+        return _mlx_state
+
     key = default_key(key)
     if stopping_condition is not None:
         if config.gradient_config is not None:

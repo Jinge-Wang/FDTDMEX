@@ -47,6 +47,7 @@ from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, Pa
 from fdtdx.fdtd.initialization import apply_params, place_objects, resolve_object_constraints
 from fdtdx.fdtd.symmetry import unfold_array, unfold_detector_states, unfold_fields, unfold_source_mode
 from fdtdx.fdtd.wrapper import run_fdtd
+from fdtdx.backend.context import use_backend
 from fdtdx.interfaces.modules import DtypeConversion
 from fdtdx.interfaces.recorder import Recorder, RecordingState
 from fdtdx.interfaces.time_filter import LinearReconstructEveryK
@@ -270,6 +271,7 @@ __all__ = [
     "private_field",
     "resolve_object_constraints",
     "run_fdtd",
+    "use_backend",
     "setup_sparams_simulation",
     "sources_from_gds_ports",
     "unfold_array",
