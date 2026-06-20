@@ -10,12 +10,12 @@ The thesis: Apple **unified memory** (up to 512 GB) is the decisive advantage fo
 ## Data flow
 
 ```
-            ┌─────────────── host (CPU / numpy) ───────────────┐      ┌──── Metal GPU (MLX) ────┐
- config ──► │ geometry → voxelization → subpixel smoothing(WS-C)│      │  forward time loop:     │
- (pydantic) │ → material tensor arrays (1/3/9-component)         │ ───► │   curl → E/H update     │
+            ┌─────────────── host (CPU / numpy) ────────────────┐       ┌──── Metal GPU (MLX) ─────┐
+ config ──► │ geometry → voxelization → subpixel smoothing(WS-C)│       │  forward time loop:      │
+ (pydantic) │ → material tensor arrays (1/3/9-component)        │ ───►  │   curl → E/H update      │
             │ PML profiles, source temporal profiles            │ bridge│   → CPML → source inject │
             │ mode solve (WS-B, scipy sparse eig)               │ np→mx │   → detector accumulate  │
-            └───────────────────────────────────────────────────┘      └──────────────────────────┘
+            └───────────────────────────────────────────────────┘       └──────────────────────────┘
                                                                               │
                                                             results (fields, flux, phasors) ──► viz / HDF5
 ```
