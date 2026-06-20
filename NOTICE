@@ -1,0 +1,27 @@
+FDTDMEX
+Copyright 2026 Jinge Wang
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+NOTE: The license above is a PROVISIONAL placeholder. Final licensing for this
+project is owner-managed and will be reconciled by the project owner before any
+public distribution, including reconciliation of any code derived from the
+references below.
+
+------------------------------------------------------------------------------
+Heritage and references (not vendored into this repository):
+
+  * FDTDX  (https://github.com/ymahlau/fdtdx) — MIT License.
+    The JAX-based solver whose forward update equations, Yee-grid conventions,
+    PML formulation, source/detector design, and material model inform this
+    project. Used as the primary porting reference and CPU cross-check oracle.
+
+  * MEEP   (https://github.com/NanoComp/meep) — GNU GPL v2+.
+    Consulted for its subpixel-smoothing (anisotropic averaging) and
+    near-to-far-field algorithms. Because MEEP is GPL, any code derived from
+    MEEP's source must have its licensing reconciled by the owner before
+    distribution. See docs/licensing.md.
+
+Both references live as sibling directories (../fdtdx, ../meep) in the
+development workspace and are intentionally NOT copied into this repository.
+------------------------------------------------------------------------------

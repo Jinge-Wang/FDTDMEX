@@ -1,0 +1,14 @@
+# Normalize line endings
+* text=auto eol=lf
+
+# Treat these as binary
+*.h5 binary
+*.hdf5 binary
+*.vti binary
+*.vtr binary
+*.npy binary
+*.npz binary
+*.mp4 binary
+*.png binary
+*.gds binary
+*.stl binary

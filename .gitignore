@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.installed.cfg
+*.egg
+
+# Virtual envs / package managers
+.venv/
+venv/
+env/
+.uv/
+uv.lock
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.ruff_cache/
+.mypy_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Simulation artifacts / large outputs
+*.h5
+*.hdf5
+*.vti
+*.vtr
+*.npy
+*.npz
+*.mp4
+outputs/
+results/
+data/
+
+# Web UI (node)
+web/node_modules/
+web/dist/
+web/.vite/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
