@@ -50,8 +50,7 @@ import fdtdmex  # noqa: F401  (currently stubs)
 ## Repository layout
 
 ```
-src/fdtdmex/      core package (backend, core, fdtd, materials[, smoothing],
-                  geometry, sources, detectors, modes, io, viz)
+src/fdtdmex/      core package (backend, core, fdtd, materials[, smoothing], geometry, sources, detectors, modes, io, viz)
 server/           MCP server (WS-D)
 web/              web UI (WS-D, placeholder)
 docs/             architecture, physics, porting notes, workstream specs
