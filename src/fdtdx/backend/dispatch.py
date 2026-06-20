@@ -40,7 +40,9 @@ def _supported_source_types() -> tuple:
 
 
 def _supported_detector_types() -> tuple:
-    return ()  # M1a compares fields directly; detectors land in M1b.
+    from fdtdx.objects.detectors.energy import EnergyDetector
+
+    return (EnergyDetector,)
 
 
 _warned_reasons: set[str] = set()
@@ -66,6 +68,8 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     for d in objects.detectors:
         if not isinstance(d, supported_detectors):
             return f"detector type {type(d).__name__} not supported by the MLX backend yet"
+        if getattr(d, "as_slices", False):
+            return f"{type(d).__name__}(as_slices=True) not supported by the MLX backend yet"
 
     return None
 
@@ -119,7 +123,8 @@ def maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition):
 def _run_mlx_forward(arrays, objects, config):
     import jax.numpy as jnp
 
-    from fdtdx.mlx.bridge import to_array_container, to_mlx_state
+    from fdtdx.mlx.bridge import buffers_to_detector_states, to_array_container, to_mlx_state
+    from fdtdx.mlx.detector_freeze import allocate_buffers, freeze_detectors
     from fdtdx.mlx.loop import run_forward_mlx
     from fdtdx.mlx.source_freeze import freeze_sources
 
@@ -128,10 +133,15 @@ def _run_mlx_forward(arrays, objects, config):
 
     state = to_mlx_state(arrays, config)
     source_plans = freeze_sources(objects, config)
+    detector_plans = freeze_detectors(objects, config)
+    detector_buffers = allocate_buffers(detector_plans)
     num_steps = int(config.time_steps_total)
     c = float(config.courant_number)
 
-    state = run_forward_mlx(state, source_plans, num_steps, c, simulate_boundaries=True)
+    state, detector_buffers = run_forward_mlx(
+        state, source_plans, detector_plans, detector_buffers, num_steps, c, simulate_boundaries=True
+    )
 
-    out_arrays = to_array_container(arrays, state)
+    detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
+    out_arrays = to_array_container(arrays, state, detector_states)
     return jnp.asarray(num_steps, dtype=jnp.int32), out_arrays

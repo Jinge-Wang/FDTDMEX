@@ -53,6 +53,11 @@ def to_mlx_state(arrays, config) -> MLXState:
     )
 
 
+def buffers_to_detector_states(buffers: dict[str, dict[str, mx.array]]) -> dict[str, dict]:
+    """Convert MLX detector buffers back to host (jnp) detector_states."""
+    return {name: {key: _to_jnp(buf) for key, buf in bufs.items()} for name, bufs in buffers.items()}
+
+
 def to_array_container(template_arrays, state: MLXState, detector_states=None):
     """Write MLX field results (and optional detector states) back into the container."""
     arrays = template_arrays
