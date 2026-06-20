@@ -1,23 +1,16 @@
-"""FDTDMEX — forward-first, Metal-native FDTD electromagnetics on Apple Silicon (MLX).
+"""FDTDMEX — brand alias for the fdtdx fork with the MLX (Metal) forward backend.
 
-This package is currently a **pre-implementation scaffold**: subpackages define the intended
-structure with docstrings and ``NotImplementedError`` stubs. See ``docs/`` for the architecture,
-physics conventions, and roadmap, and ``CLAUDE.md`` for agent/contributor guidance.
-
-Subpackages
------------
-backend     MLX helpers (dtype/device, ``mx.compile`` wrappers, complex, np<->mx bridge).
-core        config schema, constants, grid (uniform + non-uniform cell-size arrays), typing.
-fdtd        WS-A forward engine: curl, E/H update, CPML, time loop.
-materials   material model + dispersion (ADE); ``materials.smoothing`` = WS-C subpixel smoothing.
-geometry    shapes, GDS import, voxelization, continuous-epsilon evaluator (feeds smoothing).
-sources     plane / dipole / TFSF + mode injection.
-detectors   field / energy / Poynting / phasor + mode overlap.
-modes       WS-B finite-difference mode solver + overlap.
-io          (de)serialization: pydantic config <-> JSON, HDF5 results, FDTDX array-bridge.
-viz         plotting / export (matplotlib, plotly; pyvista/trame for 3D/web).
+This package is a thin alias kept for brand/back-compat continuity. The real engine,
+including the forward MLX backend under :mod:`fdtdx.backend` and :mod:`fdtdx.mlx`, lives
+in :mod:`fdtdx`. Prefer ``import fdtdx``; ``import fdtdmex`` simply re-exports the full
+fdtdx public API.
 """
 
-from fdtdmex._version import __version__
+from importlib.metadata import PackageNotFoundError, version
 
-__all__ = ["__version__"]
+from fdtdx import *  # noqa: F401,F403
+
+try:
+    __version__ = version("fdtdx")
+except PackageNotFoundError:  # pragma: no cover
+    __version__ = "0.0.0"
