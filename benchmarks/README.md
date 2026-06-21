@@ -1,9 +1,47 @@
 # benchmarks/
 
-Performance harnesses (added later). Planned:
+Forward-engine performance harness: **MLX (Metal GPU) vs JAX (CPU)** on one Apple-Silicon
+machine. See [`docs/perf-eval-plan.md`](../docs/perf-eval-plan.md) for methodology and
+[`docs/perf-baseline.md`](../docs/perf-baseline.md) for the measured baseline + findings.
 
-- MLX-GPU vs JAX-CPU (and JAX-Metal if it runs) on identical cases.
-- Scaling toward unified-memory limits (isotropic vs full-anisotropic footprints).
-- Per-step time vs grid size; `mx.compile` graph-bounding effects.
+## Run
 
-Status: empty placeholder.
+```bash
+# headline scaling sweep (both backends, 3 materials, representative step count)
+uv run python benchmarks/bench_forward.py \
+    --backends mlx,jax --materials isotropic,diagonal,full_aniso \
+    --sizes 32,48,64,96,128,160,192 --steps 250 --repeats 2 \
+    --out benchmarks/results/forward.jsonl
+
+# then plot (4-panel: throughput, wall-clock, MLX/JAX speedup, peak memory)
+uv run python benchmarks/plot_results.py benchmarks/results/forward.jsonl
+```
+
+Results land in `benchmarks/results/<file>.jsonl` (one JSON record per cell, flushed after
+each cell; first line is a metadata record with chip / RAM / mlx & jax versions / device
+split / git commit). Figures land in `outputs/`.
+
+### Useful flags
+
+- `--steps N` fixed time-step count per run (the harness pins `time = N·dt`; dt is constant for
+  fixed spacing, so every cell runs the same number of steps). **Use a representative count
+  (≥200)** — at very short runs the MLX per-call bridge cost is not amortized.
+- `--sizes` cubic side lengths `N` (cells = N³). The CLI lets you cap the max `N` to your machine.
+- `--detector none|energy` — `none` (default) times the pure update loop; `energy` adds one
+  reduce-volume `EnergyDetector`.
+- `--isolate` runs **each cell in a fresh subprocess**: slower (re-imports per cell) but gives a
+  clean per-cell process-RSS peak for *both* backends and isolates OOM/crashes (a child dying does
+  not kill the sweep). **Recommended for the memory / max-domain-size run** — in the default
+  in-process mode, `ru_maxrss` is a monotonic high-water mark (coarse for JAX); MLX peak memory
+  (`mx.get_peak_memory`) is exact in either mode.
+- `--single backend:material:N` runs exactly one cell (used internally by `--isolate`; also handy
+  for a one-off).
+
+## What it measures
+
+Per `(backend, material, size)` cell: median wall-clock of `run_fdtd` over `--repeats` timed runs
+(after 1 warmup), throughput in **Mcell·steps/s** = `cells·steps/seconds`, MLX exact peak/active
+GPU memory, and process RSS. The case is a cubic domain uniformly filled with one material
+(`isotropic` / `diagonal` / `full_aniso` (9-tensor) / `iso_conductive`), CPML on all sides, a
+point-dipole source, no detector by default. Backends are forced with `fdtdx.use_backend(...)`;
+the harness asserts **MLX → Metal GPU** and **JAX → CPU** at startup and records both device lists.

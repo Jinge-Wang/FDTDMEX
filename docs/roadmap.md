@@ -18,8 +18,14 @@ Validation suites: `tests/validation/test_mlx_parity.py` (uniform), `tests/valid
 **Not yet on MLX (gated → JAX):** dispersion (ADE), lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, mode sources/detectors, gradients. The dispatcher (`src/fdtdx/backend/dispatch.py`) declines these and falls back to the unchanged JAX engine.
 
 ### Next on WS-A (performance — currently the engine is eager)
-- **`mx.compile` the per-step body.** The time loop is a plain eager Python `for` with periodic `mx.eval`; wrapping the step in `mx.compile` (time-step + amplitude scalars as compiled args, host-side source/detector gating) is the main forward-perf lever and is not yet done.
-- **Benchmark Metal vs JAX-CPU/CUDA** on a large full-tensor anisotropic domain (the unified-memory thesis) and profile.
+- **Baseline measured** ([perf-baseline.md](perf-baseline.md), M4 Pro): the eager engine's Metal throughput **plateaus** (~97 Mcell·steps/s iso, ~61 full_aniso) and is **~2× behind JAX-CPU at large domains** (JAX's jit'd `lax.scan` keeps scaling to ~190). MLX wins only at small–medium domains; crossover ≈ N=64–96. Raising the step count does *not* lift MLX's plateau → the bottleneck is per-step eager overhead + **lack of fusion** (out-of-place stencils → full DRAM round-trip per op), not per-call bridge cost.
+- **Root cause measured (~4× headroom, *not* bandwidth):** the plateau is redundant per-step traffic, not the 273 GB/s roofline — the engine's useful work is only ~9 GB/s (~3% of the bus). A lean+compiled version of the same math hits ~443 vs ~104 Mcs/s ([perf-baseline.md §1a](perf-baseline.md), `benchmarks/microbench_fusion.py`). Levers, in order of payoff/cheapness:
+  1. **Drop no-op elementwise work (~2×, cheapest).** Skip the metric `* 1.0` multiply on uniform grids, the `inv_kappa`/ψ terms outside the PML, and the per-step `mx.stack` of the 6 ψ components — all full-domain DRAM round-trips for no-ops (`curl.py`).
+  2. **`mx.compile` the per-step body (~1.4×).** Fuse diff→metric→ψ→curl→update so intermediates stay off DRAM; pass time-step/amplitude scalars as compiled args, keep source/detector gating host-side.
+  3. **Remove per-step padding (~1.3×).** `pad_fields_mlx` copies the whole field 3× per field per step; use slice-based differences instead.
+  4. **Restrict CPML to the boundary slabs (~1.36×, grows with N).** ψ runs over the full domain but is nonzero only in the ~8-cell PML; this is why the plateau doesn't improve with N.
+  Re-run [`benchmarks/bench_forward.py`](../benchmarks/bench_forward.py) against `matched_s250.jsonl` after each. Beyond ~4× the ceiling is strided/uncoalesced access from the `(3,N,N,N)` layout → needs a custom Metal stencil kernel (later).
+- **Hardware caveat:** numbers are M4 Pro-specific (modest GPU + strong CPU on one shared bus). An M-series Max/Ultra shifts the balance toward MLX. The **unified-memory advantage is capacity, not speed** — MLX addresses huge full-tensor domains (RAM-bound, up to 512 GB on Ultra) that would exceed a discrete GPU's VRAM; orthogonal to the throughput comparison.
 
 ## WS-C — Subpixel smoothing (parallel with WS-A)
 Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150 core lines) + `chi1p1` continuous-ε evaluator; validate vs MEEP. **~2 weeks.** Requires WS-A's tensor path to consume output.
@@ -52,7 +58,9 @@ These features **already exist in upstream fdtdx's JAX engine**; the dispatcher 
 - **χ² nonlinear** (local NL-polarization term in the E-update; forward-only): impl ~3–5 d + SHG validation ~1 wk.
 
 ## Suggested order
-**WS-A ✅ → perf evaluation ([perf-eval-plan.md](perf-eval-plan.md)) → `mx.compile` perf pass + re-benchmark → WS-C → WS-B → WS-D (MCP first, then web UI).** The "already in fdtdx" features above are cheap and demand-driven — pull any forward whenever a use case needs it.
+**Active plan: [../ACTION_PLAN.md](../ACTION_PLAN.md) — Metal forward performance is the current top priority.** Phase 1 (fix the eager plateau: drop no-op elementwise → `mx.compile` → remove per-step padding → slab CPML; ~4× measured headroom) → Phase 2 (deep-GPU feasibility: coalescing / layout / hand-rolled Metal kernel) → Phase 3 (broaden: lossy-aniso, PEC/PMC, ADE — low effort).
+
+Longer arc: **WS-A ✅ → perf eval ([perf-eval-plan.md](perf-eval-plan.md)) ✅ ([perf-baseline.md](perf-baseline.md)) → Metal perf (ACTION_PLAN Phase 1/2) → WS-C → WS-B → WS-D (MCP first, then web UI).** The "already in fdtdx" features are cheap and demand-driven — pull any forward whenever a use case needs it.
 
 ## Exposed potential issues (future exploration, after WS-D)
 
