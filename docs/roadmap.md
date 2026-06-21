@@ -1,16 +1,25 @@
 # Roadmap
 
-Estimates are part-time, AI-paired. Code generation is cheap; **physics validation and Metal perf are the long pole**. Status as of repo creation: **pre-implementation scaffold**.
+Estimates are part-time, AI-paired. Code generation is cheap; **physics validation and Metal perf are the long pole**.
 
-## WS-A — Forward MLX engine
+**Status:** WS-A (the forward MLX engine) is **complete and validated** through non-uniform grids. WS-B/C/D and the physics extensions are open.
 
-| Milestone | Scope | Impl | Validation |
-|---|---|---|---|
-| **MVP** | array bridge; curl + E/H (isotropic/diagonal) + CPML; 1 source; field/Poynting detector; Python+`mx.compile` loop | ~2–3 d | slab + waveguide + PML reflection + Courant: ~3–5 d |
-| **Full anisotropy** | per-cell 3×3 solve + spacing-weighted off-diagonal interpolation | ~1–2 d | birefringence/walk-off + element-wise vs FDTDX: ~3–5 d |
-| **Non-uniform grid** | spacing-weighted curl & interpolation throughout | folded into above | 2nd-order convergence on graded mesh |
+## WS-A — Forward MLX engine ✅ **complete**
 
-→ Validated full-anisotropic forward engine: **~2–3 weeks elapsed**.
+| Milestone | Scope | Status |
+|---|---|---|
+| **M1 — MVP** | array bridge; curl + E/H (isotropic/diagonal) + CPML; point-dipole source; Energy/Field detectors; Python time loop | ✅ done, element-wise vs JAX-CPU |
+| **M2 — sources/detectors/loss** | Uniform/Gaussian **TFSF** plane sources (+ tilted); Poynting + Phasor detectors; electric/magnetic conductivity | ✅ done, element-wise vs JAX-CPU |
+| **M3 — full anisotropy** | per-cell analytic 3×3 inverse + 9-tensor A/B update; tensor energy; periodic boundaries | ✅ done, element-wise vs JAX-CPU (uniform grid) + birefringence |
+| **M4 — non-uniform grid** | metric-scaled curl + spacing-weighted detector interpolation + **spacing-weighted off-diagonal anisotropic averaging** | ✅ done; iso/diag element-wise vs JAX, off-diagonal average **2nd-order on a graded mesh** (measured slope 2.00 vs 1.00 unweighted) — see [nonuniform-grid.md](nonuniform-grid.md) |
+
+Validation suites: `tests/validation/test_mlx_parity.py` (uniform), `tests/validation/test_mlx_nonuniform.py` (non-uniform + convergence), `tests/visualization/` (birefringence + convergence figures); fdtdx's own physics tests pass auto-routed to MLX.
+
+**Not yet on MLX (gated → JAX):** dispersion (ADE), lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, mode sources/detectors, gradients. The dispatcher (`src/fdtdx/backend/dispatch.py`) declines these and falls back to the unchanged JAX engine.
+
+### Next on WS-A (performance — currently the engine is eager)
+- **`mx.compile` the per-step body.** The time loop is a plain eager Python `for` with periodic `mx.eval`; wrapping the step in `mx.compile` (time-step + amplitude scalars as compiled args, host-side source/detector gating) is the main forward-perf lever and is not yet done.
+- **Benchmark Metal vs JAX-CPU/CUDA** on a large full-tensor anisotropic domain (the unified-memory thesis) and profile.
 
 ## WS-C — Subpixel smoothing (parallel with WS-A)
 Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150 core lines) + `chi1p1` continuous-ε evaluator; validate vs MEEP. **~2 weeks.** Requires WS-A's tensor path to consume output.
@@ -33,7 +42,7 @@ Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150
 - Near-to-far-field (port `../meep/src/near2far.cpp`): self-contained, optional.
 
 ## Suggested order
-**WS-A (MVP → anisotropic) + WS-C → WS-B → WS-D (MCP first, then web UI).**
+**WS-A ✅ → `mx.compile` perf pass + Metal benchmark → WS-C → WS-B → WS-D (MCP first, then web UI).** Dispersion (ADE) can slot in whenever a use case needs it.
 
 ## Strategic note
 Upstream FDTDX is being rewritten in **PyTorch** ("The Big Refactor," disc. #349) with a new Tidy3D-like API and **no timeline** (realistically 12–24 mo to parity). PyTorch's MPS backend has no FFT and weak complex support, so it would *not* give good native Metal anyway. This forward MLX engine is independent of that timeline and reusable as the seed of a future MLX backend.

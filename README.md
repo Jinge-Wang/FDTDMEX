@@ -9,7 +9,7 @@ inverse design) it runs the unchanged JAX engine. You keep fdtdx's entire mature
 import fdtdx   # this fork; the MLX backend is built in
 ```
 
-> **Status — early.** The MLX forward engine is live and validated element-wise against the JAX reference for the M1 surface: vacuum / isotropic-and-diagonal materials + CPML + a point-dipole source + an EnergyDetector. Plane/TFSF sources, more detectors, conductivity, full-anisotropic tensors, and spacing-weighted non-uniform grids are in progress. See [docs/roadmap.md](docs/roadmap.md).
+> **Status — forward engine complete (M1–M4), validated element-wise vs JAX.** The MLX forward engine handles isotropic / diagonal / **full-tensor (9-component) anisotropic** materials, electric & magnetic conductivity (lossy), CPML **and periodic** boundaries, point-dipole + (tilted) Gaussian/uniform **TFSF plane sources**, and Energy / Field / Poynting / Phasor detectors — on uniform **and non-uniform (rectilinear) grids** with spacing-weighted operators (2nd-order on graded meshes). Each surface is cross-checked element-wise against the JAX reference on CPU. Remaining work is dispersion (ADE), the mode solver, subpixel smoothing, and orchestration — see [docs/roadmap.md](docs/roadmap.md).
 
 ## Why a Mac fork
 
@@ -99,7 +99,7 @@ This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/m
 
 | | Workstream | Summary |
 |---|---|---|
-| **WS-A** | Forward MLX engine | Curl, E/H update (isotropic → full-anisotropic), CPML, sources, detectors, time loop. Non-uniform-grid-aware. *In progress (M1 live).* |
+| **WS-A** | Forward MLX engine | Curl, E/H update (isotropic → full-anisotropic), CPML + periodic boundaries, sources, detectors, time loop; spacing-weighted on non-uniform grids. **Complete (M1–M4), validated element-wise vs JAX.** |
 | **WS-B** | Mode solver | 2D-Yee full-vectorial FD eigensolver + mode overlap; TFSF injection. |
 | **WS-C** | Subpixel smoothing | Kottke/Farjadpour effective-tensor averaging as a host pre-step feeding WS-A. |
 | **WS-D** | Orchestration | Declarative config, MCP server, git-like history, locally-hosted web UI. |

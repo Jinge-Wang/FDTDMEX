@@ -2,6 +2,14 @@
 
 **Design requirement, not an afterthought.** FDTDMEX treats graded/non-uniform grids as first-class. FDTDX's anisotropic off-diagonal averaging is an *unweighted* 4-point mean, which is only 1st-order accurate on stretched grids. We carry per-axis **Yee cell-size arrays** through the engine and use **spacing-weighted** finite differences and interpolation, keeping the curl *and* the anisotropic coupling 2nd-order on graded meshes.
 
+> **Status — implemented & validated (M4).** The MLX engine threads per-axis cell widths through the curl ([`mlx/curl.py`](../src/fdtdx/mlx/curl.py) — metric-scaled differences), the detector interpolation ([`mlx/interpolate.py`](../src/fdtdx/mlx/interpolate.py)), and the anisotropic off-diagonal average ([`mlx/aniso.py`](../src/fdtdx/mlx/aniso.py)); widths are precomputed on the host in [`mlx/bridge.py`](../src/fdtdx/mlx/bridge.py). On a uniform grid every weighted form reduces *exactly* to the unweighted M3 path (verified element-wise). The off-diagonal average is **2nd-order on a graded mesh** where FDTDX's is 1st-order — measured convergence slopes **2.00 (weighted) vs 1.00 (unweighted)**:
+>
+> ![Convergence](images/nonuniform_convergence_mlx.png)
+>
+> Tests: `tests/validation/test_mlx_nonuniform.py`, `tests/visualization/test_nonuniform_convergence_visual.py`.
+>
+> **One subtlety the implementation gets right:** only the *center→edge* half-step is width-weighted; the *edge→center* half-step lands on the exact geometric cell-center midpoint and stays an unweighted mean. By the Yee staggering this means the **backward** roll is always the weighted one and the **forward** roll a plain mean — matching FDTDX's own `interpolate_fields`, which only weights its `_backward_edge_average` steps.
+
 ## Grid representation
 
 A rectilinear non-uniform grid is defined by **edge coordinates** per axis: `x_edges`, `y_edges`, `z_edges`. From these derive:
