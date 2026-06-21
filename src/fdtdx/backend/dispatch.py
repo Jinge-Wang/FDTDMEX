@@ -93,14 +93,17 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
 
 def _unsupported_reason_arrays(arrays) -> str | None:
     """Material/array-level support checks (need the ArrayContainer)."""
-    if arrays.inv_permittivities.shape[0] == 9:
-        return "full-anisotropic permittivity (9-tensor) not supported yet (M3)"
     inv_mu = arrays.inv_permeabilities
-    if getattr(inv_mu, "ndim", 0) > 0 and inv_mu.shape[0] == 9:
-        return "full-anisotropic permeability (9-tensor) not supported yet (M3)"
+    eps9 = arrays.inv_permittivities.shape[0] == 9
+    mu9 = getattr(inv_mu, "ndim", 0) > 0 and inv_mu.shape[0] == 9
+    has_conductivity = arrays.electric_conductivity is not None or arrays.magnetic_conductivity is not None
+
+    # Lossless full-tensor (9-component) anisotropy is supported (M3); lossy-anisotropic is not.
+    if (eps9 or mu9) and has_conductivity:
+        return "lossy full-anisotropic materials not supported yet"
     for label, sigma in (("electric", arrays.electric_conductivity), ("magnetic", arrays.magnetic_conductivity)):
         if sigma is not None and getattr(sigma, "ndim", 0) > 0 and sigma.shape[0] == 9:
-            return f"full-anisotropic {label} conductivity (9-tensor) not supported yet (M3)"
+            return f"full-anisotropic {label} conductivity (9-tensor) not supported yet"
     if arrays.dispersive_c1 is not None:
         return "dispersive (ADE) materials not supported yet"
     return None

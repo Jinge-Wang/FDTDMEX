@@ -11,9 +11,21 @@ from typing import Any
 
 import mlx.core as mx
 
+from fdtdx.mlx.aniso import expand_to_3x3_mlx, inv3x3, quad_form3
+
+
+def _is_full_tensor(arr) -> bool:
+    return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
+
 
 def compute_energy_mlx(E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> mx.array:
-    """Energy density, shape (Nx, Ny, Nz). inv_eps/inv_mu may be (1|3, ...) arrays or scalars."""
+    """Energy density, shape (Nx, Ny, Nz). inv_eps/inv_mu may be (1|3|9, ...) arrays or scalars."""
+    if _is_full_tensor(inv_eps) or _is_full_tensor(inv_mu):
+        # Full-tensor: 0.5 * sum_ij F_i eps_ij F_j with eps = inv(inv_eps). Real fields -> conj no-op.
+        eps = inv3x3(expand_to_3x3_mlx(inv_eps))
+        mu = inv3x3(expand_to_3x3_mlx(inv_mu))
+        return 0.5 * quad_form3(E, eps) + 0.5 * quad_form3(H, mu)
+
     E_sq = mx.square(mx.abs(E))
     energy_E = mx.sum(0.5 * (1.0 / inv_eps) * E_sq, axis=0)
 

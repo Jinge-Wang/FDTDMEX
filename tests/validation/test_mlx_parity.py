@@ -286,6 +286,32 @@ def test_diagonal_anisotropy_matches_jax():
         assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL
 
 
+def test_full_anisotropy_matches_jax():
+    """Full-tensor (9-component, off-diagonal) permittivity with a dipole source."""
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=_TIME, dtype=jnp.float32)
+    objects, constraints = [], []
+    eps_tensor = ((2.5, 0.5, 0.0), (0.5, 3.0, 0.0), (0.0, 0.0, 4.0))  # symmetric, positive-definite
+    vol = fdtdx.SimulationVolume(partial_real_shape=(_DOMAIN,) * 3, material=fdtdx.Material(permittivity=eps_tensor))
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    src = fdtdx.PointDipoleSource(
+        partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=1e-6), polarization=0
+    )
+    constraints.append(src.place_at_center(vol, axes=(0, 1, 2)))
+    objects.append(src)
+    det = fdtdx.EnergyDetector(name="E", reduce_volume=True, plot=False)
+    constraints.extend([det.same_size(vol, axes=(0, 1, 2)), det.place_at_center(vol, axes=(0, 1, 2))])
+    objects.append(det)
+
+    arr_j, arr_m = _run_both(objects, constraints, config)
+    assert np.asarray(arr_j.inv_permittivities).shape[0] == 9
+    for name in ("E", "H"):
+        assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL, f"field {name}"
+    assert _rel(arr_j.detector_states["E"]["energy"], arr_m.detector_states["E"]["energy"]) < _RTOL
+
+
 def test_auto_routes_to_mlx_on_apple_silicon():
     """With no override, a supported forward run auto-routes to MLX (== forced MLX)."""
     arrays, oc, config, key = _placed()
