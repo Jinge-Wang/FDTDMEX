@@ -75,8 +75,9 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
         if not isinstance(s, supported_sources):
             return f"source type {type(s).__name__} not supported by the MLX backend yet"
         if isinstance(s, LinearlyPolarizedPlaneSource):
-            if getattr(s, "azimuth_angle", 0.0) or getattr(s, "elevation_angle", 0.0):
-                return f"tilted plane source ({type(s).__name__}) not supported by the MLX backend yet"
+            # Tilt (azimuth/elevation) is fine: it bakes into the frozen _E/_H profiles and the
+            # per-cell Yee time offsets, which the source freeze handles. Randomized and dispersive
+            # plane sources are not yet supported.
             if (
                 getattr(s, "max_angle_random_offset", 0.0)
                 or getattr(s, "max_vertical_offset", 0.0)
