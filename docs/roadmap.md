@@ -36,13 +36,32 @@ Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150
 | Git-like branch/revert of prompt+tool history (app layer) | ~1–2 wk |
 | Web UI + Lumerical-like interactive 3D editor (plotly / pyvista-trame → three.js) | ~4–8 wk |
 
-## Physics extensions (as needed)
-- Dispersion (ADE Lorentz/Drude): impl ~3–5 d + val ~3–5 d.
-- χ² nonlinear (local NL-polarization term in E-update; forward-only): impl ~3–5 d + SHG val ~1 wk.
-- Near-to-far-field (port `../meep/src/near2far.cpp`): self-contained, optional.
+## Widening the MLX surface — already in fdtdx, just not ported yet (demand-driven)
+
+These features **already exist in upstream fdtdx's JAX engine**; the dispatcher (`src/fdtdx/backend/dispatch.py`) only gates them to JAX because the MLX *kernel* isn't ported. Adding each is the **same JAX→MLX port pattern as M1–M4** (translate the kernel, precompute any time-invariant coefficients on the host, add an element-wise parity test, un-gate) — **no MEEP needed**. They don't depend on or block WS-B/C/D; slot any of them in whenever a use case demands it.
+
+| Feature | Where it lives in fdtdx | MLX port effort |
+|---|---|---|
+| **Drude-Lorentz dispersion (ADE)** | [`dispersion.py`](../src/fdtdx/dispersion.py) + `fdtd/update.py` ADE block | low–medium: c1/c2/c3 are time-invariant → precompute on host like CPML; carry `P_curr`/`P_prev` in `MLXState`; add one `E += inv_eps·Σ(P_curr − P_new)` term; non-dispersive cells have c3=0 so it's inert elsewhere |
+| **Lossy (conductive) full-anisotropic** | the 9-tensor A/B update already takes `sigma` | low: `mlx/aniso.py` already has the A/B path; thread the σ tensor through `compute_anisotropic_update_matrices_mlx` and un-gate |
+| **PEC / PMC boundaries** | `objects/boundaries/{pec,pmc}.py` | low: a per-step field-masking pass in the MLX loop + un-gate |
+
+## Genuinely new physics (needs MEEP reference or new derivation)
+- **Subpixel smoothing** — WS-C; fdtdx lacks it (Kottke/Farjadpour, `../meep/src/anisotropic_averaging.cpp`).
+- **Near-to-far-field** — port `../meep/src/near2far.cpp`; self-contained, optional.
+- **χ² nonlinear** (local NL-polarization term in the E-update; forward-only): impl ~3–5 d + SHG validation ~1 wk.
 
 ## Suggested order
-**WS-A ✅ → `mx.compile` perf pass + Metal benchmark → WS-C → WS-B → WS-D (MCP first, then web UI).** Dispersion (ADE) can slot in whenever a use case needs it.
+**WS-A ✅ → perf evaluation ([perf-eval-plan.md](perf-eval-plan.md)) → `mx.compile` perf pass + re-benchmark → WS-C → WS-B → WS-D (MCP first, then web UI).** The "already in fdtdx" features above are cheap and demand-driven — pull any forward whenever a use case needs it.
+
+## Exposed potential issues (future exploration, after WS-D)
+
+Open robustness items surfaced while building the engine. **Both reproduce in pure JAX** (`fdtdx.use_backend("jax")`), so they are upstream fdtdx behavior, *not* MLX-port bugs — but they bound what the MLX engine can be trusted with and are worth a dedicated stability study later.
+
+- **Quirk A — strongly off-diagonal (9-tensor) anisotropy is unstable.** A full-tensor permittivity with a large off-diagonal element (e.g. a uniaxial crystal with optic axis rotated 45° in the x–z plane, `ε ≈ ((4.0,0,1.755),(0,2.25,0),(1.755,0,4.0))`) **diverges to NaN even at Courant 0.3**. A small off-diagonal (≈0.3–0.5) is stable. Likely the unweighted/weighted off-diagonal averaging and/or the explicit per-cell A/B update is not unconditionally stable for strong coupling. *Investigate:* von-Neumann-style stability analysis of the anisotropic update; whether a symmetrized average or a sub-Courant factor restores stability. Forced the birefringence demo to use a *diagonal* uniaxial crystal with oblique incidence instead of optic-axis walk-off.
+- **Quirk B — finite-aperture `GaussianPlaneSource` is unstable.** A Gaussian sized with a *partial* transverse aperture (`partial_real_shape` smaller than the domain) **NaNs**, while a **full-aperture** Gaussian (`same_size(vol, axes=(0,1))`, `radius` controlling the width) is stable; certain thin/periodic transverse dimensions also went unstable. *Investigate:* the TFSF profile construction / energy normalization in `objects/sources/linear_polarization.py:apply` for partial apertures and thin dimensions.
+
+Reproductions: vary the crystal off-diagonal / source aperture in `tests/visualization/test_birefringence_visual.py` and force JAX.
 
 ## Strategic note
 Upstream FDTDX is being rewritten in **PyTorch** ("The Big Refactor," disc. #349) with a new Tidy3D-like API and **no timeline** (realistically 12–24 mo to parity). PyTorch's MPS backend has no FFT and weak complex support, so it would *not* give good native Metal anyway. This forward MLX engine is independent of that timeline and reusable as the seed of a future MLX backend.
