@@ -18,7 +18,7 @@ footprint — which saturates the VRAM of a single CUDA GPU. Apple's **unified m
 
 Design priorities:
 - **Forward simulation on Metal**, race-free via MLX's functional / out-of-place updates.
-- **Full-tensor anisotropic, heterogeneous materials** as a first-class citizen.
+- **Full-tensor anisotropic, heterogeneous materials** are natively supported.
 - **Non-uniform grids done right** — spacing-weighted curl + interpolation, 2nd-order on graded meshes (see [docs/nonuniform-grid.md](docs/nonuniform-grid.md)), with convergence rate confirmed: ![Convergence plot](docs/images/nonuniform_convergence_mlx.png)
 - **Zero divergence from fdtdx semantics** so results cross-check element-wise against the JAX reference, and improvements can flow back upstream.
 
