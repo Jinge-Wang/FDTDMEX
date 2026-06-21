@@ -4,6 +4,8 @@ Mirrors each detector's ``update``. The detector sees interpolated E and the int
 time-averaged H when ``exact_interpolation`` is set (the default), else the raw E / raw new
 H — matching ``fdtdx.fdtd.update.update_detector_states``. The on/off + time->row mapping are
 host-precomputed, so an inactive step is skipped and the active row is a plain int.
+
+Supports EnergyDetector / FieldDetector / PoyntingFluxDetector (uniform grid).
 """
 
 from __future__ import annotations
@@ -13,13 +15,56 @@ from typing import Any
 import mlx.core as mx
 
 from fdtdx.mlx.detector_freeze import DetectorPlan
-from fdtdx.mlx.metrics import compute_energy_mlx
+from fdtdx.mlx.metrics import compute_energy_mlx, compute_poynting_flux_mlx
 
 
 def _slice_material(mat: Any, grid_slice: tuple) -> Any:
     if hasattr(mat, "ndim") and getattr(mat, "ndim", 0) > 0:
         return mat[(slice(None), *grid_slice)]
     return mat
+
+
+def _volume_weighted_spatial_mean(values: mx.array, weights: mx.array, leading_dims: int) -> mx.array:
+    """Average over the trailing spatial axes weighted by physical cell volumes."""
+    weight_shape = (1,) * leading_dims + weights.shape
+    spatial_axes = tuple(range(leading_dims, values.ndim))
+    return mx.sum(values * weights.reshape(weight_shape), axis=spatial_axes) / mx.sum(weights)
+
+
+def _record_energy(p: DetectorPlan, E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> mx.array:
+    sl = (slice(None), *p.grid_slice)
+    energy = compute_energy_mlx(
+        E[sl], H[sl], _slice_material(inv_eps, p.grid_slice), _slice_material(inv_mu, p.grid_slice)
+    )
+    if p.reduce_volume:
+        return mx.sum(energy * p.cell_volume_weights).reshape(1)
+    return energy
+
+
+def _record_field(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
+    Esl = E[(slice(None), *p.grid_slice)]
+    Hsl = H[(slice(None), *p.grid_slice)]
+    parts = [(Esl[idx] if which == "E" else Hsl[idx]) for which, idx in p.component_picks]
+    EH = mx.stack(parts, axis=0)
+    if p.reduce_volume:
+        EH = _volume_weighted_spatial_mean(EH, p.cell_volume_weights, leading_dims=1)
+    return EH
+
+
+def _record_poynting(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
+    Esl = E[(slice(None), *p.grid_slice)]
+    Hsl = H[(slice(None), *p.grid_slice)]
+    pf = compute_poynting_flux_mlx(Esl, Hsl)
+    if not p.keep_all_components:
+        pf = pf[p.propagation_axis]
+    pf = p.direction_sign * pf
+    if p.reduce_volume:
+        pf = pf * p.face_area_weights
+        if p.keep_all_components:
+            pf = mx.sum(pf, axis=(1, 2, 3))
+        else:
+            pf = mx.sum(pf).reshape(1)
+    return pf
 
 
 def update_detectors(
@@ -38,20 +83,16 @@ def update_detectors(
         if not bool(p.on_steps[n]):
             continue
         row = int(p.time_to_idx[n])
-
         E = E_interp if p.exact_interp else E_raw
         H = H_interp if p.exact_interp else H_raw
 
         if p.kind == "energy":
-            sl = (slice(None), *p.grid_slice)
-            energy = compute_energy_mlx(
-                E[sl], H[sl], _slice_material(inv_eps, p.grid_slice), _slice_material(inv_mu, p.grid_slice)
-            )
-            if p.reduce_volume:
-                value = mx.sum(energy * p.cell_volume_weights).reshape(1)
-            else:
-                value = energy
-            buf = buffers[p.name]["energy"]
-            buf[row] = value
+            value = _record_energy(p, E, H, inv_eps, inv_mu)
+        elif p.kind == "field":
+            value = _record_field(p, E, H)
+        elif p.kind == "poynting":
+            value = _record_poynting(p, E, H)
         else:  # pragma: no cover - guarded by the dispatcher
             raise NotImplementedError(f"MLX detector accumulate not implemented for kind={p.kind}")
+
+        buffers[p.name][p.buffer_key][row] = value

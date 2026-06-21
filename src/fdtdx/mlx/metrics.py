@@ -21,3 +21,17 @@ def compute_energy_mlx(E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> m
     energy_H = mx.sum(0.5 * (1.0 / inv_mu) * H_sq, axis=0)
 
     return energy_E + energy_H
+
+
+def compute_poynting_flux_mlx(E: mx.array, H: mx.array) -> mx.array:
+    """Poynting vector S = E x conj(H), shape (3, Nx, Ny, Nz).
+
+    Returns the real part (real fields -> conj is a no-op), matching
+    ``compute_poynting_flux(...).real`` as consumed by PoyntingFluxDetector.
+    """
+    Hc = mx.conjugate(H) if H.dtype in (mx.complex64,) else H
+    Sx = E[1] * Hc[2] - E[2] * Hc[1]
+    Sy = E[2] * Hc[0] - E[0] * Hc[2]
+    Sz = E[0] * Hc[1] - E[1] * Hc[0]
+    S = mx.stack([Sx, Sy, Sz], axis=0)
+    return S.real if S.dtype in (mx.complex64,) else S

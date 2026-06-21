@@ -41,8 +41,10 @@ def _supported_source_types() -> tuple:
 
 def _supported_detector_types() -> tuple:
     from fdtdx.objects.detectors.energy import EnergyDetector
+    from fdtdx.objects.detectors.field import FieldDetector
+    from fdtdx.objects.detectors.poynting_flux import PoyntingFluxDetector
 
-    return (EnergyDetector,)
+    return (EnergyDetector, FieldDetector, PoyntingFluxDetector)
 
 
 _warned_reasons: set[str] = set()
@@ -81,8 +83,9 @@ def _unsupported_reason_arrays(arrays) -> str | None:
     inv_mu = arrays.inv_permeabilities
     if getattr(inv_mu, "ndim", 0) > 0 and inv_mu.shape[0] == 9:
         return "full-anisotropic permeability (9-tensor) not supported yet (M3)"
-    if arrays.electric_conductivity is not None or arrays.magnetic_conductivity is not None:
-        return "conductive (lossy) materials not supported yet (M2)"
+    for label, sigma in (("electric", arrays.electric_conductivity), ("magnetic", arrays.magnetic_conductivity)):
+        if sigma is not None and getattr(sigma, "ndim", 0) > 0 and sigma.shape[0] == 9:
+            return f"full-anisotropic {label} conductivity (9-tensor) not supported yet (M3)"
     if arrays.dispersive_c1 is not None:
         return "dispersive (ADE) materials not supported yet"
     return None
