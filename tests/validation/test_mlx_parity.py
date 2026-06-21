@@ -220,6 +220,72 @@ def test_gaussian_plane_source_matches_jax():
     assert _rel(arr_j.detector_states["PF"]["poynting_flux"], arr_m.detector_states["PF"]["poynting_flux"]) < _RTOL
 
 
+def test_phasor_detector_matches_jax():
+    """PhasorDetector (complex running DFT), reduce + full, on a plane wave."""
+    wc = fdtdx.WaveCharacter(wavelength=1.55e-6)
+    n, pml = 32, 8
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=100e-9), time=30e-15, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(n * 100e-9,) * 3)
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=pml), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    src = fdtdx.UniformPlaneSource(
+        partial_grid_shape=(None, None, 1),
+        fixed_E_polarization_vector=(1, 0, 0),
+        wave_character=wc,
+        direction="+",
+    )
+    constraints.extend(
+        [
+            src.same_size(vol, axes=(0, 1)),
+            src.place_at_center(vol, axes=(0, 1)),
+            src.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(pml + 2,)),
+        ]
+    )
+    objects.append(src)
+    ph = fdtdx.PhasorDetector(name="ph", wave_characters=(wc,), components=("Ex", "Hy"), reduce_volume=True)
+    constraints.extend(
+        [
+            ph.same_size(vol, axes=(0, 1)),
+            ph.place_at_center(vol, axes=(0, 1)),
+            ph.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(n // 2,)),
+        ]
+    )
+    objects.append(ph)
+    phf = fdtdx.PhasorDetector(name="phf", wave_characters=(wc,), components=("Ex", "Hy"), reduce_volume=False)
+    constraints.extend([phf.same_size(vol, axes=(0, 1, 2)), phf.place_at_center(vol, axes=(0, 1, 2))])
+    objects.append(phf)
+
+    arr_j, arr_m = _run_both(objects, constraints, config)
+    assert np.asarray(arr_j.detector_states["ph"]["phasor"]).dtype == np.complex64
+    assert _rel(arr_j.detector_states["ph"]["phasor"], arr_m.detector_states["ph"]["phasor"]) < _RTOL
+    assert _rel(arr_j.detector_states["phf"]["phasor"], arr_m.detector_states["phf"]["phasor"]) < _RTOL
+
+
+def test_diagonal_anisotropy_matches_jax():
+    """Diagonal-anisotropic permittivity (3-tensor) with a dipole source."""
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=_TIME, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(
+        partial_real_shape=(_DOMAIN,) * 3, material=fdtdx.Material(permittivity=(2.0, 3.0, 4.0))
+    )
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    src = fdtdx.PointDipoleSource(
+        partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=1e-6), polarization=0
+    )
+    constraints.append(src.place_at_center(vol, axes=(0, 1, 2)))
+    objects.append(src)
+
+    arr_j, arr_m = _run_both(objects, constraints, config)
+    for name in ("E", "H"):
+        assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL
+
+
 def test_auto_routes_to_mlx_on_apple_silicon():
     """With no override, a supported forward run auto-routes to MLX (== forced MLX)."""
     arrays, oc, config, key = _placed()

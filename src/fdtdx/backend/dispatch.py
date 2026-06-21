@@ -43,9 +43,10 @@ def _supported_source_types() -> tuple:
 def _supported_detector_types() -> tuple:
     from fdtdx.objects.detectors.energy import EnergyDetector
     from fdtdx.objects.detectors.field import FieldDetector
+    from fdtdx.objects.detectors.phasor import PhasorDetector
     from fdtdx.objects.detectors.poynting_flux import PoyntingFluxDetector
 
-    return (EnergyDetector, FieldDetector, PoyntingFluxDetector)
+    return (EnergyDetector, FieldDetector, PoyntingFluxDetector, PhasorDetector)
 
 
 _warned_reasons: set[str] = set()

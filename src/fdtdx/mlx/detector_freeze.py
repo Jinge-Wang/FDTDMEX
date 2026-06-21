@@ -5,9 +5,9 @@ are allocated from the detector's own ``init_state`` contract (``_shape_dtype_si
 x ``_num_latent_time_steps``) so the round-tripped ``detector_states`` are indistinguishable
 from a JAX run and downstream ``draw_plot`` / S-params need no changes.
 
-Supports EnergyDetector, FieldDetector and PoyntingFluxDetector (uniform grid; the
-EnergyDetector slice mode still falls back to JAX). The on/off + time->row mapping are
-host-precomputed.
+Supports EnergyDetector, FieldDetector, PoyntingFluxDetector and PhasorDetector (uniform
+grid; the EnergyDetector slice mode still falls back to JAX). The on/off + time->row mapping
+are host-precomputed; the phasor accumulates into a single latent row.
 """
 
 from __future__ import annotations
@@ -19,12 +19,14 @@ import numpy as np
 
 from fdtdx.objects.detectors.energy import EnergyDetector
 from fdtdx.objects.detectors.field import FieldDetector
+from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.detectors.poynting_flux import PoyntingFluxDetector
 
 _DTYPE_MAP = {
     "float32": mx.float32,
     "float64": mx.float32,  # MLX GPU is float32-first
     "complex64": mx.complex64,
+    "complex128": mx.complex64,
 }
 
 _COMPONENT_PICKS = {
@@ -53,8 +55,8 @@ class DetectorPlan:
     """Frozen per-detector recording metadata. Kind-specific fields are optional."""
 
     name: str
-    kind: str  # "energy" | "field" | "poynting"
-    buffer_key: str  # "energy" | "fields" | "poynting_flux"
+    kind: str  # "energy" | "field" | "poynting" | "phasor"
+    buffer_key: str  # "energy" | "fields" | "poynting_flux" | "phasor"
     grid_slice: tuple
     on_steps: np.ndarray
     time_to_idx: np.ndarray
@@ -62,15 +64,18 @@ class DetectorPlan:
     reduce_volume: bool
     buffer_shapes: dict[str, tuple]
     buffer_dtypes: dict[str, mx.Dtype]
-    # energy / field (reduce): physical cell-volume weights, shape (Nx, Ny, Nz)
+    # energy / field / phasor (reduce): physical cell-volume weights, shape (Nx, Ny, Nz)
     cell_volume_weights: mx.array | None = None
-    # field: ordered list of (which_field, component_index)
+    # field / phasor: ordered list of (which_field, component_index)
     component_picks: list = field(default_factory=list)
     # poynting
     keep_all_components: bool = False
     propagation_axis: int = 0
     direction_sign: float = 1.0
     face_area_weights: mx.array | None = None
+    # phasor: per-step exp(i*omega*n*dt) factors (T, num_freqs) complex, and the static scale
+    phasors: mx.array | None = None
+    static_scale: float = 1.0
 
 
 def _buffers_meta(d):
@@ -97,16 +102,13 @@ def _common(d, kind, buffer_key):
     )
 
 
-def _energy_plan(d: EnergyDetector) -> DetectorPlan:
+def _energy_plan(d: EnergyDetector, config) -> DetectorPlan:
     if d.as_slices:
         raise NotImplementedError("EnergyDetector(as_slices=True) not supported on MLX yet")
-    return DetectorPlan(
-        **_common(d, "energy", "energy"),
-        cell_volume_weights=_to_mx(d._cached_cell_volume_weights),
-    )
+    return DetectorPlan(**_common(d, "energy", "energy"), cell_volume_weights=_to_mx(d._cached_cell_volume_weights))
 
 
-def _field_plan(d: FieldDetector) -> DetectorPlan:
+def _field_plan(d: FieldDetector, config) -> DetectorPlan:
     return DetectorPlan(
         **_common(d, "field", "fields"),
         cell_volume_weights=_to_mx(d._cached_cell_volume_weights),
@@ -114,7 +116,7 @@ def _field_plan(d: FieldDetector) -> DetectorPlan:
     )
 
 
-def _poynting_plan(d: PoyntingFluxDetector) -> DetectorPlan:
+def _poynting_plan(d: PoyntingFluxDetector, config) -> DetectorPlan:
     plan = DetectorPlan(
         **_common(d, "poynting", "poynting_flux"),
         keep_all_components=bool(d.keep_all_components),
@@ -126,10 +128,32 @@ def _poynting_plan(d: PoyntingFluxDetector) -> DetectorPlan:
     return plan
 
 
+def _phasor_plan(d: PhasorDetector, config) -> DetectorPlan:
+    dt = float(config.time_step_duration)
+    num_steps = int(config.time_steps_total)
+    omega = np.asarray(d._angular_frequencies)  # (num_freqs,)
+    times = np.arange(num_steps, dtype=np.float64) * dt
+    phasors = np.exp(1j * omega[None, :] * times[:, None]).astype(np.complex64)  # (T, num_freqs)
+    if d.scaling_mode == "continuous":
+        static_scale = 2.0 / int(d._num_time_steps_on)
+    elif d.scaling_mode == "pulse":
+        static_scale = 1.0
+    else:
+        raise NotImplementedError(f"PhasorDetector scaling_mode={d.scaling_mode!r} not supported on MLX yet")
+    return DetectorPlan(
+        **_common(d, "phasor", "phasor"),
+        cell_volume_weights=_to_mx(d._cached_cell_volume_weights),
+        component_picks=[_COMPONENT_PICKS[c] for c in d.components],
+        phasors=_to_mx(phasors),
+        static_scale=static_scale,
+    )
+
+
 _BUILDERS = (
     (EnergyDetector, _energy_plan),
     (FieldDetector, _field_plan),
     (PoyntingFluxDetector, _poynting_plan),
+    (PhasorDetector, _phasor_plan),
 )
 
 
@@ -139,7 +163,7 @@ def freeze_detectors(objects, config) -> list[DetectorPlan]:
     for d in objects.forward_detectors:
         for cls, builder in _BUILDERS:
             if isinstance(d, cls):
-                plans.append(builder(d))
+                plans.append(builder(d, config))
                 break
         else:  # pragma: no cover - guarded by the dispatcher
             raise NotImplementedError(f"MLX detector freeze not implemented for {type(d).__name__}")

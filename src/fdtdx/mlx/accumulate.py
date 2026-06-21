@@ -25,10 +25,17 @@ def _slice_material(mat: Any, grid_slice: tuple) -> Any:
 
 
 def _volume_weighted_spatial_mean(values: mx.array, weights: mx.array, leading_dims: int) -> mx.array:
-    """Average over the trailing spatial axes weighted by physical cell volumes."""
-    weight_shape = (1,) * leading_dims + weights.shape
+    """Average over the trailing spatial axes weighted by physical cell volumes.
+
+    Weights are normalized to sum to 1 *before* the contraction. Physical cell volumes are
+    tiny (spacing**3, ~1e-21), and MLX complex/real division computes ``|denom|**2`` which
+    underflows in float32 for such small denominators — normalizing first avoids dividing by
+    a tiny number while staying mathematically identical.
+    """
+    norm_weights = weights / mx.sum(weights)
+    weight_shape = (1,) * leading_dims + norm_weights.shape
     spatial_axes = tuple(range(leading_dims, values.ndim))
-    return mx.sum(values * weights.reshape(weight_shape), axis=spatial_axes) / mx.sum(weights)
+    return mx.sum(values * norm_weights.reshape(weight_shape), axis=spatial_axes)
 
 
 def _record_energy(p: DetectorPlan, E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> mx.array:
@@ -67,6 +74,20 @@ def _record_poynting(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
     return pf
 
 
+def _record_phasor(p: DetectorPlan, E: mx.array, H: mx.array, n: int) -> mx.array:
+    Esl = E[(slice(None), *p.grid_slice)]
+    Hsl = H[(slice(None), *p.grid_slice)]
+    parts = [(Esl[idx] if which == "E" else Hsl[idx]) for which, idx in p.component_picks]
+    EH = mx.stack(parts, axis=0)  # (C, *grid) real
+
+    ph = p.phasors[n]  # (num_freqs,) complex
+    ph = ph.reshape((ph.shape[0], *(1,) * EH.ndim))  # (F, 1, 1, 1, 1)
+    new = (EH.astype(ph.dtype) * ph) * p.static_scale  # (F, C, *grid) complex
+    if p.reduce_volume:
+        new = _volume_weighted_spatial_mean(new, p.cell_volume_weights, leading_dims=2)
+    return new
+
+
 def update_detectors(
     plans: list[DetectorPlan],
     buffers: dict[str, dict[str, mx.array]],
@@ -85,6 +106,11 @@ def update_detectors(
         row = int(p.time_to_idx[n])
         E = E_interp if p.exact_interp else E_raw
         H = H_interp if p.exact_interp else H_raw
+
+        if p.kind == "phasor":
+            buf = buffers[p.name]["phasor"]
+            buf[0] = buf[0] + _record_phasor(p, E, H, n)
+            continue
 
         if p.kind == "energy":
             value = _record_energy(p, E, H, inv_eps, inv_mu)
