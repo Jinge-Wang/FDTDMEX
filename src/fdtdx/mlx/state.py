@@ -42,3 +42,6 @@ class MLXState:
     sigma_E: Any = None
     #: Optional magnetic conductivity, shape (1|3|9, Nx, Ny, Nz) (M2+).
     sigma_H: Any = None
+
+    #: Per-axis periodic (wrap-padding) flags; True where a periodic/Bloch-k0 boundary sits.
+    periodic_axes: tuple = (False, False, False)

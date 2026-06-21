@@ -15,12 +15,37 @@ from __future__ import annotations
 import mlx.core as mx
 
 
-def pad_zero(field: mx.array) -> mx.array:
-    """Zero-pad a (3, Nx, Ny, Nz) field to (3, Nx+2, Ny+2, Nz+2).
+def _wrap_pad_axis(arr: mx.array, axis: int) -> mx.array:
+    """Pad one ghost cell per side on ``axis`` with periodic (wrap) values."""
+    lo = [slice(None)] * arr.ndim
+    lo[axis] = slice(-1, None)
+    hi = [slice(None)] * arr.ndim
+    hi[axis] = slice(0, 1)
+    return mx.concatenate([arr[tuple(lo)], arr, arr[tuple(hi)]], axis=axis)
 
-    Matches ``fdtdx.core.misc.pad_fields`` for non-periodic (PML/PEC) axes.
+
+def pad_fields_mlx(field: mx.array, periodic_axes: tuple = (False, False, False)) -> mx.array:
+    """Pad a (3, Nx, Ny, Nz) field to (3, Nx+2, Ny+2, Nz+2).
+
+    Mirrors ``fdtdx.core.misc.pad_fields``: wrap (periodic) padding on periodic axes,
+    zero (constant) padding on the others (PML/PEC). Periodic boundaries in fdtdx are
+    Bloch boundaries with zero phase, so wrap padding alone reproduces them.
     """
-    return mx.pad(field, [(0, 0), (1, 1), (1, 1), (1, 1)])
+    out = field
+    for i, periodic in enumerate(periodic_axes):
+        axis = i + 1
+        if periodic:
+            out = _wrap_pad_axis(out, axis)
+        else:
+            pw = [(0, 0)] * out.ndim
+            pw[axis] = (1, 1)
+            out = mx.pad(out, pw)
+    return out
+
+
+def pad_zero(field: mx.array) -> mx.array:
+    """Zero-pad a (3, Nx, Ny, Nz) field to (3, Nx+2, Ny+2, Nz+2) (no periodic axes)."""
+    return pad_fields_mlx(field, (False, False, False))
 
 
 def curl_H_mlx(

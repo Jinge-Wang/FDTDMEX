@@ -286,6 +286,64 @@ def test_diagonal_anisotropy_matches_jax():
         assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL
 
 
+def test_periodic_boundaries_match_jax():
+    """Periodic (wrap-padded) x/y boundaries + plane wave through a diagonal-anisotropic slab."""
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=16e-15, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(3 * _RES, 3 * _RES, 40 * _RES))
+    objects.append(vol)
+    bcfg = fdtdx.BoundaryConfig.from_uniform_bound(
+        thickness=_PML,
+        override_types={"min_x": "periodic", "max_x": "periodic", "min_y": "periodic", "max_y": "periodic"},
+    )
+    bdict, clist = fdtdx.boundary_objects_from_config(bcfg, vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    diel = fdtdx.UniformMaterialObject(
+        partial_grid_shape=(None, None, 20), material=fdtdx.Material(permittivity=(2.25, 4.0, 1.0))
+    )
+    constraints.extend(
+        [
+            diel.same_size(vol, axes=(0, 1)),
+            diel.place_at_center(vol, axes=(0, 1)),
+            diel.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(14,)),
+        ]
+    )
+    objects.append(diel)
+    wave = fdtdx.WaveCharacter(wavelength=1e-6)
+    src = fdtdx.UniformPlaneSource(
+        partial_grid_shape=(None, None, 1), wave_character=wave, direction="+", fixed_E_polarization_vector=(1, 0, 0)
+    )
+    constraints.extend(
+        [
+            src.same_size(vol, axes=(0, 1)),
+            src.place_at_center(vol, axes=(0, 1)),
+            src.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(_PML + 2,)),
+        ]
+    )
+    objects.append(src)
+    det = fdtdx.PhasorDetector(
+        name="ph",
+        partial_grid_shape=(None, None, 1),
+        wave_characters=(wave,),
+        reduce_volume=True,
+        components=("Ex", "Hy"),
+    )
+    constraints.extend(
+        [
+            det.same_size(vol, axes=(0, 1)),
+            det.place_at_center(vol, axes=(0, 1)),
+            det.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(20,)),
+        ]
+    )
+    objects.append(det)
+
+    arr_j, arr_m = _run_both(objects, constraints, config)
+    for name in ("E", "H"):
+        assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL
+    assert _rel(arr_j.detector_states["ph"]["phasor"], arr_m.detector_states["ph"]["phasor"]) < _RTOL
+
+
 def test_full_anisotropy_matches_jax():
     """Full-tensor (9-component, off-diagonal) permittivity with a dipole source."""
     config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=_TIME, dtype=jnp.float32)

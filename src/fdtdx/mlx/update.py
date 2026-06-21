@@ -17,7 +17,7 @@ from fdtdx.mlx.aniso import (
     compute_anisotropic_update_matrices_mlx,
     expand_to_3x3_mlx,
 )
-from fdtdx.mlx.curl import curl_E_mlx, curl_H_mlx, pad_zero
+from fdtdx.mlx.curl import curl_E_mlx, curl_H_mlx, pad_fields_mlx
 from fdtdx.mlx.state import MLXState
 
 
@@ -27,7 +27,7 @@ def _is_full_tensor(arr) -> bool:
 
 def update_E_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
     """Return ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)``."""
-    H_pad = pad_zero(state.H)
+    H_pad = pad_fields_mlx(state.H, state.periodic_axes)
     curl, psi_E = curl_H_mlx(H_pad, state.psi_E, state.cpml_a, state.cpml_b, state.inv_kappa, simulate_boundaries)
 
     inv_eps = state.inv_eps
@@ -42,12 +42,12 @@ def update_E_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) ->
             E = E / (1.0 + c * sigma_E * eta0 * inv_eps / 2.0)
         return E, psi_E
 
-    return _update_aniso(state.E, curl, inv_eps, sigma_E, c, eta0, add=True), psi_E
+    return _update_aniso(state.E, curl, inv_eps, sigma_E, c, eta0, add=True, periodic_axes=state.periodic_axes), psi_E
 
 
 def update_H_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
     """Return ``(H_new, psi_H_new)`` from ``dH/dt = -(1/mu) curl(E)``."""
-    E_pad = pad_zero(state.E)
+    E_pad = pad_fields_mlx(state.E, state.periodic_axes)
     curl, psi_H = curl_E_mlx(E_pad, state.psi_H, state.cpml_a, state.cpml_b, state.inv_kappa, simulate_boundaries)
 
     inv_mu = state.inv_mu
@@ -62,10 +62,12 @@ def update_H_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) ->
             H = H / (1.0 + c * sigma_H / eta0 * inv_mu / 2.0)
         return H, psi_H
 
-    return _update_aniso(state.H, curl, inv_mu, sigma_H, c, 1.0 / eta0, add=False), psi_H
+    return _update_aniso(
+        state.H, curl, inv_mu, sigma_H, c, 1.0 / eta0, add=False, periodic_axes=state.periodic_axes
+    ), psi_H
 
 
-def _update_aniso(F, curl, inv_material, sigma, c: float, eta_factor: float, add: bool):
+def _update_aniso(F, curl, inv_material, sigma, c: float, eta_factor: float, add: bool, periodic_axes):
     """Full-anisotropic E (add=True) or H (add=False) update via per-cell A/B matrices.
 
     ``F`` and ``curl`` are the un-padded (3, Nx, Ny, Nz) fields. Off-diagonal terms use the
@@ -76,8 +78,8 @@ def _update_aniso(F, curl, inv_material, sigma, c: float, eta_factor: float, add
     A, B = compute_anisotropic_update_matrices_mlx(inv_t, sigma_t, c, eta_factor)
 
     avg = avg_anisotropic_E_component_mlx if add else avg_anisotropic_H_component_mlx
-    Fp = pad_zero(F)
-    Cp = pad_zero(curl)
+    Fp = pad_fields_mlx(F, periodic_axes)
+    Cp = pad_fields_mlx(curl, periodic_axes)
 
     # F[other] averaged to each diagonal component's location.
     Fx_y, Fx_z = avg(Fp, 0, 1), avg(Fp, 0, 2)

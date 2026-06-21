@@ -13,7 +13,7 @@ from __future__ import annotations
 import mlx.core as mx
 
 from fdtdx.mlx.accumulate import update_detectors
-from fdtdx.mlx.curl import pad_zero
+from fdtdx.mlx.curl import pad_fields_mlx
 from fdtdx.mlx.detector_freeze import DetectorPlan
 from fdtdx.mlx.inject import inject_sources_E, inject_sources_H
 from fdtdx.mlx.interpolate import interpolate_fields_mlx
@@ -49,7 +49,10 @@ def run_forward_mlx(
         state.psi_H = psi_H
 
         if record:
-            E_interp, H_interp = interpolate_fields_mlx(pad_zero(state.E), pad_zero((H_prev + state.H) / 2.0))
+            E_interp, H_interp = interpolate_fields_mlx(
+                pad_fields_mlx(state.E, state.periodic_axes),
+                pad_fields_mlx((H_prev + state.H) / 2.0, state.periodic_axes),
+            )
             update_detectors(
                 detector_plans, detector_buffers, E_interp, H_interp, state.E, state.H, state.inv_eps, state.inv_mu, n
             )

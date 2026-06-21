@@ -60,8 +60,13 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
         return "custom stopping_condition not supported by the MLX backend yet"
     if config.has_nonuniform_grid:
         return "non-uniform grids not supported by the MLX backend yet (M4)"
-    if getattr(config, "use_complex_fields", None) is True or objects.bloch_objects:
-        return "complex/Bloch fields not supported by the MLX backend yet"
+    if getattr(config, "use_complex_fields", None) is True:
+        return "forced complex fields not supported by the MLX backend yet"
+    for b in objects.bloch_objects:
+        if b.needs_complex_fields:
+            return "Bloch (nonzero-k, complex) boundaries not supported by the MLX backend yet"
+    if objects.pec_objects or objects.pmc_objects:
+        return "PEC/PMC boundaries not supported by the MLX backend yet"
 
     from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
 
@@ -144,6 +149,7 @@ def maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition):
 def _run_mlx_forward(arrays, objects, config):
     import jax.numpy as jnp
 
+    from fdtdx.fdtd.update import get_wrap_padding_axes
     from fdtdx.mlx.bridge import buffers_to_detector_states, to_array_container, to_mlx_state
     from fdtdx.mlx.detector_freeze import allocate_buffers, freeze_detectors
     from fdtdx.mlx.loop import run_forward_mlx
@@ -153,6 +159,7 @@ def _run_mlx_forward(arrays, objects, config):
     arrays = arrays.reset()
 
     state = to_mlx_state(arrays, config)
+    state.periodic_axes = get_wrap_padding_axes(objects)
     source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
     detector_buffers = allocate_buffers(detector_plans)
