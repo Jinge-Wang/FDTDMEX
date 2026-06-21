@@ -1,7 +1,12 @@
 # reference/
 
-The two reference projects are **not vendored** into this repo (avoids bloat and license mixing).
-They live as sibling directories in the development workspace:
+> **Update (fork pivot):** This repo is now a **fork of fdtdx** — fdtdx's source lives in-tree at
+> `src/fdtdx/` (with the MLX backend added under `src/fdtdx/{backend,mlx}`) and upstream is the
+> `upstream` git remote. So fdtdx is no longer "external"; the sibling `../fdtdx` below is just a
+> pristine read-only reference. MEEP remains an external algorithmic reference. See
+> [docs/decisions/0001-mlx-forward-first.md](../docs/decisions/0001-mlx-forward-first.md).
+
+The reference projects below live as sibling directories in the development workspace:
 
 - **`../fdtdx`** — FDTDX (MIT). Primary porting source and CPU cross-check oracle.
   - `src/fdtdx/fdtd/update.py` — E/H updates, incl. full-anisotropic (9-tensor) path.
