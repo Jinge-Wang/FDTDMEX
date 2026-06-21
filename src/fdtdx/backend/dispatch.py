@@ -35,8 +35,9 @@ class Backend(str, Enum):
 # Source/detector types the MLX engine currently handles. Widened per milestone.
 def _supported_source_types() -> tuple:
     from fdtdx.objects.sources.dipole import PointDipoleSource
+    from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
 
-    return (PointDipoleSource,)
+    return (PointDipoleSource, LinearlyPolarizedPlaneSource)
 
 
 def _supported_detector_types() -> tuple:
@@ -61,10 +62,23 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     if getattr(config, "use_complex_fields", None) is True or objects.bloch_objects:
         return "complex/Bloch fields not supported by the MLX backend yet"
 
+    from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
+
     supported_sources = _supported_source_types()
     for s in objects.sources:
         if not isinstance(s, supported_sources):
             return f"source type {type(s).__name__} not supported by the MLX backend yet"
+        if isinstance(s, LinearlyPolarizedPlaneSource):
+            if getattr(s, "azimuth_angle", 0.0) or getattr(s, "elevation_angle", 0.0):
+                return f"tilted plane source ({type(s).__name__}) not supported by the MLX backend yet"
+            if (
+                getattr(s, "max_angle_random_offset", 0.0)
+                or getattr(s, "max_vertical_offset", 0.0)
+                or getattr(s, "max_horizontal_offset", 0.0)
+            ):
+                return f"randomized plane source ({type(s).__name__}) not supported by the MLX backend yet"
+            if getattr(s, "_temporal_H_filter", None) is not None:
+                return f"dispersive plane source ({type(s).__name__}) not supported by the MLX backend yet"
 
     supported_detectors = _supported_detector_types()
     for d in objects.detectors:
@@ -135,7 +149,7 @@ def _run_mlx_forward(arrays, objects, config):
     arrays = arrays.reset()
 
     state = to_mlx_state(arrays, config)
-    source_plans = freeze_sources(objects, config)
+    source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
     detector_buffers = allocate_buffers(detector_plans)
     num_steps = int(config.time_steps_total)

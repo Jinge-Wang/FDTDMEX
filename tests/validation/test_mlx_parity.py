@@ -158,6 +158,68 @@ def test_conductive_material_matches_jax():
         assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL
 
 
+def _plane_case(source):
+    n, pml = 32, 8
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=100e-9), time=30e-15, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(n * 100e-9,) * 3)
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=pml), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    constraints.extend(
+        [
+            source.same_size(vol, axes=(0, 1)),
+            source.place_at_center(vol, axes=(0, 1)),
+            source.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(pml + 2,)),
+        ]
+    )
+    objects.append(source)
+    pf = fdtdx.PoyntingFluxDetector(
+        name="PF", partial_grid_shape=(None, None, 1), direction="+", reduce_volume=True, plot=False
+    )
+    constraints.extend(
+        [
+            pf.same_size(vol, axes=(0, 1)),
+            pf.place_at_center(vol, axes=(0, 1)),
+            pf.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(n // 2 + 4,)),
+        ]
+    )
+    objects.append(pf)
+    return _run_both(objects, constraints, config)
+
+
+def test_uniform_plane_source_matches_jax():
+    """UniformPlaneSource (TFSF) plane wave + downstream flux parity."""
+    arr_j, arr_m = _plane_case(
+        fdtdx.UniformPlaneSource(
+            partial_grid_shape=(None, None, 1),
+            fixed_E_polarization_vector=(1, 0, 0),
+            wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
+            direction="+",
+        )
+    )
+    assert _rel(arr_j.fields.E, arr_m.fields.E) < _RTOL
+    assert _rel(arr_j.fields.H, arr_m.fields.H) < _RTOL
+    assert _rel(arr_j.detector_states["PF"]["poynting_flux"], arr_m.detector_states["PF"]["poynting_flux"]) < _RTOL
+
+
+def test_gaussian_plane_source_matches_jax():
+    """GaussianPlaneSource (TFSF, non-uniform transverse profile) parity."""
+    arr_j, arr_m = _plane_case(
+        fdtdx.GaussianPlaneSource(
+            partial_grid_shape=(None, None, 1),
+            fixed_E_polarization_vector=(1, 0, 0),
+            wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
+            direction="+",
+            radius=1.2e-6,
+            std=1 / 3,
+        )
+    )
+    assert _rel(arr_j.fields.E, arr_m.fields.E) < _RTOL
+    assert _rel(arr_j.detector_states["PF"]["poynting_flux"], arr_m.detector_states["PF"]["poynting_flux"]) < _RTOL
+
+
 def test_auto_routes_to_mlx_on_apple_silicon():
     """With no override, a supported forward run auto-routes to MLX (== forced MLX)."""
     arrays, oc, config, key = _placed()
