@@ -52,6 +52,7 @@ def run_forward_mlx(
             E_interp, H_interp = interpolate_fields_mlx(
                 pad_fields_mlx(state.E, state.periodic_axes),
                 pad_fields_mlx((H_prev + state.H) / 2.0, state.periodic_axes),
+                state.interp_widths,
             )
             update_detectors(
                 detector_plans, detector_buffers, E_interp, H_interp, state.E, state.H, state.inv_eps, state.inv_mu, n

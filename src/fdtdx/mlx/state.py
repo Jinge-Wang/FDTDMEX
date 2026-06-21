@@ -45,3 +45,18 @@ class MLXState:
 
     #: Per-axis periodic (wrap-padding) flags; True where a periodic/Bloch-k0 boundary sits.
     periodic_axes: tuple = (False, False, False)
+
+    #: Per-axis derivative metric scale for the curl (M4, non-uniform grids). Each entry is the
+    #: scalar ``1.0`` on uniform grids, or an ``mx.array`` broadcasting along that axis equal to
+    #: ``reference_spacing / cell_width``. ``metric_fwd`` uses the forward stencil (``curl_E``);
+    #: ``metric_bwd`` the backward stencil / dual widths (``curl_H``).
+    metric_fwd: tuple = (1.0, 1.0, 1.0)
+    metric_bwd: tuple = (1.0, 1.0, 1.0)
+
+    #: Per-axis half-width weights ``(cur_half, prev_half)`` for the spacing-weighted detector
+    #: interpolation (``_backward_edge_average``). ``None`` on uniform grids (plain mean).
+    interp_widths: Any = None
+
+    #: Per-axis padded cell-width arrays (length N+2, broadcasting along that axis) for the
+    #: spacing-weighted anisotropic off-diagonal averaging. ``None`` on uniform grids.
+    aniso_widths: Any = None

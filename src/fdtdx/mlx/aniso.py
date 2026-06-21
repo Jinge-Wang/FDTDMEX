@@ -3,8 +3,20 @@
 Translation of ``fdtdx.fdtd.misc.compute_anisotropic_update_matrices`` and
 ``avg_anisotropic_E/H_component``, plus the per-cell 3x3 algebra. The JAX path uses
 ``jnp.linalg.solve``; here the per-cell inverse is the analytic 3x3 cofactor formula
-(exact, and MLX-GPU friendly). Off-diagonal averaging is the unweighted 4-point average,
-exactly matching fdtdx on a uniform grid (the spacing-weighted version is M4).
+(exact, and MLX-GPU friendly).
+
+Off-diagonal averaging co-locates a field component with another component's Yee point via two
+separable half-steps. One step moves a cell-centered sample to an edge (center->edge), the
+other moves an edge sample to a cell center (edge->center). On a non-uniform grid only the
+center->edge step needs spacing weights (the target edge is *not* halfway between the two cell
+centers); the edge->center step lands on the cell center, which is the exact geometric midpoint
+of its two edges, so it stays an unweighted mean. By the Yee staggering this means the backward
+roll (+1) is always the width-weighted one and the forward roll (-1) is the plain mean -- the
+same rule fdtdx's ``interpolate_fields`` follows (only its ``_backward_edge_average`` is
+weighted). ``aniso_widths is None`` (uniform grid) collapses every step to a plain mean, so the
+result is byte-identical to fdtdx's unweighted 4-point average. This weighted form is 2nd-order
+on graded meshes -- intentionally *more correct* than fdtdx, which leaves this average
+unweighted even on non-uniform grids.
 
 Convention: tensors are shape ``(3, 3, Nx, Ny, Nz)``; ``M[i, j]`` is a spatial array.
 """
@@ -92,21 +104,51 @@ def compute_anisotropic_update_matrices_mlx(
     return A, B
 
 
-def _avg(field_comp: mx.array, roll1, roll2) -> mx.array:
-    f = field_comp
-    s = f + mx.roll(f, roll1[0], axis=roll1[1]) + mx.roll(f, roll2[0], axis=roll2[1])
-    s = s + mx.roll(mx.roll(f, roll1[0], axis=roll1[1]), roll2[0], axis=roll2[1])
-    return (s / 4.0)[1:-1, 1:-1, 1:-1]
+def _forward_avg(f: mx.array, axis: int) -> mx.array:
+    """Unweighted edge->center half-step along ``axis`` (forward roll, exact midpoint)."""
+    return 0.5 * (f + mx.roll(f, -1, axis=axis))
 
 
-def avg_anisotropic_E_component_mlx(field_pad: mx.array, component: int, location: int) -> mx.array:
-    """Unweighted 4-point average of an E component to a Yee location (mirrors fdtdx)."""
-    return _avg(field_pad[component], (-1, location), (1, component))
+def _backward_avg(f: mx.array, axis: int, w_pad) -> mx.array:
+    """Center->edge half-step along ``axis`` (backward roll).
+
+    ``w_pad is None`` -> unweighted mean. Otherwise weight each cell-centered sample by the
+    *opposite* cell's width, so the edge value is the correct linear interpolant on a graded mesh
+    (the 1/2 in the half-widths cancels, so full widths are used directly).
+    """
+    fn = mx.roll(f, 1, axis=axis)
+    if w_pad is None:
+        return 0.5 * (f + fn)
+    wn = mx.roll(w_pad, 1, axis=axis)
+    return (f * wn + fn * w_pad) / (w_pad + wn)
 
 
-def avg_anisotropic_H_component_mlx(field_pad: mx.array, component: int, location: int) -> mx.array:
-    """Unweighted 4-point average of an H component to a Yee location (mirrors fdtdx)."""
-    return _avg(field_pad[component], (1, location), (-1, component))
+def avg_anisotropic_E_component_mlx(field_pad: mx.array, component: int, location: int, aniso_widths=None) -> mx.array:
+    """Average an E component to another component's Yee point (spacing-weighted on graded meshes).
+
+    The field is at a cell center along its own (``component``) axis and at an edge along the
+    target (``location``) axis, so the center->edge step (``component``) is weighted and the
+    edge->center step (``location``) is a plain mean.
+    """
+    f = field_pad[component]
+    w = None if aniso_widths is None else aniso_widths[component]
+    g = _forward_avg(f, location)
+    h = _backward_avg(g, component, w)
+    return h[1:-1, 1:-1, 1:-1]
+
+
+def avg_anisotropic_H_component_mlx(field_pad: mx.array, component: int, location: int, aniso_widths=None) -> mx.array:
+    """Average an H component to another component's Yee point (spacing-weighted on graded meshes).
+
+    H sits at an edge along its own (``component``) axis and at a cell center along the target
+    (``location``) axis, so here the center->edge step (``location``) is weighted and the
+    edge->center step (``component``) is a plain mean.
+    """
+    f = field_pad[component]
+    w = None if aniso_widths is None else aniso_widths[location]
+    g = _backward_avg(f, location, w)
+    h = _forward_avg(g, component)
+    return h[1:-1, 1:-1, 1:-1]
 
 
 def quad_form3(v: mx.array, M: mx.array) -> mx.array:

@@ -12,8 +12,12 @@ Routing:
 - AUTO: MLX iff Apple-Silicon + mlx importable + forward-only + the case uses only
   features the current milestone supports; otherwise JAX (warn-once on the first decline).
 
-Milestone gating lives in ``_unsupported_reason``; widen it as kernels land (M1: lossless
-iso/diag materials, uniform grid, point-dipole sources, no detectors).
+Milestone gating lives in ``_unsupported_reason`` / ``_unsupported_reason_arrays``; widen it as
+kernels land. As of M4 the MLX path covers iso/diag/full-tensor anisotropy, electric/magnetic
+conductivity, CPML + periodic boundaries, dipole + (tilted) TFSF plane sources, the four detector
+types, and non-uniform (rectilinear) grids. Still gated to JAX: gradients, dispersive (ADE)
+materials, lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, and mode
+sources/detectors.
 """
 
 from __future__ import annotations
@@ -58,8 +62,6 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
         return "gradient computation requested (MLX backend is forward-only)"
     if stopping_condition is not None:
         return "custom stopping_condition not supported by the MLX backend yet"
-    if config.has_nonuniform_grid:
-        return "non-uniform grids not supported by the MLX backend yet (M4)"
     if getattr(config, "use_complex_fields", None) is True:
         return "forced complex fields not supported by the MLX backend yet"
     for b in objects.bloch_objects:
@@ -159,8 +161,10 @@ def _run_mlx_forward(arrays, objects, config):
     # Match checkpointed_fdtd: zero dynamic fields + detector states before stepping.
     arrays = arrays.reset()
 
-    state = to_mlx_state(arrays, config)
-    state.periodic_axes = get_wrap_padding_axes(objects)
+    # periodic_axes is needed during bridging so the non-uniform aniso width padding wraps to
+    # match the field padding, so resolve it before building the state.
+    periodic_axes = get_wrap_padding_axes(objects)
+    state = to_mlx_state(arrays, config, periodic_axes)
     source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
     detector_buffers = allocate_buffers(detector_plans)

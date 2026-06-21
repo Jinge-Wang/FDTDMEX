@@ -2,8 +2,11 @@
 
 Line-for-line translation of ``fdtdx.core.physics.curl.curl_H`` / ``curl_E`` using
 ``mx.roll`` for the staggered finite differences and the precomputed CPML ``a``/``b`` /
-``1/kappa`` (see :mod:`fdtdx.mlx.pml`). Uniform-grid metric only (the JAX ``_metric_scale``
-factor is 1.0 on uniform grids); spacing-weighted metrics for non-uniform grids land in M4.
+``1/kappa`` (see :mod:`fdtdx.mlx.pml`). Each finite difference along an axis is multiplied by
+that axis's metric scale (port of ``_metric_scale``): the scalar ``1.0`` on uniform grids (so
+the uniform path is unchanged), or ``reference_spacing / cell_width`` broadcasting along the
+axis on non-uniform grids. ``curl_E`` uses the forward stencil (primal widths); ``curl_H`` the
+backward stencil (dual widths).
 
 Fields are passed pre-padded with one zero ghost cell per side (shape (3, Nx+2, Ny+2,
 Nz+2)); the ``[1:-1, 1:-1, 1:-1]`` interior slice recovers (Nx, Ny, Nz), exactly as the
@@ -55,16 +58,22 @@ def curl_H_mlx(
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
+    metric: tuple = (1.0, 1.0, 1.0),
 ) -> tuple[mx.array, mx.array]:
-    """Curl of H (-> E-type field) plus updated psi_E. See ``curl_H`` in fdtdx."""
-    a, b, ik = cpml_a, cpml_b, inv_kappa
+    """Curl of H (-> E-type field) plus updated psi_E. See ``curl_H`` in fdtdx.
 
-    dyHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=1))[1:-1, 1:-1, 1:-1]
-    dzHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=2))[1:-1, 1:-1, 1:-1]
-    dzHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=2))[1:-1, 1:-1, 1:-1]
-    dxHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=0))[1:-1, 1:-1, 1:-1]
-    dxHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=0))[1:-1, 1:-1, 1:-1]
-    dyHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=1))[1:-1, 1:-1, 1:-1]
+    ``metric`` is the per-axis backward-stencil (dual-width) derivative scale; each finite
+    difference along an axis is multiplied by ``metric[axis]`` (``1.0`` on uniform grids).
+    """
+    a, b, ik = cpml_a, cpml_b, inv_kappa
+    mx_, my_, mz_ = metric
+
+    dyHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=1))[1:-1, 1:-1, 1:-1] * my_
+    dzHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=2))[1:-1, 1:-1, 1:-1] * mz_
+    dzHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=2))[1:-1, 1:-1, 1:-1] * mz_
+    dxHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=0))[1:-1, 1:-1, 1:-1] * mx_
+    dxHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=0))[1:-1, 1:-1, 1:-1] * mx_
+    dyHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=1))[1:-1, 1:-1, 1:-1] * my_
 
     psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy = (
         psi_E[0],
@@ -100,16 +109,22 @@ def curl_E_mlx(
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
+    metric: tuple = (1.0, 1.0, 1.0),
 ) -> tuple[mx.array, mx.array]:
-    """Curl of E (-> H-type field) plus updated psi_H. See ``curl_E`` in fdtdx."""
-    a, b, ik = cpml_a, cpml_b, inv_kappa
+    """Curl of E (-> H-type field) plus updated psi_H. See ``curl_E`` in fdtdx.
 
-    dyEz = (mx.roll(E_pad[2], -1, axis=1) - E_pad[2])[1:-1, 1:-1, 1:-1]
-    dzEy = (mx.roll(E_pad[1], -1, axis=2) - E_pad[1])[1:-1, 1:-1, 1:-1]
-    dzEx = (mx.roll(E_pad[0], -1, axis=2) - E_pad[0])[1:-1, 1:-1, 1:-1]
-    dxEz = (mx.roll(E_pad[2], -1, axis=0) - E_pad[2])[1:-1, 1:-1, 1:-1]
-    dxEy = (mx.roll(E_pad[1], -1, axis=0) - E_pad[1])[1:-1, 1:-1, 1:-1]
-    dyEx = (mx.roll(E_pad[0], -1, axis=1) - E_pad[0])[1:-1, 1:-1, 1:-1]
+    ``metric`` is the per-axis forward-stencil (primal-width) derivative scale; each finite
+    difference along an axis is multiplied by ``metric[axis]`` (``1.0`` on uniform grids).
+    """
+    a, b, ik = cpml_a, cpml_b, inv_kappa
+    mx_, my_, mz_ = metric
+
+    dyEz = (mx.roll(E_pad[2], -1, axis=1) - E_pad[2])[1:-1, 1:-1, 1:-1] * my_
+    dzEy = (mx.roll(E_pad[1], -1, axis=2) - E_pad[1])[1:-1, 1:-1, 1:-1] * mz_
+    dzEx = (mx.roll(E_pad[0], -1, axis=2) - E_pad[0])[1:-1, 1:-1, 1:-1] * mz_
+    dxEz = (mx.roll(E_pad[2], -1, axis=0) - E_pad[2])[1:-1, 1:-1, 1:-1] * mx_
+    dxEy = (mx.roll(E_pad[1], -1, axis=0) - E_pad[1])[1:-1, 1:-1, 1:-1] * mx_
+    dyEx = (mx.roll(E_pad[0], -1, axis=1) - E_pad[0])[1:-1, 1:-1, 1:-1] * my_
 
     psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy = (
         psi_H[0],

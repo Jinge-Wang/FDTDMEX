@@ -35,17 +35,25 @@ validation gets a reference oracle (JAX-Metal is unusable).
 
 ## Current state
 
-**M1 + M2 implemented and validated element-wise vs JAX-CPU** (`tests/validation/test_mlx_parity.py`):
-- Engine: curl → E/H update (isotropic + diagonal-anisotropic) → CPML → source → detector → time loop.
-- Sources: `PointDipoleSource`; `UniformPlaneSource` / `GaussianPlaneSource` (TFSF, non-tilted,
-  non-dispersive).
+**M1–M4 implemented and validated element-wise vs JAX-CPU** (`tests/validation/test_mlx_parity.py`,
+`tests/validation/test_mlx_nonuniform.py`):
+- Engine: curl → E/H update → CPML → source → detector → time loop.
+- Materials: isotropic, diagonal-anisotropic, **full-tensor (9-component) anisotropic**,
+  electric/magnetic conductivity (lossy).
+- Sources: `PointDipoleSource`; `UniformPlaneSource` / `GaussianPlaneSource` (TFSF), including
+  **tilted (azimuth/elevation)** beams.
 - Detectors: `EnergyDetector`, `FieldDetector`, `PoyntingFluxDetector`, `PhasorDetector`.
-- Materials: isotropic, diagonal-anisotropic, electric/magnetic conductivity (lossy).
-- fdtdx's own physics tests (plane wave, Fresnel slab, skin depth) pass auto-routed to MLX.
+- Boundaries: CPML, and **periodic** (wrap-padding, real-valued / Bloch-k0).
+- **Non-uniform (rectilinear) grids (M4):** metric-scaled curl, spacing-weighted detector
+  interpolation, and **spacing-weighted off-diagonal anisotropic averaging** (2nd-order on graded
+  meshes — *more correct* than fdtdx, which leaves that average unweighted). On uniform grids every
+  weighted form reduces exactly to the M3 path (verified element-wise).
+- fdtdx's own physics tests (plane wave, Fresnel slab, skin depth, birefringence, non-uniform grid)
+  pass auto-routed to MLX.
 
-**Deferred → falls back to JAX:** full-tensor (9-component) anisotropy (M3); non-uniform
-spacing-weighted curl/interpolation (M4 — currently uniform only); tilted/dispersive plane
-sources; mode sources/detectors; ADE dispersion; Bloch/complex propagation; gradients.
+**Deferred → falls back to JAX:** dispersive (ADE) materials; lossy + full-anisotropic together;
+full-anisotropic (9-tensor) conductivity; tilted+randomized / dispersive plane sources; mode
+sources/detectors; Bloch (nonzero-k) / forced-complex propagation; PEC/PMC boundaries; gradients.
 The dispatcher gates all of these; widen the gate as kernels land.
 
 ## Commands
@@ -68,8 +76,10 @@ uvx ruff check  src/fdtdx/mlx src/fdtdx/backend
   time-invariant; source `_E/_H`/offsets and detector `init_state` shapes come from the placed
   objects).
 - **Yee grid + eta0-normalized H** per fdtdx; don't change conventions silently.
-- **Non-uniform grids are a goal (M4)** — spacing-weighted curl/interpolation, not the unweighted
-  average. Currently the MLX path is uniform-only and gates non-uniform to JAX.
+- **Non-uniform grids are supported (M4)** — the MLX curl is metric-scaled, detector
+  interpolation and the off-diagonal anisotropic average are spacing-weighted (the latter is
+  2nd-order on graded meshes, unlike fdtdx's unweighted average). On uniform grids the weights are
+  scalar `1.0` / plain means, so the M3 path is recovered byte-for-byte (the parity bar).
 - **Time loop:** plain Python `for` loop; bound the lazy graph with periodic `mx.eval`. It is
   currently eager; wrapping the per-step body in `mx.compile` is a future perf optimization.
 - **Validate, don't just smoke-test.** New physics gets a `validation`-marked element-wise parity

@@ -13,6 +13,18 @@ from fdtdx.fdtd.wrapper import run_fdtd
 class TestRunFdtd:
     """Test run_fdtd dispatch logic."""
 
+    @pytest.fixture(autouse=True)
+    def _force_jax_backend(self, monkeypatch):
+        """Force the JAX backend for the whole class.
+
+        These tests drive ``run_fdtd`` with mock containers to verify its JAX delegation
+        (checkpointed/reversible). The fork's MLX dispatch seam runs first and inspects real
+        ``ArrayContainer``/``ObjectContainer`` fields (e.g. iterating ``objects.bloch_objects``),
+        which a bare ``Mock`` cannot satisfy. Forcing JAX makes the seam decline immediately so the
+        wrapper's delegation logic is exercised in isolation.
+        """
+        monkeypatch.setenv("FDTDMEX_BACKEND", "jax")
+
     @pytest.fixture
     def setup(self):
         mock_arrays = Mock(spec=ArrayContainer)
