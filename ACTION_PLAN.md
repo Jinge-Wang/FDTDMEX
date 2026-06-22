@@ -32,29 +32,27 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
   compiled MLX-ops, bit-exact**. This proves a hand kernel hits the bandwidth floor the MLX op-graph
   cannot (the op path is stuck at ~18–36 RT). JAX-CPU's effective traffic is ~36 RT, so the floor
   kernel is far above it.
-- **Phase 2 M2 — complete.** The iso/diagonal forward path runs on custom Metal E/H kernels in the
-  engine ([`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py)), CPML via the spatial hybrid (bulk
-  kernel + slab-CPML MLX-op correction), behind `FDTDMEX_METAL_KERNEL` (default off). Realized on M4
-  Pro at N=192 (`profile_engine.py --kernel`): iso **CPML-off 2219 Mcs/s / 5 RT (4.5× over compiled
-  ops, at the M1 floor)**; iso **CPML-on 374 Mcs/s / 27 RT (1.31× over compiled ops, 1.35× over the
-  Phase-1 277)**; diagonal 2036 / 346 Mcs/s. CPML-on is discounted by the slab correction
-  (`_slab_add` rebuilds full arrays via concatenate, ~22 RT on top of the 5 RT bulk). Kernel cores
-  are `mx.compile`d (the metal kernel composes as a graph node) — **uncompiled the slab ops dominate
-  and the CPML-on step is slower than ops**. Validated element-wise vs MLX-op cores (rel < 1e-4) and
-  vs the JAX oracle (rel < 1e-3) for iso/diagonal/periodic + CPML ([`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py)); full suite green with the flag forced on.
-- **Phase 2 M3 — complete; kernel path default-on.** Three independent wins, each parity-gated
-  (`tests/validation/test_mlx_kernel.py`: kernel-vs-ops rel < 1e-4, vs-JAX rel < 1e-3) and benchmarked:
-  (1) **CPML folded into the kernel** — each slab thread advances ψ + adds the κ-stretch/ψ correction
-  in-kernel (compact slab ψ + a/b/1κ as extra in/out buffers), dropping the M2 spatial-hybrid
-  full-array rebuild. CPML-on **375 → 1826 Mcs/s, 27 → 5 RT (4.9×, at the bulk floor)** iso /
-  1711 diag (`profile_engine.py --kernel`). (2) **Non-uniform metric in-kernel** — each difference
-  scaled by its per-axis `reference_spacing/cell_width` buffer; non-uniform iso/diag now ride the
-  kernel at the same ~5 RT floor. (3) **Heterogeneous full-tensor via block hybrid** — kernel runs
-  the diagonal bulk, the off-diagonal inclusion bbox gets the MLX-op aniso update over a haloed
-  interior slice, spliced back; N=128 8³ inclusion **125 → 1124 Mcs/s (9.0×)**. Default flipped on
-  (`FDTDMEX_METAL_KERNEL` unset = on; `=0` forces the MLX-op path); ineligible cases (lossy,
-  scattered/oversized tensor, gradients) still fall back via `kernel_eligible`. Full validation suite
-  green default-on (20 passed).
+- **Phase 2 M2 — complete (superseded by M3).** Landed custom Metal E/H bulk kernels in the engine
+  ([`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py)) for the iso/diagonal path, with CPML as a
+  spatial hybrid (bulk kernel + an MLX-op slab correction). Reached the bulk floor with CPML off
+  (2219 Mcs/s / 5 RT) but the slab correction's full-array rebuild left CPML-on at 374 Mcs/s / 27 RT.
+  Details and the measured history in `docs/performance.md`.
+- **Phase 2 M3 — complete; kernel path default-on.** Three independent kernel extensions, each
+  parity-gated ([`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py):
+  kernel-vs-ops rel < 1e-4, vs-JAX rel < 1e-3) and benchmarked on M4 Pro:
+  1. **CPML folded into the kernel** — each PML-slab thread advances ψ and adds the κ-stretch/ψ
+     correction in-kernel (compact slab ψ + per-axis `a/b/1κ` as extra in/out buffers), so the kernel
+     writes the final E/H. Removes the M2 slab-correction full-array rebuild. **CPML-on 374 → 1826
+     Mcs/s, 27 → 5 RT (4.9×), at the bulk floor** (N=192 iso; 1711 diag).
+  2. **Non-uniform metric in-kernel** — each difference scaled by its per-axis
+     `reference_spacing/cell_width` buffer; non-uniform iso/diagonal now ride the kernel at the same
+     ~5 RT floor.
+  3. **Heterogeneous full-tensor via a block hybrid** — kernel runs the diagonal bulk; the
+     off-diagonal inclusion's bounding box gets the MLX-op aniso update over a haloed interior slice,
+     spliced back. **N=128, 8³ inclusion: 125 → 1124 Mcs/s (9.0×)**.
+
+  `FDTDMEX_METAL_KERNEL` is now default-on (`=0` forces the MLX-op cores); ineligible cases fall back
+  automatically via `kernel_eligible`. Full validation suite green default-on (20 passed).
 - **NEXT: Phase 3** — broaden the supported physics surface (independent of perf). See "Next step".
 
 ## Engine map (`src/fdtdx/mlx/`)
@@ -106,6 +104,23 @@ each gated by [`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_
 
 `FDTDMEX_METAL_KERNEL` is now **default-on** ([`backend/dispatch.py`](src/fdtdx/backend/dispatch.py)
 `_metal_kernel_enabled`); `=0` forces the MLX-op path.
+
+### Deferred / falls back to the MLX-op cores (and why)
+
+- **Per-cell in-kernel 3×3 anisotropic branch** — the block hybrid was chosen instead: it reuses the
+  already-validated MLX-op aniso update and is bit-identical on the inclusion cells, so it carries far
+  less parity risk. The per-cell branch (one thread doing the full 3×3 + weighted curl-averaging) is
+  the general form for anisotropic cells that are scattered or ring every interface (subpixel
+  smoothing); it is left for when such a distribution is the target.
+- **Anisotropic inclusions that are lossy, non-uniform-grid, oversized (> ½ the domain), or overlap a
+  PML slab** — the block hybrid assumes a compact, lossless, interior inclusion so its haloed slice
+  needs no CPML or metric. Outside that envelope the whole run falls back to the MLX-op aniso cores
+  (correct, just not accelerated). `kernel_eligible` is the gate.
+- **Conductivity (lossy media) in the kernel** — the bulk kernel is lossless; any conductivity sends
+  the run to the MLX-op cores. Folding it in is Phase 3 (`docs/widening-mlx-port-plan.md`).
+- **z-march tiling** — measurement-gated. The thread-per-cell kernel already sits at the bandwidth
+  floor for N ≤ 256; build it only if `profile_engine.py` shows RT climbing at N ≥ 384
+  (`docs/phase2-metal-kernels.md` §3, §11).
 
 ## NEXT STEP — Phase 3: broaden supported surface (independent of perf)
 

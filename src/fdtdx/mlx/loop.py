@@ -33,8 +33,9 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_me
     """Build the per-step E-core/H-core. Time-invariant arrays are captured as constants so the
     only graph inputs are the time-varying fields (E, H, ψ); ``mx.compile`` then fuses the body.
 
-    With ``use_metal_kernel`` and an eligible case (iso/diag, no conductivity, uniform metric) the
-    bulk update runs on custom Metal kernels (the M2 win); otherwise the compiled MLX-op cores run.
+    With ``use_metal_kernel`` and an eligible case (``kernels.kernel_eligible``: lossless iso/diagonal,
+    or a full-tensor with a compact interior inclusion; CPML and non-uniform grids folded into the
+    kernel) the update runs on the custom Metal kernels; otherwise the compiled MLX-op cores run.
     """
     if use_metal_kernel and kernel_eligible(state):
         # Compile the whole core: the bulk kernel is one node, but the slab-CPML correction is a

@@ -24,8 +24,17 @@ triple. (M2 computed the slab correction with MLX ops via ``concatenate`` — ~2
 recurrence — mirroring ``curl._mul_metric``. Uniform axes carry a scalar ``1.0`` and emit no
 multiply, so the uniform path is byte-for-byte unchanged.
 
-Eligibility (else the loop uses the compiled MLX-op cores): isotropic/diagonal ``inv_eps``/
-``inv_mu`` (not 9-tensor) and no conductivity. Lossy / full-tensor cases keep the MLX-op path (M3+).
+**Heterogeneous full-tensor materials use a block hybrid (M3).** The kernel runs the diagonal bulk
+(``cb`` = the tensor's diagonal); the off-diagonal inclusion's bounding box (``_offdiag_box``) gets
+the validated MLX-op aniso update (``update._update_E``/``_update_H``) over a haloed interior slice,
+spliced back with ``_set_box``. Box cells are bit-identical to the whole-domain ops path (same local
+stencil, real neighbours via the halo); diagonal cells inside the box reduce to the same diagonal
+update as the bulk. Gated to lossless, uniform-grid, compact, PML-disjoint interior inclusions.
+
+Eligibility (else the loop uses the compiled MLX-op cores), via ``kernel_eligible``: no conductivity;
+isotropic/diagonal ``inv_eps``/``inv_mu``, or a full-tensor whose off-diagonal inclusion is a compact
+(< half-domain), PML-disjoint interior box on a uniform grid. Lossy media, non-uniform full-tensor,
+and scattered/oversized inclusions keep the MLX-op path.
 """
 
 from __future__ import annotations
