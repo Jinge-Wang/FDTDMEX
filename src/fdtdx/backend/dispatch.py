@@ -78,8 +78,8 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     for b in objects.bloch_objects:
         if b.needs_complex_fields:
             return "Bloch (nonzero-k, complex) boundaries not supported by the MLX backend yet"
-    if objects.pec_objects or objects.pmc_objects:
-        return "PEC/PMC boundaries not supported by the MLX backend yet"
+    # PEC/PMC are supported (Phase 3): frozen keep-masks applied post-injection in the loop
+    # (fdtdx.mlx.boundary_mask + loop.py), composing with both the Metal kernel and MLX-op cores.
 
     from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
 
@@ -112,17 +112,11 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
 
 def _unsupported_reason_arrays(arrays) -> str | None:
     """Material/array-level support checks (need the ArrayContainer)."""
-    inv_mu = arrays.inv_permeabilities
-    eps9 = arrays.inv_permittivities.shape[0] == 9
-    mu9 = getattr(inv_mu, "ndim", 0) > 0 and inv_mu.shape[0] == 9
-    has_conductivity = arrays.electric_conductivity is not None or arrays.magnetic_conductivity is not None
-
-    # Lossless full-tensor (9-component) anisotropy is supported (M3); lossy-anisotropic is not.
-    if (eps9 or mu9) and has_conductivity:
-        return "lossy full-anisotropic materials not supported yet"
-    for label, sigma in (("electric", arrays.electric_conductivity), ("magnetic", arrays.magnetic_conductivity)):
-        if sigma is not None and getattr(sigma, "ndim", 0) > 0 and sigma.shape[0] == 9:
-            return f"full-anisotropic {label} conductivity (9-tensor) not supported yet"
+    # Phase 3: lossy full-tensor (9-component) anisotropy and 9-tensor (full-rank) electric/magnetic
+    # conductivity are supported -- the aniso A/B update (``_update_aniso``) consumes ``sigma``
+    # directly (``compute_anisotropic_update_matrices_mlx``), so these run on the MLX-op cores (the
+    # lossless block-hybrid Metal kernel stays as-is; ``kernel_eligible`` falls these back). Only
+    # dispersive (ADE) materials remain deferred.
     if arrays.dispersive_c1 is not None:
         return "dispersive (ADE) materials not supported yet"
     return None
@@ -175,7 +169,7 @@ def _run_mlx_forward(arrays, objects, config):
     # periodic_axes is needed during bridging so the non-uniform aniso width padding wraps to
     # match the field padding, so resolve it before building the state.
     periodic_axes = get_wrap_padding_axes(objects)
-    state = to_mlx_state(arrays, config, periodic_axes)
+    state = to_mlx_state(arrays, config, periodic_axes, objects=objects)
     source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
     detector_buffers = allocate_buffers(detector_plans)
