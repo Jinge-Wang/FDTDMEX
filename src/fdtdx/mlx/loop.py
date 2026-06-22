@@ -81,11 +81,18 @@ def run_forward_mlx(
 
         E, psi_E = e_core(state.E, state.H, state.psi_E)
         E = inject_sources_E(E, source_plans, n)
+        # PEC: zero tangential E after injection (so sources can't leave nonzero tangential E on the
+        # wall), matching fdtdx's apply_boundary_post_E_update ordering.
+        if state.pec_keep is not None:
+            E = E * state.pec_keep
         state.E = E
         state.psi_E = psi_E
 
         H, psi_H = h_core(state.E, state.H, state.psi_H)
         H = inject_sources_H(H, source_plans, n)
+        # PMC: zero tangential H after injection (mirrors apply_boundary_post_H_update).
+        if state.pmc_keep is not None:
+            H = H * state.pmc_keep
         state.H = H
         state.psi_H = psi_H
 

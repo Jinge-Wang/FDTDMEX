@@ -64,3 +64,10 @@ class MLXState:
     #: Per-axis padded cell-width arrays (length N+2, broadcasting along that axis) for the
     #: spacing-weighted anisotropic off-diagonal averaging. ``None`` on uniform grids.
     aniso_widths: Any = None
+
+    #: Phase 3 PEC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PEC face zeros tangential E,
+    #: ``1.0`` elsewhere. ``None`` when no PEC boundaries. Applied after E source injection.
+    pec_keep: Any = None
+    #: Phase 3 PMC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PMC face zeros tangential H,
+    #: ``1.0`` elsewhere. ``None`` when no PMC boundaries. Applied after H source injection.
+    pmc_keep: Any = None

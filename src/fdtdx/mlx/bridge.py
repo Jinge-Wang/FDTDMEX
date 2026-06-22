@@ -76,8 +76,12 @@ def _grid_metrics(config, periodic_axes):
     return tuple(metric_fwd), tuple(metric_bwd), tuple(interp_widths), tuple(aniso_widths)
 
 
-def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -> MLXState:
-    """Convert a (reset) :class:`ArrayContainer` to an :class:`MLXState`."""
+def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), objects=None) -> MLXState:
+    """Convert a (reset) :class:`ArrayContainer` to an :class:`MLXState`.
+
+    ``objects`` (the :class:`ObjectContainer`) is used only to freeze the PEC/PMC keep-masks (Phase
+    3); pass ``None`` to skip them.
+    """
     dt = float(config.time_step_duration)
     a, b, inv_kappa = precompute_cpml_coeffs(
         np.asarray(arrays.alpha), np.asarray(arrays.kappa), np.asarray(arrays.sigma), dt, eps0
@@ -98,6 +102,12 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -
 
     metric_fwd, metric_bwd, interp_widths, aniso_widths = _grid_metrics(config, periodic_axes)
 
+    pec_keep = pmc_keep = None
+    if objects is not None:
+        from fdtdx.mlx.boundary_mask import freeze_boundary_masks
+
+        pec_keep, pmc_keep = freeze_boundary_masks(objects, tuple(np.asarray(arrays.fields.E).shape))
+
     return MLXState(
         E=_to_mx(arrays.fields.E),
         H=_to_mx(arrays.fields.H),
@@ -116,6 +126,8 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -
         metric_bwd=metric_bwd,
         interp_widths=interp_widths,
         aniso_widths=aniso_widths,
+        pec_keep=pec_keep,
+        pmc_keep=pmc_keep,
     )
 
 
