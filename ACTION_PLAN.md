@@ -65,10 +65,12 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
   (35 validation tests green). Item 3 folds the per-pole ADE recurrence into the Metal E-kernel, so
   dispersive media ride the bandwidth floor (1216 vs 255 Mcs/s on the MLX-op cores, N=160 1-pole,
   4.8×); the non-dispersive kernel is byte-identical (1843 Mcs/s, unchanged). See the "Phase 3" section.
-- **Phase 4 — next.** Two parallel tracks + one engine item. **Track A: independent mode solver +
+- **Phase 4 — in progress. Track A largely complete** (native Tidy3D-free mode solver default-on +
+  Tidy3D now optional + solved-mode/S-matrix front-end + WS-C subpixel-smoothing core, all validated;
+  see the Track A section for what landed and what remains). **Track A: independent mode solver +
   overlap** (Tidy3D-free; the only Tidy3D coupling in the stack is the mode solver, so an own
   Zhu–Brown solver removes the dependency) coupled with **subpixel smoothing** (WS-C; the two share the
-  same interface index-averaging). **Track B: the agentic workspace** — an HDF5 wrap/unwrap contract
+  same interface index-averaging). **Track B (next): the agentic workspace** — an HDF5 wrap/unwrap contract
   (bare-minimum *resolved* payload) + an MCP server so an LLM discovers the API and writes/runs scripts;
   buildable now against the resolved-arrays seam / a mocked backend. **Engine item: Bloch/complex
   (nonzero-k)** propagation (promotes the engine to complex64 end-to-end). Gradients stay out of scope
@@ -208,6 +210,26 @@ scope** — the MLX backend is forward-only by design; inverse design stays on J
 ### Track A — Independent mode solver + overlap (Tidy3D-free) + subpixel smoothing
 
 Spec: [docs/mode-solver.md](docs/mode-solver.md) (WS-B) + [docs/subpixel-smoothing.md](docs/subpixel-smoothing.md) (WS-C).
+
+- **Status — largely complete (stages 1+2 + front-end + WS-C core).** Native full-vectorial FD mode
+  solver landed in [`src/fdtdx/core/physics/mode_backend/`](src/fdtdx/core/physics/mode_backend/)
+  (`operator.py` difference matrices, `solve.py` transverse-E eigensolver, `__init__.py` adapter),
+  behind a `mode_backend` seam in [`modes.py`](src/fdtdx/core/physics/modes.py) (**default `"fdtdmex"`**,
+  env `FDTDMEX_MODE_BACKEND`). **Tidy3D is now an optional dependency** (lazy import; moved to the
+  `tidy3d` extra; `eta0` from fdtdx constants). Capability: straight waveguide, uniform + rectilinear
+  grids, isotropic + diagonal anisotropy. **Off-diagonal 9-tensor + bends raise `NotImplementedError`
+  and auto-route to Tidy3D if installed** (even Tidy3D's base package defers tensorial to a paid
+  extra). Validated: analytic slab/rectilinear/diagonal-aniso n_eff + a Tidy3D cross-check matching to
+  ~1e-16 ([`tests/validation/test_mode_solver.py`](tests/validation/test_mode_solver.py)); end-to-end
+  mode-source + S-param transmission tests pass on the native backend.
+  **Front-end**: [`utils/plot_modes.py`](src/fdtdx/utils/plot_modes.py) (`plot_mode` — six components +
+  energy + smoothed-index cross-section) and [`utils/smatrix.py`](src/fdtdx/utils/smatrix.py)
+  (`SMatrixResult` JSON-serializable wrapper of `calculate_sparams` + `plot_smatrix` table).
+  **WS-C**: [`core/physics/subpixel.py`](src/fdtdx/core/physics/subpixel.py) Kottke/Farjadpour tensor
+  smoothing (validated vs analytic effective medium; **~15x** mode-solver staircase-error reduction).
+  **Remaining**: the off-diagonal *tensorial* mode solver (the 4N×4N complex eigenproblem), bends/PML
+  leaky modes, and the opt-in WS-C *auto-integration* into [`initialization.py`](src/fdtdx/fdtd/initialization.py)
+  (host-side supersampling during placement — `subpixel.py` is a validated standalone utility today).
 
 - **Why own it:** fdtdx delegates *all* mode work to **Tidy3D** ([`core/physics/modes.py`](src/fdtdx/core/physics/modes.py)
   → `tidy3d ... compute_modes`) — and that is the **only** Tidy3D coupling in the whole stack. An own
