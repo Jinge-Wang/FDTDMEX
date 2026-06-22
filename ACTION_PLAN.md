@@ -211,6 +211,9 @@ a fresh `bench_forward` figure; roadmap WS-A row updated.
 
 ## PHASE 2 — Custom Metal update kernels (fp32; separate E and H kernels)
 
+> Scoping detail: **[docs/phase2-metal-kernels.md](docs/phase2-metal-kernels.md)** (API, kernel
+> structure, tiling/halo, race/double-buffer rule, region specialization, staging, open questions).
+
 **Why:** even the lean compiled step is ~23 RT — 3–4× above the ~5–8 *necessary* — because MLX
 op-fusion can't keep a stencil's working set in threadgroup memory or reuse neighbour reads across the
 sub-ops; each op still round-trips DRAM. Past ~440 Mcs/s the only lever is hand-written kernels via
