@@ -55,13 +55,18 @@ unusable).
   interpolation, and **spacing-weighted off-diagonal anisotropic averaging** (2nd-order on graded
   meshes — *more correct* than fdtdx, which leaves that average unweighted). On uniform grids every
   weighted form reduces exactly to the M3 path (verified element-wise).
+- **Drude–Lorentz (ADE) dispersion (Phase 3):** Drude + Lorentz poles (no Debye — not in upstream, no
+  oracle). Always iso/diagonal (fdtdx forbids dispersion with off-diagonal tensors); polarization `P`
+  threaded through the E-side of the loop, the per-pole ADE recurrence folded into the Metal E-kernel
+  (so dispersive media also hit the bandwidth floor) and present in the MLX-op `_update_E`. The
+  non-dispersive kernel MSL is byte-identical (build-time gated, regression-tested).
 - fdtdx's own physics tests (plane wave, Fresnel slab, skin depth, birefringence, non-uniform grid)
   pass auto-routed to MLX.
 
-**Deferred → falls back to JAX:** dispersive (ADE) materials; tilted+randomized / dispersive plane
-sources; mode sources/detectors; Bloch (nonzero-k) / forced-complex propagation; gradients.
-The dispatcher gates all of these; widen the gate as kernels land. (Phase 3 removed lossy +
-full-anisotropic, 9-tensor conductivity, and PEC/PMC from this list.)
+**Deferred → falls back to JAX:** tilted+randomized / dispersive plane sources; mode sources/detectors;
+Bloch (nonzero-k) / forced-complex propagation; gradients. The dispatcher gates all of these; widen
+the gate as kernels land. (Phase 3 removed lossy + full-anisotropic, 9-tensor conductivity, PEC/PMC,
+and Drude–Lorentz ADE dispersion from this list.)
 
 ## Commands
 

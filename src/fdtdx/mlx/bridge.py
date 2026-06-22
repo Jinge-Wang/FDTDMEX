@@ -108,6 +108,17 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
 
         pec_keep, pmc_keep = freeze_boundary_masks(objects, tuple(np.asarray(arrays.fields.E).shape))
 
+    # Drude-Lorentz (ADE) dispersion: c1/c2/c3 are time-invariant (precomputed on the JAX side in
+    # initialization), P_curr/P_prev are zeroed by reset(). Carry all five as mx.arrays; absent (None)
+    # for non-dispersive simulations, leaving the whole ADE path inert.
+    disp_c1 = disp_c2 = disp_c3 = disp_P_curr = disp_P_prev = None
+    if arrays.dispersive_c1 is not None:
+        disp_c1 = _to_mx(arrays.dispersive_c1)
+        disp_c2 = _to_mx(arrays.dispersive_c2)
+        disp_c3 = _to_mx(arrays.dispersive_c3)
+        disp_P_curr = _to_mx(arrays.dispersive_P_curr)
+        disp_P_prev = _to_mx(arrays.dispersive_P_prev)
+
     return MLXState(
         E=_to_mx(arrays.fields.E),
         H=_to_mx(arrays.fields.H),
@@ -128,6 +139,11 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
         aniso_widths=aniso_widths,
         pec_keep=pec_keep,
         pmc_keep=pmc_keep,
+        dispersive_c1=disp_c1,
+        dispersive_c2=disp_c2,
+        dispersive_c3=disp_c3,
+        dispersive_P_curr=disp_P_curr,
+        dispersive_P_prev=disp_P_prev,
     )
 
 
@@ -149,6 +165,11 @@ def to_array_container(template_arrays, state: MLXState, detector_states=None):
     psi_H_full = mx.stack([slab_to_full(state.psi_H[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
     arrays = arrays.aset("fields->psi_E", _to_jnp(psi_E_full))
     arrays = arrays.aset("fields->psi_H", _to_jnp(psi_H_full))
+    # Dispersive (ADE) polarization write-back — keeps the host container's state consistent with the
+    # full-domain JAX engine (E/H/detectors are the parity bar; this is for completeness/resumption).
+    if state.dispersive_P_curr is not None:
+        arrays = arrays.aset("dispersive_P_curr", _to_jnp(state.dispersive_P_curr))
+        arrays = arrays.aset("dispersive_P_prev", _to_jnp(state.dispersive_P_prev))
     if detector_states is not None:
         arrays = arrays.aset("detector_states", detector_states)
     return arrays

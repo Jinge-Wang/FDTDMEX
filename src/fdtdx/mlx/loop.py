@@ -49,8 +49,19 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_me
     mfwd, mbwd = state.metric_fwd, state.metric_bwd
     per, awid, ext = state.periodic_axes, state.aniso_widths, state.cpml_extents
 
-    def e_core(E, H, psi_E):
-        return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb)
+    if state.dispersive_c1 is not None:
+        # Drude-Lorentz (ADE): thread polarization P through the E-core; coefficients are captured
+        # constants. Dispersion is electric only, so the H-core is unchanged.
+        dc1, dc2, dc3 = state.dispersive_c1, state.dispersive_c2, state.dispersive_c3
+
+        def e_core(E, H, psi_E, P_curr, P_prev):
+            return _update_E(
+                E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb, dc1, dc2, dc3, P_curr, P_prev
+            )
+    else:
+
+        def e_core(E, H, psi_E):
+            return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb)
 
     def h_core(E, H, psi_H):
         return _update_H(E, H, psi_H, inv_mu, sigma_H, a, b, ik, mfwd, per, ext, awid, c, sb)
@@ -74,12 +85,18 @@ def run_forward_mlx(
 ) -> tuple[MLXState, dict[str, dict[str, mx.array]]]:
     """Advance ``state`` ``num_steps`` steps, recording detectors; return state + buffers."""
     record = bool(detector_plans)
+    dispersive = state.dispersive_c1 is not None
     e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step, use_metal_kernel)
 
     for n in range(num_steps):
         H_prev = state.H
 
-        E, psi_E = e_core(state.E, state.H, state.psi_E)
+        if dispersive:
+            E, psi_E, state.dispersive_P_curr, state.dispersive_P_prev = e_core(
+                state.E, state.H, state.psi_E, state.dispersive_P_curr, state.dispersive_P_prev
+            )
+        else:
+            E, psi_E = e_core(state.E, state.H, state.psi_E)
         E = inject_sources_E(E, source_plans, n)
         # PEC: zero tangential E after injection (so sources can't leave nonzero tangential E on the
         # wall), matching fdtdx's apply_boundary_post_E_update ordering.
@@ -108,11 +125,15 @@ def run_forward_mlx(
 
         if (n + 1) % eval_every == 0:
             leaves = [state.E, state.H, *state.psi_E, *state.psi_H]
+            if dispersive:
+                leaves += [state.dispersive_P_curr, state.dispersive_P_prev]
             for bufs in detector_buffers.values():
                 leaves.extend(bufs.values())
             mx.eval(*leaves)
 
     leaves = [state.E, state.H, state.psi_E, state.psi_H]
+    if dispersive:
+        leaves += [state.dispersive_P_curr, state.dispersive_P_prev]
     for bufs in detector_buffers.values():
         leaves.extend(bufs.values())
     mx.eval(*leaves)

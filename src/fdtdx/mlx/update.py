@@ -32,18 +32,53 @@ def _is_full_tensor(arr) -> bool:
 
 
 def _update_E(
-    E, H, psi_E, inv_eps, sigma_E, cpml_a, cpml_b, inv_kappa, metric_bwd, periodic_axes, extents, aniso_widths, c, sb
+    E,
+    H,
+    psi_E,
+    inv_eps,
+    sigma_E,
+    cpml_a,
+    cpml_b,
+    inv_kappa,
+    metric_bwd,
+    periodic_axes,
+    extents,
+    aniso_widths,
+    c,
+    sb,
+    disp_c1=None,
+    disp_c2=None,
+    disp_c3=None,
+    P_curr=None,
+    P_prev=None,
 ):
-    """Pure ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)``. All inputs explicit (compilable)."""
+    """Pure E update from ``dE/dt = (1/eps) curl(H)``. All inputs explicit (compilable).
+
+    Returns ``(E_new, psi_E_new)`` normally, or ``(E_new, psi_E_new, P_curr_new, P_prev_new)`` when
+    Drude-Lorentz dispersion is active (``P_curr is not None``). Dispersion is only ever iso/diagonal
+    (fdtdx forbids it with off-diagonal tensors), so the ADE term lives only in the fast path; the
+    ``P_curr is not None`` guard is evaluated at trace time, so the non-dispersive graph is unchanged.
+    """
     curl, psi_E_new = curl_H_mlx(H, psi_E, cpml_a, cpml_b, inv_kappa, sb, metric_bwd, periodic_axes, extents)
 
     if not _is_full_tensor(inv_eps) and not _is_full_tensor(sigma_E):
+        # E^n is needed by the ADE recurrence (fdtdx uses the *pre-update* field), so keep it before
+        # overwriting E with the curl update.
+        E_old = E
         factor = 1.0
         if sigma_E is not None:
             factor = 1.0 - c * sigma_E * eta0 * inv_eps / 2.0
-        E = factor * E + c * curl * inv_eps
+        E = factor * E_old + c * curl * inv_eps
+        if P_curr is not None:
+            # ADE: per-pole P_new = c1*P_curr + c2*P_prev + c3*E^n; back-action E += inv_eps*Σ(P_curr-P_new).
+            # disp_c* are (poles,1,N,N,N) and broadcast over E_old's 3 components → (poles,3,N,N,N).
+            P_new = disp_c1 * P_curr + disp_c2 * P_prev + disp_c3 * E_old
+            E = E + inv_eps * mx.sum(P_curr - P_new, axis=0)
         if sigma_E is not None:
             E = E / (1.0 + c * sigma_E * eta0 * inv_eps / 2.0)
+        if P_curr is not None:
+            # swap: P_curr_new <- P_new, P_prev_new <- P_curr (old)
+            return E, psi_E_new, P_new, P_curr
         return E, psi_E_new
 
     return (

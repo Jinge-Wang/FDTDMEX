@@ -71,3 +71,16 @@ class MLXState:
     #: Phase 3 PMC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PMC face zeros tangential H,
     #: ``1.0`` elsewhere. ``None`` when no PMC boundaries. Applied after H source injection.
     pmc_keep: Any = None
+
+    #: Phase 3 Drude-Lorentz (ADE) dispersion. Per-cell recurrence coefficients, each shape
+    #: ``(num_poles, 1, Nx, Ny, Nz)`` (the singleton component axis broadcasts over the 3 E
+    #: components). Time-invariant — precomputed on the JAX side and captured as constants.
+    #: ``None`` for non-dispersive simulations (then the whole ADE path is inert).
+    dispersive_c1: Any = None
+    dispersive_c2: Any = None
+    dispersive_c3: Any = None
+    #: Dispersive polarization (P/eps0, E-units) at step n / n-1, each shape
+    #: ``(num_poles, 3, Nx, Ny, Nz)``. Dynamic — threaded through the E-side of the loop. ``None``
+    #: when non-dispersive. Only the electric field is dispersive (no magnetic dispersion).
+    dispersive_P_curr: Any = None
+    dispersive_P_prev: Any = None

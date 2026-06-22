@@ -145,6 +145,9 @@ def kernel_eligible(state) -> bool:
     """
     if state.sigma_E is not None or state.sigma_H is not None:
         return False
+    # Drude-Lorentz dispersion needs no gate here: it is always iso/diagonal (fdtdx forbids it with
+    # off-diagonal tensors), so a lossless dispersive run is already eligible and rides the E-kernel's
+    # ADE fold; a lossy+dispersive run is excluded above by the ``sigma`` check (→ MLX-op cores).
     fe, fm = _is_full_tensor(state.inv_eps), _is_full_tensor(state.inv_mu)
     if fe or fm:
         if not (_is_uniform_metric(state.metric_fwd) and _is_uniform_metric(state.metric_bwd)):
@@ -285,13 +288,68 @@ def _corr_blocks(extents, nx: int, ny: int, nz: int) -> str:
     return "".join(blocks)
 
 
-def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, metric_axes, forward: bool) -> str:
+def _ade_lines(num_poles: int, inv_c: float) -> str:
+    """MSL tail for the **E-kernel only** when Drude-Lorentz dispersion is active (build-time
+    ``num_poles > 0``). Replaces the plain ``out = E + cb·curl`` writes: form ``E_upd`` (the
+    post-curl/CPML field), run the per-pole ADE recurrence (unrolled), and write the back-reaction
+    plus the swapped P buffers.
+
+    The recurrence uses the *pre-update* field ``E[..]`` (=E^n, the kernel never writes ``E``),
+    matching ``fdtdx.fdtd.update`` (and ``mlx.update._update_E``). Per pole/component:
+    ``pn = c1*pc + c2*pp + c3*E^n``; ``E += inv_eps*sum(pc - pn)``; ``Pcurr<-pn``, ``Pprev<-pc``.
+    ``inv_eps_comp = cb_comp / c = cb_comp · inv_c`` (``c`` is a build-time scalar). Buffer layout
+    (row-contiguous): ``P[p,comp,idx] = p·3·N3 + comp·N3 + idx``; ``c{1,2,3}[p,0,idx] = p·N3 + idx``.
+    """
+    comps = (("x", "idx"), ("y", "N3+idx"), ("z", "2u*N3+idx"))
+    lit = f"{float(inv_c)}f"
+    out = [
+        "\n        float eux = E[idx]       + cbx*cx;",
+        "        float euy = E[N3+idx]    + cby*cy;",
+        "        float euz = E[2u*N3+idx] + cbz*cz;",
+        "        float dltx = 0.0f; float dlty = 0.0f; float dltz = 0.0f;",
+    ]
+    # c1/c2/c3 are packed into one (3, poles, 1, N, N, N) buffer ``dc``: slab ``which`` starts at
+    # ``which*poles*N3``; within it, pole ``p`` is at ``p*N3 + idx`` (the singleton component axis = 1).
+    npn3 = f"{num_poles}u*N3"
+    for p in range(num_poles):
+        coff = f"{p}u*N3+idx"
+        out.append(f"        {{ float c1=dc[{coff}]; float c2=dc[{npn3}+{coff}]; float c3=dc[2u*{npn3}+{coff}];")
+        for comp, eoff in comps:
+            poff = f"{p}u*3u*N3+{eoff}"
+            out.append(
+                f"          {{ float pc=Pc[{poff}]; float pp=Pp[{poff}]; float pn=c1*pc+c2*pp+c3*E[{eoff}];"
+                f" dlt{comp}+=pc-pn; Pco[{poff}]=pn; Ppo[{poff}]=pc; }}"
+            )
+        out.append("        }")
+    out += [
+        f"        out[idx]       = eux + (cbx*{lit})*dltx;",
+        f"        out[N3+idx]    = euy + (cby*{lit})*dlty;",
+        f"        out[2u*N3+idx] = euz + (cbz*{lit})*dltz;",
+    ]
+    return "\n".join(out)
+
+
+def _field_source(
+    shape,
+    periodic,
+    diagonal,
+    scalar,
+    extents,
+    sb: bool,
+    metric_axes,
+    forward: bool,
+    dispersive: bool = False,
+    num_poles: int = 0,
+    inv_c: float = 1.0,
+) -> str:
     """Generate the MSL body for the E-kernel (``forward=False``) or H-kernel (``forward=True``).
 
     ``out = F (± cb·curl)`` with ``+`` for E and ``-`` for H; ``F`` is the field being updated and
     ``G`` (``H`` for E, ``E`` for H) the one being differentiated. Differences on the non-uniform
     ``metric_axes`` are scaled by their per-axis ``m{k}`` buffer; with ``sb`` the CPML correction
-    blocks (``_corr_blocks``) are interleaved before the ``cb`` multiply.
+    blocks (``_corr_blocks``) are interleaved before the ``cb`` multiply. With ``dispersive`` (E-kernel
+    only) the plain output writes are replaced by the ADE tail (``_ade_lines``). When ``dispersive``
+    is false the emitted source is byte-for-byte the pre-dispersion kernel.
     """
     nx, ny, nz = shape
     if forward:  # H-kernel: forward differences of E
@@ -334,6 +392,14 @@ def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, metric_a
     body = "\n".join(lines + d_lines)
 
     corr = _corr_blocks(extents, nx, ny, nz) if sb else ""
+    if dispersive:
+        tail = _ade_lines(num_poles, inv_c)
+    else:
+        tail = f"""
+        out[idx]       = {Fname}[idx]       {out_sign} cbx*cx;
+        out[N3+idx]    = {Fname}[N3+idx]    {out_sign} cby*cy;
+        out[2u*N3+idx] = {Fname}[2u*N3+idx] {out_sign} cbz*cz;
+    """
     return (
         _common(nx, ny, nz)
         + _cb_lines(diagonal, scalar)
@@ -344,11 +410,7 @@ def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, metric_a
         float cy = d2 - d3;
         float cz = d4 - d5;"""
         + corr
-        + f"""
-        out[idx]       = {Fname}[idx]       {out_sign} cbx*cx;
-        out[N3+idx]    = {Fname}[N3+idx]    {out_sign} cby*cy;
-        out[2u*N3+idx] = {Fname}[2u*N3+idx] {out_sign} cbz*cz;
-    """
+        + tail
     )
 
 
@@ -383,6 +445,17 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     box_E = _offdiag_box(inv_eps) if _is_full_tensor(inv_eps) else None
     box_H = _offdiag_box(inv_mu) if _is_full_tensor(inv_mu) else None
 
+    # Drude-Lorentz (ADE): folded into the E-kernel (E is iso/diagonal here — fdtdx forbids dispersion
+    # with off-diagonal tensors, so box_E is always None for a dispersive run). Coefficients captured
+    # as constants; the per-pole recurrence is unrolled in the MSL. ``inv_c`` recovers inv_eps = cb/c.
+    dispersive = state.dispersive_c1 is not None
+    num_poles = int(state.dispersive_c1.shape[0]) if dispersive else 0
+    # Pack c1/c2/c3 into a single (3, poles, 1, N, N, N) buffer so the dispersive E-kernel stays under
+    # Metal's 31-buffer limit (full 3-axis CPML + ψ already uses many bindings). Pole count is unrolled
+    # in the MSL, so it never adds buffers — the worst case (3-axis CPML) is a fixed 30 bindings.
+    disp_c = mx.stack([state.dispersive_c1, state.dispersive_c2, state.dispersive_c3], axis=0) if dispersive else None
+    inv_c = 1.0 / c
+
     do_cpml = sb and len(_active_axes(ext)) > 0
     axes = _active_axes(ext)
     comps = _slab_comps(ext)
@@ -405,22 +478,40 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     pso_names = [f"pso{i}" for i in comps]
 
     to_eval = [cb_E] + ([] if cb_H is None else [cb_H]) + metric_E + metric_H + (coeff_E + coeff_H if do_cpml else [])
+    if dispersive:
+        to_eval += [disp_c]
     mx.eval(*to_eval)
 
     grid, tg = (nz, ny, nx), (min(32, nz), min(4, ny), min(4, nx))
 
     cpml_in = (coeff_names + psi_names) if do_cpml else []
-    e_inputs = ["E", "H", "cb", *metric_names_E, *cpml_in]
+    # ADE buffers come last on the E-kernel (after cb/metric/cpml). dc1/2/3 are the per-cell pole
+    # coefficients; Pc/Pp the in polarization, Pco/Ppo the swapped out polarization.
+    disp_in = ["dc", "Pc", "Pp"] if dispersive else []
+    disp_out = ["Pco", "Ppo"] if dispersive else []
+    e_inputs = ["E", "H", "cb", *metric_names_E, *cpml_in, *disp_in]
     h_base = ["E", "H"] if mu_scalar is not None else ["E", "H", "cb"]
     h_inputs = [*h_base, *metric_names_H, *cpml_in]
-    e_outputs = ["out"] + (pso_names if do_cpml else [])
+    e_outputs = ["out"] + (pso_names if do_cpml else []) + disp_out
     h_outputs = ["out"] + (pso_names if do_cpml else [])
 
     kE = mx.fast.metal_kernel(
         name="fdtdmex_E",
         input_names=e_inputs,
         output_names=e_outputs,
-        source=_field_source(shape, per, e_diag, None, ext, do_cpml, metric_axes_E, forward=False),
+        source=_field_source(
+            shape,
+            per,
+            e_diag,
+            None,
+            ext,
+            do_cpml,
+            metric_axes_E,
+            forward=False,
+            dispersive=dispersive,
+            num_poles=num_poles,
+            inv_c=inv_c,
+        ),
         ensure_row_contiguous=True,
     )
     kH = mx.fast.metal_kernel(
@@ -468,6 +559,27 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
             E_new = _box_correct(E_new, E, H, box_E, inv_eps, _update_E)
         return E_new, psi_new
 
+    def e_core_dispersive(E, H, psi_E, P_curr, P_prev):
+        """E-core with the ADE polarization threaded as extra in/out buffers (box_E is None for a
+        dispersive run, so no block-hybrid correction). Output order matches ``e_outputs``:
+        ``out``, ψ slabs (if CPML), then ``Pco``/``Ppo``."""
+        inputs = [E, H, cb_E, *metric_E]
+        out_shapes, out_dtypes = [E.shape], [E.dtype]
+        psi_new = list(psi_E)
+        if do_cpml:
+            inputs += coeff_E + [psi_E[i] for i in comps]
+            for i in comps:
+                out_shapes.append(psi_E[i].shape)
+                out_dtypes.append(psi_E[i].dtype)
+        inputs += [disp_c, P_curr, P_prev]
+        out_shapes += [P_curr.shape, P_prev.shape]
+        out_dtypes += [P_curr.dtype, P_prev.dtype]
+        outs = kE(inputs=inputs, output_shapes=out_shapes, output_dtypes=out_dtypes, grid=grid, threadgroup=tg)
+        if do_cpml:
+            for n, i in enumerate(comps):
+                psi_new[i] = outs[1 + n]
+        return outs[0], tuple(psi_new), outs[-2], outs[-1]
+
     def h_core(E, H, psi_H):
         base = [E, H] if mu_scalar is not None else [E, H, cb_H]
         H_new, psi_new = _run(kH, base, metric_H, psi_H, coeff_H, H)
@@ -475,6 +587,7 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
             H_new = _box_correct(H_new, E, H, box_H, inv_mu, _update_H)
         return H_new, psi_new
 
+    e_core_final = e_core_dispersive if dispersive else e_core
     if compile_step and sb:
-        return mx.compile(e_core), mx.compile(h_core)
-    return e_core, h_core
+        return mx.compile(e_core_final), mx.compile(h_core)
+    return e_core_final, h_core

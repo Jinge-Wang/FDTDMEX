@@ -1,8 +1,9 @@
 # FDTDMEX — forward-engine performance plan
 
-Single entry point. A fresh agent should be able to read this top-to-bottom and start the current
-next step (**Phase 3 item 3 — Drude–Lorentz ADE dispersion**, see "Phase 3" below; items 1–2 done,
-Phase 2 M1–M3 complete and the Metal kernel path is default-on) without prior context. Depth references:
+Single entry point. **Phase 3 is complete** (items 1–3 done: lossy full-aniso + 9-tensor conductivity,
+PEC/PMC, and Drude–Lorentz ADE dispersion — the last with the ADE term folded into the Metal E-kernel
+so dispersive media also ride the bandwidth floor). Phase 2 M1–M3 complete and the Metal kernel path
+is default-on. A fresh agent can read this top-to-bottom without prior context. Depth references:
 - [`docs/performance.md`](docs/performance.md) — roofline, the round-trip (RT) model, current measured
   results + a **History** section (what was tried, the gains, what didn't work — the "why").
 - [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md) — custom-kernel design, region
@@ -53,9 +54,11 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
 
   `FDTDMEX_METAL_KERNEL` is now default-on (`=0` forces the MLX-op cores); ineligible cases fall back
   automatically via `kernel_eligible`. Full validation suite green default-on (20 passed).
-- **Phase 3 — in progress.** Item 1 (lossy full-anisotropic + 9-tensor conductivity) and item 2
-  (PEC/PMC boundaries) complete and parity-validated (25 validation tests green, kernel on and off).
-  **NEXT: item 3 — Drude–Lorentz (ADE) dispersion.** See the "Phase 3" section.
+- **Phase 3 — complete.** Item 1 (lossy full-anisotropic + 9-tensor conductivity), item 2 (PEC/PMC
+  boundaries), and item 3 (Drude–Lorentz ADE dispersion) all parity-validated, kernel on and off
+  (35 validation tests green). Item 3 folds the per-pole ADE recurrence into the Metal E-kernel, so
+  dispersive media ride the bandwidth floor (1216 vs 255 Mcs/s on the MLX-op cores, N=160 1-pole,
+  4.8×); the non-dispersive kernel is byte-identical (1843 Mcs/s, unchanged). See the "Phase 3" section.
 
 ## Engine map (`src/fdtdx/mlx/`)
 
@@ -162,11 +165,26 @@ Build each compile/kernel-friendly (host-side gating, arrays carried as state).
   Metal kernel *and* the MLX-op cores — no `kernel_eligible` change. Un-gated in `dispatch.py`; parity
   + exact tangential-zero checks in
   [`tests/validation/test_mlx_pec_pmc.py`](tests/validation/test_mlx_pec_pmc.py).
-- **NEXT — Item 3: Drude–Lorentz (ADE) dispersion.** Drude + Lorentz poles only (Debye is *not* in
-  upstream fdtdx → no parity oracle, excluded). The one piece adding mutable per-step state: thread
-  `P_curr`/`P_prev` through the loop (host-precompute c1/c2/c3, add the ADE term in the non-full-tensor
-  E-update, include P in the `mx.eval` leaf list). Keep the dispersive-plane-source gate. As it lands,
-  widen `kernel_eligible` where the new surface can ride the Metal kernels.
+- **Item 3 — Drude–Lorentz (ADE) dispersion: done.** Drude + Lorentz poles only (Debye is *not* in
+  upstream fdtdx → no parity oracle, excluded). fdtdx forbids dispersion with off-diagonal tensors, so
+  it is **always iso/diagonal** — the ADE term lives only in the non-full-tensor E-update; the
+  full-tensor path is untouched. Mutable per-step state `P_curr`/`P_prev` (shape `(poles,3,N,N,N)`) is
+  threaded through the **E-side** of the loop ([loop.py](src/fdtdx/mlx/loop.py), host-gated on
+  `state.dispersive_c1`), coefficients `c1/c2/c3` (`(poles,1,N,N,N)`) precomputed JAX-side and carried
+  in [MLXState](src/fdtdx/mlx/state.py)/[bridge.py](src/fdtdx/mlx/bridge.py); P is in the `mx.eval`
+  leaf list. Two cores implement the ADE block:
+  1. **MLX-op `_update_E`** ([update.py](src/fdtdx/mlx/update.py)) — `P_new = c1·P_curr + c2·P_prev +
+     c3·E^n` (the *pre-update* field, matching fdtdx), `E += inv_eps·Σ(P_curr−P_new)`, then the swap.
+     This is the parity reference and the active path for lossy+dispersive (kernel-ineligible via `sigma`).
+  2. **Metal E-kernel ADE fold** ([kernels.py](src/fdtdx/mlx/kernels.py) `_ade_lines`) — the per-pole
+     recurrence unrolled in-MSL, with `c1/c2/c3` packed into one `dc` buffer and `P_curr/P_prev` as
+     extra in/out buffers (keeps the worst case under Metal's 31-buffer limit; pole count is unrolled
+     so never adds buffers). **Entirely behind a build-time `dispersive` flag → the non-dispersive
+     MSL is byte-identical (regression-guarded in the test).** `kernel_eligible` needs no change:
+     lossless-dispersive is iso/diagonal and already eligible; lossy-dispersive is excluded by `sigma`.
+  Parity + kernel-vs-ops + the source-unchanged guard in
+  [test_mlx_dispersion.py](tests/validation/test_mlx_dispersion.py). The dispersive-*plane-source* gate
+  stays. **1216 vs 255 Mcs/s** dispersive (N=160, 1-pole, 4.8×); non-dispersive floor unchanged (1843).
 
 ## Physics-correctness contract (every change)
 

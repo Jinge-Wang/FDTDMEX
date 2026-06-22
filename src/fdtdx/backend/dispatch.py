@@ -13,11 +13,11 @@ Routing:
   features the current milestone supports; otherwise JAX (warn-once on the first decline).
 
 Milestone gating lives in ``_unsupported_reason`` / ``_unsupported_reason_arrays``; widen it as
-kernels land. As of M4 the MLX path covers iso/diag/full-tensor anisotropy, electric/magnetic
-conductivity, CPML + periodic boundaries, dipole + (tilted) TFSF plane sources, the four detector
-types, and non-uniform (rectilinear) grids. Still gated to JAX: gradients, dispersive (ADE)
-materials, lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, and mode
-sources/detectors.
+kernels land. The MLX path covers iso/diag/full-tensor anisotropy (incl. lossy + 9-tensor
+conductivity), CPML + periodic + PEC/PMC boundaries, dipole + (tilted) TFSF plane sources, the four
+detector types, non-uniform (rectilinear) grids, and Drude-Lorentz (ADE) dispersion (Phase 3).
+Still gated to JAX: gradients, dispersive/randomized plane sources, Bloch/complex propagation, and
+mode sources/detectors.
 """
 
 from __future__ import annotations
@@ -115,10 +115,13 @@ def _unsupported_reason_arrays(arrays) -> str | None:
     # Phase 3: lossy full-tensor (9-component) anisotropy and 9-tensor (full-rank) electric/magnetic
     # conductivity are supported -- the aniso A/B update (``_update_aniso``) consumes ``sigma``
     # directly (``compute_anisotropic_update_matrices_mlx``), so these run on the MLX-op cores (the
-    # lossless block-hybrid Metal kernel stays as-is; ``kernel_eligible`` falls these back). Only
-    # dispersive (ADE) materials remain deferred.
-    if arrays.dispersive_c1 is not None:
-        return "dispersive (ADE) materials not supported yet"
+    # lossless block-hybrid Metal kernel stays as-is; ``kernel_eligible`` falls these back).
+    #
+    # Phase 3 item 3: Drude-Lorentz (ADE) dispersion is supported -- polarization P is threaded
+    # through the E-side of the loop (``mlx.update._update_E`` / the Metal E-kernel ADE fold), with
+    # coefficients carried in ``MLXState``. fdtdx forbids dispersion + off-diagonal tensors, so it is
+    # always iso/diagonal: lossless rides the Metal kernel, lossy+dispersive uses the MLX-op cores.
+    # (Dispersive *plane sources* remain gated separately in ``_unsupported_reason``.)
     return None
 
 
