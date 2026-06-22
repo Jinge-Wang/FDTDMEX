@@ -1,48 +1,97 @@
 # FDTDMEX
 
-**A macOS-native (MLX / Metal) fork of [fdtdx](https://github.com/ymahlau/fdtdx) — forward-first FDTD on Apple Silicon.**
+**A macOS-native (MLX / Metal) fork of [fdtdx](https://github.com/ymahlau/fdtdx) — forward FDTD on Apple Silicon.**
 
-FDTDMEX is a **fork of fdtdx** (the JAX FDTD Maxwell solver) that adds a native **MLX** backend so the *forward* time loop runs on the **Metal GPU with unified memory**. On Apple Silicon a forward `run_fdtd` automatically routes to the MLX engine; everywhere else (and for gradients /
-inverse design) it runs the unchanged JAX engine. You keep fdtdx's entire mature front end — geometry, GDS, constraints, sources, detectors, boundaries — and import it the same way:
+FDTDMEX is a **fork of fdtdx** (the JAX FDTD Maxwell solver) that adds a native **MLX** backend so the
+*forward* time loop runs on the **Metal GPU with unified memory**. You keep fdtdx's entire mature front
+end — geometry, GDS, constraints, materials, sources, detectors, boundaries — and import it the same way:
 
 ```python
 import fdtdx   # this fork; the MLX backend is built in
 ```
 
-> **Status — forward engine complete and fast, validated element-wise vs JAX.** The MLX forward engine handles isotropic / diagonal / **full-tensor (9-component) anisotropic** materials, electric & magnetic conductivity (lossy), **Drude–Lorentz (ADE) dispersion**, CPML / periodic / **PEC-PMC** boundaries, point-dipole + (tilted) Gaussian/uniform **TFSF plane sources**, and Energy / Field / Poynting / Phasor detectors — on uniform **and non-uniform (rectilinear) grids** with spacing-weighted operators (2nd-order on graded meshes). It runs on **custom Metal kernels at the memory-bandwidth floor** (performance Phases 1–3 complete). Each surface is cross-checked element-wise against the JAX reference on CPU. Remaining work is a Tidy3D-free mode solver, subpixel smoothing, the agentic workspace (HDF5 + MCP), and Bloch/complex propagation — see [ACTION_PLAN.md](ACTION_PLAN.md) and [docs/roadmap.md](docs/roadmap.md).
+On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the Metal engine; everywhere
+else (and for gradients / inverse design) it runs the unchanged JAX engine, so results cross-check
+element-wise against the JAX reference.
+
+## Status — 2026-06-22
+
+The forward engine is **complete, fast, and validated element-wise vs JAX-CPU.** The full fdtdx forward
+feature set runs on the Metal engine; the items below are what's *different* from upstream and what
+isn't on Metal yet. **The plan for the next phase lives in [ACTION_PLAN.md](ACTION_PLAN.md), not here.**
+
+**What FDTDMEX adds over fdtdx**
+- **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution.
+- **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous (e.g. fully-anisotropic) domains that saturate a discrete GPU's VRAM still fit.
+- **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, interpolation, and off-diagonal averaging; *more correct* than upstream, which leaves the off-diagonal average unweighted (1st-order).
+
+**Not on Metal yet → transparently falls back to JAX**
+- Gradients / inverse design (by design — the MLX backend is forward-only; inverse design stays on JAX/CUDA).
+- Mode sources / detectors (an independent, Tidy3D-free mode solver is the next milestone).
+- Bloch / complex (nonzero-k) propagation; dispersive / randomized plane sources.
+- Non–Apple-Silicon platforms (everything runs on JAX).
 
 ## Why a Mac fork
 
-Most differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT). The strongest case for Apple Silicon here is **memory, not just compute**: a fully-anisotropic simulation stores a 3×3 permittivity *tensor per voxel* — ~9× the isotropic
-footprint — which saturates the VRAM of a single CUDA GPU. Apple's **unified memory** (up to 512 GB) lets the GPU address the whole domain with no host↔device streaming. FDTDMEX leans into that, while **inverse design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
+Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT) — so
+on a Mac, fdtdx runs on CPU. FDTDMEX closes that gap by running the forward time loop **natively on
+Metal via MLX**. The strongest case for Apple Silicon here is **memory, not just compute**: a
+fully-anisotropic simulation stores a 3×3 permittivity tensor *per voxel* (~9× the isotropic footprint),
+which saturates the VRAM of a single discrete GPU. Apple's **unified memory** (up to 512 GB) lets the GPU
+address the whole domain directly. FDTDMEX leans into that for large *forward* runs, while **inverse
+design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
 
-Design priorities:
-- **Forward simulation on Metal**, race-free via MLX's functional / out-of-place updates.
-- **Full-tensor anisotropic, heterogeneous materials** are natively supported.
-- **Non-uniform grids done right** — spacing-weighted curl + interpolation, 2nd-order on graded meshes (see [docs/nonuniform-grid.md](docs/nonuniform-grid.md)), with convergence rate confirmed: ![Convergence plot](docs/images/nonuniform_convergence_mlx.png)
-- **Zero divergence from fdtdx semantics** so results cross-check element-wise against the JAX reference, and improvements can flow back upstream.
+**What stays compatible.** The backend is purely additive — the same `import fdtdx`, the same front end,
+the same object/constraint API, the same `run_fdtd`. On a supported forward run the field/material arrays
+are bridged to MLX once, a pure-MLX time loop runs, and the results (fields + `detector_states`) bridge
+back **unchanged**, so all downstream code (detector reading, plotting, S-parameters) is identical. Every
+supported feature is checked element-wise against the JAX engine, and improvements can flow back upstream.
+
+## Performance & accuracy
+
+**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and
+diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128**
+— e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs
+at the memory-bandwidth floor.
+
+![Forward scaling — MLX/Metal vs JAX-CPU](docs/images/forward_scaling.png)
+
+**Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at
+2nd order on graded meshes (measured slope ≈ 2.0), versus 1st order for an unweighted average.
+
+![Non-uniform grid convergence](docs/images/nonuniform_convergence_mlx.png)
+
+See [docs/performance.md](docs/performance.md) and [docs/nonuniform-grid.md](docs/nonuniform-grid.md) for
+the methodology and numbers.
 
 ## How the backend routing works
 
-The injection point is the whole forward loop (you can't interleave JAX tracing and MLX eager execution): on a supported forward run, the field/material arrays are bridged to MLX once, a pure-MLX Python time loop runs, and the results (fields + `detector_states`) are bridged back — so all downstream code (detector reading, plotting, S-params) is unchanged.
+The injection point is the **whole forward loop** (you can't interleave JAX tracing and MLX eager
+execution), via a small guarded hook in `run_fdtd`.
 
-- **Auto:** on Apple Silicon, a forward-only `run_fdtd` whose features are supported runs on MLX; otherwise it falls back to JAX (warned once). On non-Apple platforms `mlx` isn't installed and everything runs on JAX.
-- **Force a backend** (required for validation — the JAX oracle runs on CPU):
-
+- **Auto (default):** on Apple Silicon, a forward-only `run_fdtd` whose features are all supported runs on
+  MLX; anything unsupported (see Status) falls back to JAX, warned once. On other platforms `mlx` isn't
+  installed and everything runs on JAX.
+- **Force / disable a backend:**
   ```python
-  with fdtdx.use_backend("jax"):   # force the JAX engine (CPU reference)
+  with fdtdx.use_backend("jax"):   # disable MLX — force the JAX engine (also the CPU reference oracle)
       ref = fdtdx.run_fdtd(arrays, objects, config)
-  with fdtdx.use_backend("mlx"):   # force the Metal engine
+  with fdtdx.use_backend("mlx"):   # force the Metal engine (raises if the case is unsupported)
       out = fdtdx.run_fdtd(arrays, objects, config)
   ```
-
   or set `FDTDMEX_BACKEND=mlx|jax` in the environment.
 
-The MLX engine lives in [`src/fdtdx/mlx/`](src/fdtdx/mlx) and the dispatch in [`src/fdtdx/backend/`](src/fdtdx/backend); the only edit to upstream's forward path is a 4-line guarded hook in `run_fdtd`.
+**For fdtdx developers — what gets routed *out* of the JAX engine:** only a supported **forward** run on
+Apple Silicon is handled by the MLX engine ([`src/fdtdx/mlx/`](src/fdtdx/mlx)); the routing decision lives
+in [`src/fdtdx/backend/`](src/fdtdx/backend). Everything else — gradients/inverse design, the unsupported
+forward features listed in Status, and all non-Apple platforms — stays on the **unchanged JAX engine**.
+The only edit to upstream's forward path is a ~4-line guarded hook in `run_fdtd`; the rest of the tree
+tracks fdtdx.
 
 ## Install
 
-Use [`uv`](https://docs.astral.sh/uv/). On **Apple Silicon** you get the Metal backend; on other platforms it installs as plain fdtdx (JAX).
+Use [`uv`](https://docs.astral.sh/uv/). On **Apple Silicon** you get the Metal backend; on other platforms
+it installs as plain fdtdx (JAX).
 
 ```bash
 uv sync                 # core (jax + the fdtdx stack; mlx is auto-installed on Apple Silicon)
@@ -52,60 +101,85 @@ uv sync --extra viz     # + plotly / pyvista / trame
 
 ## Quickstart
 
-A point dipole radiating in vacuum with absorbing (CPML) boundaries — runs on Metal on a Mac, on JAX elsewhere:
+A plane wave transmitted through an isotropic dielectric slab, with absorbing (CPML) boundaries. This is
+a **high-resolution 3-D run** (≈240³ cells) — exactly the regime where the Metal engine is ~6.5–7× over
+JAX-CPU on a Mac (raise the resolution and the lead grows). Runs on Metal on Apple Silicon, on JAX
+elsewhere — no code change.
 
 ```python
 import jax
 import jax.numpy as jnp
 import fdtdx
 
-config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=50e-9), time=120e-15, dtype=jnp.float32)
-objects, constraints = [], []
+config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=25e-9), time=150e-15, dtype=jnp.float32)
+constraints, objects = [], []
 
-volume = fdtdx.SimulationVolume(partial_real_shape=(3e-6, 3e-6, 3e-6))
+# Vacuum volume with absorbing (PML) boundaries on all faces.
+volume = fdtdx.SimulationVolume(partial_real_shape=(6e-6, 6e-6, 6e-6))
 objects.append(volume)
-
 bdict, clist = fdtdx.boundary_objects_from_config(
-    fdtdx.BoundaryConfig.from_uniform_bound(thickness=10), volume
-)
+    fdtdx.BoundaryConfig.from_uniform_bound(thickness=10, boundary_type="pml"), volume)
 constraints += clist
 objects += list(bdict.values())
 
-source = fdtdx.PointDipoleSource(
-    partial_grid_shape=(1, 1, 1),
-    wave_character=fdtdx.WaveCharacter(wavelength=1e-6),
-    polarization=2,
+# An isotropic dielectric slab (ε = 12) spanning the transverse plane.
+slab = fdtdx.UniformMaterialObject(
+    partial_grid_shape=(None, None, None),
+    partial_real_shape=(6e-6, 6e-6, 0.6e-6),
+    material=fdtdx.Material(permittivity=12.0),
 )
-constraints.append(source.place_at_center(volume, axes=(0, 1, 2)))
+constraints.append(slab.place_at_center(volume, axes=(0, 1, 2)))
+objects.append(slab)
+
+# A plane source launching a 1.55 µm wave toward the slab (+z).
+source = fdtdx.UniformPlaneSource(
+    partial_grid_shape=(None, None, 1),
+    partial_real_shape=(6e-6, 6e-6, None),
+    fixed_E_polarization_vector=(1, 0, 0),
+    wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
+    direction="+",
+)
+constraints.append(source.place_relative_to(
+    volume, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, -0.6)))
 objects.append(source)
 
-energy = fdtdx.EnergyDetector(name="energy", reduce_volume=True, plot=False)
-constraints += [energy.same_size(volume, axes=(0, 1, 2)), energy.place_at_center(volume, axes=(0, 1, 2))]
-objects.append(energy)
+# Transmitted Poynting flux on a plane past the slab.
+flux = fdtdx.PoyntingFluxDetector(
+    name="T", direction="+", reduce_volume=True, partial_grid_shape=(None, None, 1))
+constraints += [flux.same_size(volume, axes=(0, 1)),
+                flux.place_relative_to(volume, axes=(2,), own_positions=(0,), other_positions=(0.6,))]
+objects.append(flux)
 
 key = jax.random.PRNGKey(0)
-oc, arrays, params, config, _ = fdtdx.place_objects(object_list=objects, config=config, constraints=constraints, key=key)
+oc, arrays, params, config, _ = fdtdx.place_objects(
+    object_list=objects, config=config, constraints=constraints, key=key)
 arrays, oc, _ = fdtdx.apply_params(arrays, oc, params, key)
 
-_, arrays = fdtdx.run_fdtd(arrays=arrays, objects=oc, config=config, key=key)  # MLX on Apple Silicon
-print(arrays.detector_states["energy"]["energy"].shape)
+_, arrays = fdtdx.run_fdtd(arrays=arrays, objects=oc, config=config, key=key)  # Metal on Apple Silicon
+print(arrays.detector_states["T"])   # transmitted flux vs time
 ```
 
 ## Relationship to upstream
 
-This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/main` stays clean and MLX features can be PR'd back. The MLX backend is additive (new `src/fdtdx/{backend,mlx}` packages plus a tiny `run_fdtd` hook); the rest of the tree tracks fdtdx. `src/fdtdmex` is a thin brand alias that re-exports `fdtdx`.
+This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/main` stays clean and MLX
+features can be PR'd back. The MLX backend is additive (new `src/fdtdx/{backend,mlx}` packages plus the
+tiny `run_fdtd` hook); the rest of the tree tracks fdtdx. `src/fdtdmex` is a thin brand alias that
+re-exports `fdtdx`.
 
 ## Workstreams
 
-| | Workstream | Summary |
+| | Workstream | Status |
 |---|---|---|
-| **WS-A** | Forward MLX engine | Curl, E/H update (isotropic → full-anisotropic), CPML + periodic boundaries, sources, detectors, time loop; spacing-weighted on non-uniform grids. **Complete (M1–M4), validated element-wise vs JAX.** |
-| **WS-B** | Mode solver | 2D-Yee full-vectorial FD eigensolver + mode overlap; TFSF injection. |
-| **WS-C** | Subpixel smoothing | Kottke/Farjadpour effective-tensor averaging as a host pre-step feeding WS-A. |
-| **WS-D** | Orchestration | Declarative config, MCP server, git-like history, locally-hosted web UI. |
+| **WS-A** | Forward MLX engine (curl, E/H update, boundaries, sources, detectors, time loop; Metal kernels at the bandwidth floor) | **Complete** — full forward surface + performance phases, validated element-wise vs JAX |
+| **WS-B** | Independent, Tidy3D-free mode solver + overlap | Next |
+| **WS-C** | Subpixel smoothing (effective-tensor averaging) | Next |
+| **WS-D** | Agentic workspace — config + HDF5 hand-off + MCP server + web UI | Next |
 
-See [docs/architecture.md](docs/architecture.md) and [docs/roadmap.md](docs/roadmap.md).
+Build order and the active plan: [ACTION_PLAN.md](ACTION_PLAN.md); longer arc: [docs/roadmap.md](docs/roadmap.md).
 
 ## License & attribution
 
-This fork inherits fdtdx's **MIT** lineage; the project's own additions are provisionally **Apache-2.0** (see [LICENSE](LICENSE), [NOTICE](NOTICE), [docs/licensing.md](docs/licensing.md) — final licensing is owner-managed). It also consults **MEEP** (GPL) for subpixel-smoothing and near-to-far-field math (referenced, not copied without provenance).
+This fork inherits fdtdx's **MIT** lineage; the project's own additions are provisionally **Apache-2.0**
+(see [LICENSE](LICENSE), [NOTICE](NOTICE), [docs/licensing.md](docs/licensing.md) — final licensing is
+owner-managed). It also consults **MEEP** (GPL) for subpixel-smoothing and near-to-far-field math
+(referenced, not copied without provenance).
