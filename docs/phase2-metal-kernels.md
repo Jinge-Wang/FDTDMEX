@@ -143,7 +143,8 @@ FDTD is memory-bound and CPU+GPU share one DRAM, so the speedup is two factors, 
   effective traffic is similar). A fused kernel at the ~5–8 RT floor adds up to **~4×** on top of (a)
   *if* JAX stays traffic-heavy. **M1 must measure JAX's effective traffic** to size this.
 
-The current 267 vs 190 Mcs/s (1.37×) is factor (a) alone (both at ~36 RT). The kernel chases (b).
+The Phase-1 op-graph numbers (267 vs 190 Mcs/s, 1.37×, both at ~36 RT) were factor (a) alone. The
+M3 kernel realizes factor (b): at the ~5 RT floor it runs ~6.5–7× over JAX-CPU for iso/diagonal.
 
 Rated BW is documented; GPU-sustained ~0.85×; the ceiling column is the **equal-traffic** ratio (a) —
 multiply by (b, ≤~4×) for the full custom-kernel ceiling. Max-domain N is a rough RAM estimate
