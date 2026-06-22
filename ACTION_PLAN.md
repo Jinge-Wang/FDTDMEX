@@ -122,6 +122,22 @@ each gated by [`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_
   floor for N ≤ 256; build it only if `profile_engine.py` shows RT climbing at N ≥ 384
   (`docs/phase2-metal-kernels.md` §3, §11).
 
+### ⚠ Known performance gap — dense/whole-domain full-anisotropy (flagged for a later phase)
+
+The M3 scaling sweep (`docs/performance.md`) shows **uniform full-tensor anisotropy at only ~1.3× over
+JAX-CPU**, versus ~6.5–7× for isotropic/diagonal. This is expected, not a regression: the block hybrid
+accelerates the *iso/diagonal bulk* around a compact off-diagonal inclusion, so the realized speedup
+scales with **how compact the anisotropic region is and how small it is relative to the domain**. A
+domain *filled* with off-diagonal tensor cells has no bulk to accelerate — the whole run is the MLX-op
+aniso cores (the unchanged pre-M3 path, which already leads JAX-CPU ~1.3×). So a uniform-aniso sweep
+seeing little gain is the correct behavior of the *compact-inclusion* design, not a problem with it.
+
+Closing this gap — accelerating *dense* or whole-domain anisotropy — needs the full-tensor update to
+run on the GPU directly: the per-cell in-kernel 3×3 + weighted curl-averaging branch (above), or a
+dedicated full-tensor Metal kernel. Worth investigating in a later phase **if dense-anisotropic
+domains become a target use case** (the stated target is local inclusions, where the block hybrid is
+already at the floor). Until then this is a documented, intentional limit, not a TODO blocking Phase 3.
+
 ## NEXT STEP — Phase 3: broaden supported surface (independent of perf)
 
 Spec: [`docs/widening-mlx-port-plan.md`](docs/widening-mlx-port-plan.md). Order (ascending effort):
