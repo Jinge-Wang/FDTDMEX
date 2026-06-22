@@ -59,13 +59,40 @@ Per-field kernel structure:
   **double-buffer** the updated field (read old from an input buffer, write new to a separate output)
   and load a halo of that field. Same for H with a μ-tensor.
 
-## 5. Region specialization (heterogeneous materials)
+## 5. Region specialization for heterogeneous materials (single-Mac subdivision)
 
 The current engine selects one global path: if any cell is full-tensor, the whole domain runs the
-anisotropic update (with its neighbour-averaging). For heterogeneous domains, tag cells by material
-class and dispatch the cheap isotropic kernel on isotropic sub-blocks and the per-cell 3×3 A/B kernel
-only on anisotropic sub-blocks (per-block branch, or separate launches over index sets). This removes
-the anisotropic neighbour-averaging and double-buffering wherever the cell is isotropic.
+anisotropic update (with its neighbour-averaging). For heterogeneous domains (isotropic bulk + local
+anisotropic inclusions — the target use case) we want the cheap isotropic update where the cell is
+isotropic and the 3×3 A/B update only where it isn't.
+
+**On a single Mac this is a compute-placement optimization, not a distributed-stencil problem.** A
+distributed (multi-GPU/multi-node) implementation needs: per-partition iso/aniso cube lists, recorded
+neighbours, explicit halo arrays exchanged between partitions, and compute/exchange overlap (streams)
+— all driven by (a) in-place updates and (b) each device holding only its partition. **Neither
+applies here:**
+- **Unified memory:** one address space; every threadgroup can read the whole `E_old` directly. A
+  boundary cell of an anisotropic region reads its neighbour's `E_old` by global index — no halo copy,
+  no inter-device exchange. The "halo" is just a threadgroup-memory load from the shared buffer.
+- **Functional / out-of-place = double-buffered:** all kernels read the frozen `E_old` and write a
+  separate `E_new`. The cross-region race (a neighbour reading an already-overwritten cell) **cannot
+  occur**, independent of which side is iso or aniso and of execution order. No ordering constraint,
+  no interior/boundary split.
+
+So subdivision reduces to placement, expressible three ways (increasing complexity):
+1. **Per-cell branch in one kernel** — each thread reads a material-class tag; iso threads do the
+   diagonal update, aniso threads the 3×3 + neighbour-average. Metal SIMD-groups are 32-wide and
+   material regions are contiguous, so divergence is near-zero; a per-threadgroup "any aniso?" flag
+   lets iso-only tiles skip the E-halo load. Simplest; likely sufficient.
+2. **Block-tagged dispatch** — tag at tile granularity; launch the iso kernel over iso-tile indices
+   and the aniso kernel over aniso-tile indices. Direct analog of the CUDA cube lists, but with **no
+   neighbour bookkeeping and no halo arrays** (neighbours come from the shared `E_old`).
+3. **Gather/scatter index sets** — full separation; only if (1)/(2) show real divergence cost.
+
+Tile-size trade-off here is **occupancy / threadgroup-memory reuse** (larger tiles) vs **divergence
+at iso/aniso interfaces** (tiles that don't straddle the boundary) — *not* comm-vs-compute. The
+interface is a 2D surface in a 3D volume, so the straddling fraction is small and a single moderate
+tile size suffices for most material distributions; no per-region adaptive sizing needed.
 
 ## 6. CPML
 
@@ -73,15 +100,57 @@ the anisotropic neighbour-averaging and double-buffering wherever the cell is is
 recurrence + correction run only on boundary-slab tiles; interior tiles compute the plain curl. The
 per-axis slab extents (`pml.detect_pml_slabs`) and the slab ψ layout carry over directly.
 
-## 7. Staging
+## 7. Speedup ceiling vs CPU/JAX (roofline) + Apple-Silicon table
 
-1. **Isotropic, uniform, interior (no CPML)** E-kernel and H-kernel — the common bulk. Validate
-   element-wise against the MLX-op path on an interior-only region; measure RT and Mcs/s.
-2. **+ CPML** on boundary-slab tiles; full-domain parity.
-3. **+ diagonal / full-anisotropic** via region specialization; **+ non-uniform metric** (per-axis
-   scale arrays passed in). Go/no-go on extending vs keeping the MLX-op fallback for these.
+FDTD is memory-bound and CPU+GPU share one DRAM, so the speedup is two factors, not "GPU flops":
 
-## 8. Validation & integration
+- **(a) Bandwidth-utilization gap (chip-dependent, ~1.4×).** GPU sustains ~0.85× rated unified BW
+  (measured 0.88 on M4 Pro); a multicore CPU sustains ~0.55–0.65× of the *same* bus and caps at a
+  per-die ceiling (~240 GB/s, the measured M1-Max CPU max). Back-calc from our data: JAX-CPU ≈ 170
+  GB/s effective on M4 Pro → ceiling 0.85/0.63 ≈ **1.4×** at equal traffic. It widens only where rated
+  BW outruns the CPU ceiling (top-bin Max, Ultra).
+- **(b) Traffic gap (chip-independent, the real prize).** JAX/XLA on CPU, like the pre-Phase-1 engine,
+  does not tile the stencil — it streams ~tens of full-array passes (compiled MLX ≈ 36 RT; JAX's
+  effective traffic is similar). A fused kernel at the ~5–8 RT floor adds up to **~4×** on top of (a)
+  *if* JAX stays traffic-heavy. **M1 must measure JAX's effective traffic** to size this.
+
+The current 267 vs 190 Mcs/s (1.37×) is factor (a) alone (both at ~36 RT). The kernel chases (b).
+
+Rated BW is documented; GPU-sustained ~0.85×; the ceiling column is the **equal-traffic** ratio (a) —
+multiply by (b, ≤~4×) for the full custom-kernel ceiling. Max-domain N is a rough RAM estimate
+(isotropic, ~50 B/cell double-buffered, 70% working set).
+
+| Chip | Rated BW (GB/s) | Max RAM | GPU sustained | Metal:CPU ceiling (equal-traffic) | ~max iso N |
+|---|--:|--:|--:|:--:|--:|
+| M1 Pro | 200 | 32 GB | ~170 | ~1.4× | ~760 |
+| M2 Pro | 200 | 32 GB | ~170 | ~1.4× | ~760 |
+| M3 Pro | 150 | 36 GB | ~128 | ~1.4× | ~790 |
+| M4 Pro | 273 | 64 GB | ~240 (meas) | ~1.4× (measured 1.37) | ~965 |
+| M1 Max | 400 | 64 GB | ~340 | ~1.4× | ~965 |
+| M2 Max | 400 | 96 GB | ~340 | ~1.4× | ~1100 |
+| M3 Max | 300–400 | 128 GB | ~255–340 | ~1.4× | ~1220 |
+| M4 Max | 410–546 | 128 GB | ~350–464 | ~1.4–1.9× | ~1220 |
+| M1/M2 Ultra | 800 | 128 / 192 GB | ~680 | ~1.4× (≤~2.7× if CPU caps) | ~1220 / 1390 |
+| M3 Ultra | 800 | 512 GB | ~680 | ~1.4× (≤~2.7× if CPU caps) | ~1930 |
+
+The *ratio* over CPU is ~constant (Apple scales CPU & GPU BW together) except where BW outruns the CPU
+(M4 Max, Ultra). A bigger chip's decisive wins are **absolute throughput** (∝ BW: Max/Ultra ≈ 1.5–3×
+a Pro in Mcs/s) and **capacity** (RAM → domains a discrete GPU can't hold). Numbers are model
+estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
+
+## 8. Staging (M1 is the go/no-go)
+
+1. **M1 — isotropic, uniform, interior (no CPML), go/no-go.** E-kernel and H-kernel; tile + z-march;
+   fp32. Validate element-wise vs the MLX-op path on an interior-only region; measure RT and Mcs/s,
+   **and measure JAX's effective traffic (factor b)**. *Decision:* if the kernel approaches the ~5–8
+   RT floor (≫ the compiled 21 RT CPML-off / 36 RT CPML-on), proceed; if MLX-op fusion is already near
+   the roofline (kernel ≈ compiled), **stop** — custom kernels aren't worth the maintenance.
+2. **M2 — + CPML** on boundary-slab tiles (reuse Fix 1.2 geometry); full-domain parity.
+3. **M3 — heterogeneous materials** via §5 region specialization (start with per-cell branch); **+
+   non-uniform metric** (per-axis scale arrays). Go/no-go on full replacement vs hybrid (kernel for
+   the isotropic bulk, MLX-op fallback for the rest).
+
+## 9. Validation & integration
 
 - Element-wise parity vs the forced-JAX oracle (`tests/validation/`), rel < 1e-3; add a dedicated
   kernel parity test. Marginal failure → raise resolution, never loosen tolerance.
@@ -90,7 +159,7 @@ per-axis slab extents (`pml.detect_pml_slabs`) and the slab ψ layout carry over
 - Benchmark with `profile_engine.py` (RT/step) and `bench_forward.py` (scaling) against the Phase-1
   numbers.
 
-## 9. Open questions
+## 10. Open questions
 
 - Threadgroup-memory budget on `applegpu_g16s` and the best tile shape (measure).
 - Cleanest way to pass the slab ψ (6 per-component arrays of differing shape) and per-axis metric
