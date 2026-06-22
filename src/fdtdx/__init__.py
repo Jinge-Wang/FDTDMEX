@@ -32,6 +32,7 @@ from fdtdx.core.physics.metrics import (
     normalize_by_poynting_flux,
 )
 from fdtdx.core.physics.modes import compute_mode
+from fdtdx.core.physics.subpixel import smooth_cross_section_2d, smooth_inverse_permittivity
 from fdtdx.core.switch import OnOffSwitch
 from fdtdx.core.wavelength import WaveCharacter
 from fdtdx.dispersion import (
@@ -278,6 +279,8 @@ __all__ = [
     "resolve_object_constraints",
     "run_fdtd",
     "setup_sparams_simulation",
+    "smooth_cross_section_2d",
+    "smooth_inverse_permittivity",
     "sources_from_gds_ports",
     "unfold_array",
     "unfold_detector_states",
