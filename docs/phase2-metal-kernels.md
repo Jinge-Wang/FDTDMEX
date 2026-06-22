@@ -1,7 +1,7 @@
 # Phase 2 scoping — custom Metal update kernels
 
 > Status: scoping (not started). Phase 1 is complete (default path 277 Mcs/s / 36 RT, CPML on;
-> MLX-op ceiling 473 Mcs/s / 21 RT — see [metal-bottleneck-analysis.md](metal-bottleneck-analysis.md)).
+> MLX-op ceiling 473 Mcs/s / 21 RT — see [performance.md](performance.md)).
 > This document scopes the next step: replacing the per-field MLX-op chain with one hand-written
 > Metal kernel per field. fp32 only.
 
@@ -100,7 +100,32 @@ tile size suffices for most material distributions; no per-region adaptive sizin
 recurrence + correction run only on boundary-slab tiles; interior tiles compute the plain curl. The
 per-axis slab extents (`pml.detect_pml_slabs`) and the slab ψ layout carry over directly.
 
-## 7. Speedup ceiling vs CPU/JAX (roofline) + Apple-Silicon table
+## 7. Memory and in-place updates
+
+In-place updates reduce **footprint, not bandwidth**: a bandwidth-bound stencil reads `E_old` (3N³),
+reads `H` (3N³), and writes `E` (3N³) whether the write aliases the input or a fresh buffer —
+identical traffic, identical throughput. In-place is therefore a **capacity** lever (larger max
+domain), not a speed lever, and is decoupled from M1.
+
+MLX's caching allocator reuses dead buffers, so out-of-place is throughput-equivalent (last step's
+`E_old` buffer is reused for this step's `E_new` — no per-step alloc/zeroing). The only cost of
+staying out-of-place is one transient extra field-array of peak memory (~2×E + H during the
+E-update). **Measure `mx.get_peak_memory()` at the target N before building any manual in-place path**
+— materials + the domain itself usually dominate, not that one array.
+
+If footprint is the binding constraint (very large or interface-heavy domains), the capacity scheme:
+keep one full field updated in place, plus a small compact buffer holding only the `E_old` cells some
+neighbour's update reads. Race-free as **two passes with a barrier**: (1) gather the needed `E_old`
+into the compact buffer; (2) in-place update — isotropic cells write in place (read own cell + `H`),
+anisotropic/smoothed cells read stale neighbours from the compact buffer. The needed set is static
+(the stencil support of every full-tensor cell) and includes **subpixel-smoothed interfaces**
+(smoothing yields an effective ε *tensor* even between isotropic materials), so an interface-rich
+device shrinks the saving. Index with a dense row-major bijection `x·Ny·Nz + y·Nz + z` (not base-10
+powers — they leave gaps and overflow int32 past N≈1000); the compact buffer needs a sparse gather
+list, and a global per-cell reverse map itself costs ~⅓ of a field, so keep the structure implicit
+(process anisotropic regions block-wise). **Capacity optimization only — revisit after M1.**
+
+## 8. Speedup ceiling vs CPU/JAX (roofline) + Apple-Silicon table
 
 FDTD is memory-bound and CPU+GPU share one DRAM, so the speedup is two factors, not "GPU flops":
 
@@ -138,7 +163,7 @@ The *ratio* over CPU is ~constant (Apple scales CPU & GPU BW together) except wh
 a Pro in Mcs/s) and **capacity** (RAM → domains a discrete GPU can't hold). Numbers are model
 estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
 
-## 8. Staging (M1 is the go/no-go)
+## 9. Staging (M1 is the go/no-go)
 
 1. **M1 — isotropic, uniform, interior (no CPML), go/no-go.** E-kernel and H-kernel; tile + z-march;
    fp32. Validate element-wise vs the MLX-op path on an interior-only region; measure RT and Mcs/s,
@@ -150,7 +175,7 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
    non-uniform metric** (per-axis scale arrays). Go/no-go on full replacement vs hybrid (kernel for
    the isotropic bulk, MLX-op fallback for the rest).
 
-## 9. Validation & integration
+## 10. Validation & integration
 
 - Element-wise parity vs the forced-JAX oracle (`tests/validation/`), rel < 1e-3; add a dedicated
   kernel parity test. Marginal failure → raise resolution, never loosen tolerance.
@@ -159,7 +184,7 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
 - Benchmark with `profile_engine.py` (RT/step) and `bench_forward.py` (scaling) against the Phase-1
   numbers.
 
-## 10. Open questions
+## 11. Open questions
 
 - Threadgroup-memory budget on `applegpu_g16s` and the best tile shape (measure).
 - Cleanest way to pass the slab ψ (6 per-component arrays of differing shape) and per-axis metric
