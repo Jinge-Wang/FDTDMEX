@@ -50,6 +50,28 @@ Visualization exists but is matplotlib/save-to-disk via `Logger`: `plot_setup`, 
 no single object to hold/inspect a whole setup, no inline reprs, no one-call run, no schema/serialization
 for hand-off, no interactive 3D.
 
+### Start here — next implementation tasks (in order)
+
+1. **`Scene`/`Simulation` facade** (5a) — new `src/fdtdx/scene.py`. A class bundling
+   `config + object_list + constraints` with `.add(...)`, `.place()`, `.plot()` (wrap
+   `plot_setup`/`plot_material`), `.run()` (wrap `place_objects → apply_params → run_fdtd`), `.results`,
+   and `_repr_html_`/`__repr__`. **Done when** a notebook can do `sim = Scene(config); sim.add(...);
+   sim.plot(); data = sim.run()` and `.run()` matches the explicit path; refactor
+   [`examples/quickstart_notebook.py`](examples/quickstart_notebook.py) onto it. Export from `fdtdx`.
+2. **Config schema** (5b) — new `src/fdtdmex/io/schema.py`: pydantic models for Volume/Materials/
+   Structures/Sources/Detectors/Boundaries/Grid/Run; JSON round-trip; align names with
+   [`conversion/json.py`](src/fdtdx/conversion/json.py). **Done when** a `Scene` round-trips to/from JSON.
+3. **`sim_init`/`sim_run`/`sim_postproc`** (5b) — `src/fdtdmex/io/`: `sim_init` resolves a setup →
+   config HDF5 (h5py, resolved `ArrayContainer` only); `sim_run` unwraps → feeds
+   [`to_mlx_state`](src/fdtdx/mlx/bridge.py)/`freeze_*` → results HDF5; `sim_postproc` → small results.
+   **Done when** a resolved config reproduces a direct `run_fdtd` (validate round-trip; mockable backend).
+4. **MCP server** (5c) — `server/fdtdmex_mcp/` (stub today): `introspect` + `build`/`edit`/`validate` +
+   the trio. `mcp` extra. Depends on task 2's schema.
+5. **Web UI** (5d) — later; plotly or pyvista-trame first.
+
+Detail for each below. Engine backlog (tensorial solver, bends, WS-C auto-integration, Bloch/complex)
+is separate and non-blocking.
+
 ### 5a. Notebook front end (do first — unblocks day-to-day use)
 
 Goal: a Tidy3D-like notebook experience reusing the existing matplotlib utilities (they already return
@@ -60,9 +82,10 @@ Goal: a Tidy3D-like notebook experience reusing the existing matplotlib utilitie
   the existing low-level API intact; the facade only removes boilerplate.
 - **Inline reprs** — `_repr_html_` / `__repr__` summaries for the facade and key objects (counts,
   extents, materials, sources/detectors) so a notebook cell shows the setup at a glance.
-- **A quickstart notebook / narrated example** that walks define → `plot_setup` → `plot_material` →
-  `run` → `plot_field_slice` / `plot_mode` / `plot_smatrix`, end-to-end, inline. This is the concrete
-  "see how a sim is defined, built, run" artifact.
+- **A quickstart notebook — done** ([`examples/quickstart_notebook.py`](examples/quickstart_notebook.py),
+  `# %%` cells): define → `plot_setup` → `plot_material` → run → `plot_field_slice` →
+  `compute_mode`/`plot_mode` → `SMatrixResult`/`plot_smatrix`, inline, verified on the MLX backend.
+  Refactor it onto the `Scene` facade once that lands.
 - Verify each plot renders inline and the facade `.run()` matches the explicit-call result.
 
 ### 5b. Config schema + the sim_init/sim_run/sim_postproc trio (the agentic seam)
