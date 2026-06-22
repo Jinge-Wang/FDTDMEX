@@ -165,12 +165,22 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
 
 ## 9. Staging (M1 is the go/no-go)
 
-1. **M1 — isotropic, uniform, interior (no CPML), go/no-go.** E-kernel and H-kernel; tile + z-march;
-   fp32. Validate element-wise vs the MLX-op path on an interior-only region; measure RT and Mcs/s,
-   **and measure JAX's effective traffic (factor b)**. *Decision:* if the kernel approaches the ~5–8
-   RT floor (≫ the compiled 21 RT CPML-off / 36 RT CPML-on), proceed; if MLX-op fusion is already near
-   the roofline (kernel ≈ compiled), **stop** — custom kernels aren't worth the maintenance.
-2. **M2 — + CPML** on boundary-slab tiles (reuse Fix 1.2 geometry); full-domain parity.
+1. **M1 — isotropic, uniform, interior (no CPML), go/no-go. ✅ GO (`benchmarks/m1_kernel.py`).**
+   Thread-per-cell E and H `mx.fast.metal_kernel`s (curl read from global, neighbour reuse via cache),
+   bit-exact vs the compiled MLX-ops same-math step (maxdiff 0.0). M4 Pro:
+
+   | | Mcs/s | RT/step |
+   |---|--:|--:|
+   | compiled MLX-ops (same math) | 545–550 | ~18 |
+   | **custom Metal kernels** | **3150–3190** | **~3** |
+
+   The kernel reaches the **~3 RT bandwidth floor** (75 B/cell-step ≈ read+write E,H), a **5.8×**
+   speedup over the compiled MLX-ops path, consistent at N=192 and 256 — so MLX op-fusion leaves ~6×
+   on the floor for the bulk update, and factor (b) is confirmed large. (JAX-CPU's effective traffic
+   is ~36 RT — its 195 Mcs/s ≈ compiled-MLX at the CPU's ~170 GB/s — so the floor kernel is far above
+   it.) **Proceed.** Even discounted for CPML/sources, the headroom is decisive.
+2. **M2 — + CPML** on boundary-slab tiles (reuse Fix 1.2 geometry); full-domain parity. Integrate the
+   kernels into `loop.py` behind a flag (fall back to the MLX-op path); add a kernel parity test.
 3. **M3 — heterogeneous materials** via §5 region specialization (start with per-cell branch); **+
    non-uniform metric** (per-axis scale arrays). Go/no-go on full replacement vs hybrid (kernel for
    the isotropic bulk, MLX-op fallback for the rest).
