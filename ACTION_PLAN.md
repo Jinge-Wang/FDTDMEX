@@ -1,7 +1,8 @@
 # FDTDMEX — forward-engine performance plan
 
 Single entry point. A fresh agent should be able to read this top-to-bottom and start the current
-next step (**Phase 2 M3**, see "NEXT STEP" below) without prior context. Depth references:
+next step (**Phase 3 — broaden supported surface**, see "NEXT STEP" below; Phase 2 M1–M3 are
+complete and the Metal kernel path is default-on) without prior context. Depth references:
 - [`docs/performance.md`](docs/performance.md) — roofline, the round-trip (RT) model, current measured
   results + a **History** section (what was tried, the gains, what didn't work — the "why").
 - [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md) — custom-kernel design, region
@@ -41,16 +42,27 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
   are `mx.compile`d (the metal kernel composes as a graph node) — **uncompiled the slab ops dominate
   and the CPML-on step is slower than ops**. Validated element-wise vs MLX-op cores (rel < 1e-4) and
   vs the JAX oracle (rel < 1e-3) for iso/diagonal/periodic + CPML ([`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py)); full suite green with the flag forced on.
-- **NEXT: Phase 2 M3** — heterogeneous materials (per-cell/block region specialization) + non-uniform
-  metric in the kernel; and fold CPML into the kernel for slab cells to close the CPML-on gap. See
-  "Next step" below.
+- **Phase 2 M3 — complete; kernel path default-on.** Three independent wins, each parity-gated
+  (`tests/validation/test_mlx_kernel.py`: kernel-vs-ops rel < 1e-4, vs-JAX rel < 1e-3) and benchmarked:
+  (1) **CPML folded into the kernel** — each slab thread advances ψ + adds the κ-stretch/ψ correction
+  in-kernel (compact slab ψ + a/b/1κ as extra in/out buffers), dropping the M2 spatial-hybrid
+  full-array rebuild. CPML-on **375 → 1826 Mcs/s, 27 → 5 RT (4.9×, at the bulk floor)** iso /
+  1711 diag (`profile_engine.py --kernel`). (2) **Non-uniform metric in-kernel** — each difference
+  scaled by its per-axis `reference_spacing/cell_width` buffer; non-uniform iso/diag now ride the
+  kernel at the same ~5 RT floor. (3) **Heterogeneous full-tensor via block hybrid** — kernel runs
+  the diagonal bulk, the off-diagonal inclusion bbox gets the MLX-op aniso update over a haloed
+  interior slice, spliced back; N=128 8³ inclusion **125 → 1124 Mcs/s (9.0×)**. Default flipped on
+  (`FDTDMEX_METAL_KERNEL` unset = on; `=0` forces the MLX-op path); ineligible cases (lossy,
+  scattered/oversized tensor, gradients) still fall back via `kernel_eligible`. Full validation suite
+  green default-on (20 passed).
+- **NEXT: Phase 3** — broaden the supported physics surface (independent of perf). See "Next step".
 
 ## Engine map (`src/fdtdx/mlx/`)
 
 | file | role |
 |---|---|
 | [`loop.py`](src/fdtdx/mlx/loop.py) | time-loop driver; `_build_cores` compiles E-core/H-core (kernel cores when `use_metal_kernel` + eligible, else MLX-op cores); host-gated source injection between them |
-| [`kernels.py`](src/fdtdx/mlx/kernels.py) | **M2**: custom Metal E/H bulk kernels (per-cell `cb=c·inv_eps`, periodic ghost) + slab-CPML hybrid (`_slab_correction`) + `kernel_eligible`; `build_kernel_cores` returns compiled cores |
+| [`kernels.py`](src/fdtdx/mlx/kernels.py) | **M2+M3**: custom Metal E/H bulk kernels (per-cell `cb=c·diag(inv_eps)`, periodic ghost, **in-kernel CPML fold** via slab ψ + a/b/1κ buffers, **in-kernel non-uniform metric** `m{k}`) + **block hybrid** for full-tensor inclusions (`_offdiag_box`/`_set_box` + MLX-op aniso over the bbox) + `kernel_eligible`; `build_kernel_cores` returns compiled cores |
 | [`curl.py`](src/fdtdx/mlx/curl.py) | pad-free slice-diff Yee curl + slab-CPML decomposition (`_cpml_curl`, `_slab_take/_slab_add`, `_AX`) |
 | [`update.py`](src/fdtdx/mlx/update.py) | E/H update — iso/diagonal fast path + full-tensor A/B path; pure `_update_E/_update_H` |
 | [`pml.py`](src/fdtdx/mlx/pml.py) | host CPML coeff precompute + `detect_pml_slabs` (slab geometry M2 reuses) |
@@ -78,51 +90,30 @@ M1 microbench (the bit-exact standalone kernel M2 generalised, kept as the roofl
 - **Mixed precision** — fp32 minimum.
 - **Manual in-place for speed** — in-place saves footprint, not bandwidth (capacity lever only; phase2 doc §7).
 
-## NEXT STEP — Phase 2 M3 (heterogeneous materials + close the CPML-on gap)
+## Phase 2 M3 — complete (see Status for results)
 
-M2 is done (custom Metal kernels in the engine; see Status). M3 widens the kernel path and recovers
-the CPML-on throughput the slab MLX-op correction currently leaves on the table.
+All three perf/coverage sub-tasks landed in [`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py),
+each gated by [`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py)
+(kernel-vs-ops rel < 1e-4, vs-JAX rel < 1e-3) and benchmarked:
+- **CPML fold** — `_corr_blocks` emits the in-kernel ψ recurrence + κ-stretch correction over slab
+  threads; `build_kernel_cores` passes the compact slab ψ and per-axis `a/b/1κ` as extra in/out
+  buffers. Replaced M2's `_slab_correction` full-array rebuild. CPML-on 375 → 1826 Mcs/s (4.9×).
+- **Non-uniform metric** — `_metric_lines`/`_metric_side` scale each difference by its `m{k}` buffer.
+- **Block hybrid** — `_offdiag_box` finds the inclusion bbox; `_box_correct` runs the MLX-op
+  `_update_E`/`_update_H` aniso over a haloed interior slice; `_set_box` splices it back.
+- **z-march tiling** — still deferred (measurement-gated, N ≥ 384; `docs/phase2-metal-kernels.md` §3,
+  §11): the thread-per-cell kernel hits the floor at N ≤ 256, so it is not needed yet.
 
-**Where M3 works** (all in [`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py) unless noted):
-- `kernel_eligible(state)` is the gate — it currently returns `False` for full-tensor (9-comp)
-  materials, any conductivity, and non-uniform metric, so those whole runs fall back to the MLX-op
-  cores. M3 widens it as each case lands.
-- `build_kernel_cores` generates the Metal source (`_e_source`/`_h_source`) and returns the compiled
-  cores; `_slab_correction` is the spatial-hybrid slab-CPML patch. These are what M3 extends.
+`FDTDMEX_METAL_KERNEL` is now **default-on** ([`backend/dispatch.py`](src/fdtdx/backend/dispatch.py)
+`_metal_kernel_enabled`); `=0` forces the MLX-op path.
 
-1. **Region specialization** for heterogeneous domains (isotropic bulk + local anisotropic/smoothed
-   inclusions — the target use case): a per-cell material-class branch in the kernel (cheap diagonal
-   update where iso, the 3×3 A/B + neighbour-average only where not). On unified memory + out-of-place
-   this is pure compute placement — no halo arrays, no neighbour bookkeeping. Today an all-or-nothing
-   gate sends any domain containing a single 9-tensor cell entirely to the MLX-op cores; M3 keeps the
-   kernel on the iso/diagonal bulk. `docs/phase2-metal-kernels.md` §5.
-2. **Non-uniform metric in the kernel** — multiply each per-axis difference by the `metric_fwd`/
-   `metric_bwd` scale arrays (passed as buffers) instead of gating non-uniform grids off. The slab
-   path already handles array metrics (`curl._slab_diff` slices them), so only the bulk kernel source
-   needs the factor.
-3. **Fold CPML into the kernel for slab cells** to close the CPML-on gap: the spatial hybrid's
-   `_slab_add` rebuilds full component arrays via `concatenate` (~22 RT on top of the 5 RT bulk at
-   N=192 → 27 RT total). A second small kernel that scatter-adds the κ-stretch + ψ correction over
-   only the slab cells (ψ carried as state) would drop CPML-on toward the bulk floor. (Deferred from
-   M2 by design; `docs/phase2-metal-kernels.md` §6.)
-4. **z-march tiling** only if `profile_engine.py` shows RT climbing above the floor at large N
-   (N ≥ 384) — the cache already captures the neighbour reuse at N ≤ 256, so this is measurement-gated
-   (`docs/phase2-metal-kernels.md` §3, §11). The thread-per-cell kernel is a self-contained swap.
-
-Each sub-task is independent and gated by its own element-wise parity test (extend
-[`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py): kernel-core vs MLX-op-
-core rel < 1e-4, then vs the JAX oracle rel < 1e-3) before moving on.
-
-**Done when:** the kernel path covers heterogeneous iso/diagonal + full-tensor inclusions and
-non-uniform grids (the gate rarely falls back), CPML-on throughput climbs well above 374 Mcs/s toward
-the bulk floor, all validation green — **then** flip `FDTDMEX_METAL_KERNEL` default-on for the
-eligible cases. `docs/phase2-metal-kernels.md` §5, §9.
-
-## Phase 3 — broaden supported surface (independent of perf)
+## NEXT STEP — Phase 3: broaden supported surface (independent of perf)
 
 Spec: [`docs/widening-mlx-port-plan.md`](docs/widening-mlx-port-plan.md). Order (ascending effort):
 lossy full-anisotropic + 9-tensor conductivity; PEC/PMC boundaries; Drude–Lorentz (ADE) dispersion.
-Build each compile/kernel-friendly (host-side gating, arrays carried as state).
+Build each compile/kernel-friendly (host-side gating, arrays carried as state). As each lands, widen
+`kernel_eligible` so the new surface rides the Metal kernels where it can (the dual-conductivity /
+full-tensor cases currently fall back to the MLX-op cores).
 
 ## Physics-correctness contract (every change)
 
@@ -137,8 +128,8 @@ Build each compile/kernel-friendly (host-side gating, arrays carried as state).
 ## Validation & measurement
 
 ```bash
-uv run --with pytest pytest tests/validation -q                                 # parity (uniform + non-uniform)
-FDTDMEX_METAL_KERNEL=1 uv run --with pytest pytest tests/validation -q          # parity with the M2 kernel path on
+uv run --with pytest pytest tests/validation -q                                 # parity (kernel default-on)
+FDTDMEX_METAL_KERNEL=0 uv run --with pytest pytest tests/validation -q          # parity with the MLX-op cores (kernel off)
 uv run python benchmarks/m1_kernel.py --N 192 --iters 200                       # M1 kernel-vs-MLXops microbench
 uv run python benchmarks/profile_engine.py --N 192 --steps 200 --kernel        # per-step RT (ops × CPML + metal-kernel)
 uv run python benchmarks/profile_metal.py  --N 192 --iters 100                  # roofline

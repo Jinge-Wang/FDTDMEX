@@ -1,10 +1,13 @@
 # Phase 2 — custom Metal update kernels (design + staging)
 
-> Status: **M1 ✅ + M2 ✅ done; M3 next.** Phase 1 default = 277 Mcs/s / 36 RT (MLX-op cores, CPML on).
-> M2 landed the custom Metal E/H kernels in the engine ([`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py),
-> behind `FDTDMEX_METAL_KERNEL`): **CPML-off 2219 Mcs/s / 5 RT (4.5× over the op path, at the floor);
-> CPML-on 374 / 27 (1.31×)** — see [performance.md](performance.md) for the full table + history.
-> This document is the design/spec; §9 tracks the staging. fp32 only.
+> Status: **M1 ✅ + M2 ✅ + M3 ✅ done; Metal kernel path default-on.** Phase 1 default = 277 Mcs/s /
+> 36 RT (MLX-op cores, CPML on). M2 landed the custom Metal E/H kernels in the engine
+> ([`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py)) with the CPML spatial hybrid (CPML-on
+> 374 / 27 RT). **M3 folded CPML into the kernel (CPML-on 374 → 1826 Mcs/s / 5 RT, at the bulk
+> floor), added in-kernel non-uniform metric, and a block hybrid for full-tensor inclusions
+> (heterogeneous 125 → 1124 Mcs/s), then flipped `FDTDMEX_METAL_KERNEL` default-on** (`=0` forces the
+> MLX-op path) — see [performance.md](performance.md) for the table + history. This document is the
+> design/spec; §9 tracks the staging. fp32 only.
 
 ## 1. Goal
 
@@ -201,10 +204,21 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
    op path; (b) the CPML-on gap (27 vs 5 RT) is the slab `_slab_add` rebuilding full arrays via
    `concatenate` (~22 RT) — folding CPML into the kernel for the slab cells (the in-kernel slab-tile
    approach §6 anticipated) is deferred to M3.
-3. **M3 — heterogeneous materials** via §5 region specialization (start with per-cell branch); **+
-   non-uniform metric** (per-axis scale arrays); **+ fold CPML into the kernel for slab cells** to
-   close the CPML-on gap. Go/no-go on full replacement vs hybrid (kernel for the isotropic bulk,
-   MLX-op fallback for the rest).
+3. **M3 — ✅ DONE.** Three independent wins, all in [`kernels.py`](../src/fdtdx/mlx/kernels.py),
+   parity-gated (`test_mlx_kernel.py`) + benchmarked, then `FDTDMEX_METAL_KERNEL` flipped default-on:
+   - **Fold CPML into the kernel** (the §6 in-kernel slab approach): `_corr_blocks` runs the ψ
+     recurrence + κ-stretch/ψ correction over slab threads; the compact slab ψ + per-axis `a/b/1κ`
+     are passed as extra in/out buffers. Replaced the M2 `_slab_correction` `concatenate` rebuild.
+     **CPML-on 374 → 1826 Mcs/s, 27 → 5 RT (4.9×, at the bulk floor)** iso / 1711 diag (N=192).
+   - **Non-uniform metric in-kernel** (`_metric_lines`/`_metric_side`): each difference scaled by its
+     per-axis `m{k} = reference_spacing/cell_width` buffer; uniform axes emit nothing.
+   - **Heterogeneous full-tensor via the §5 *block* hybrid** (not the per-cell branch): the kernel
+     does the diagonal bulk (`cb = c·diag(inv_eps)`); `_offdiag_box` finds the inclusion bbox and
+     `_box_correct` runs the validated MLX-op `_update_E`/`_update_H` aniso over a haloed interior
+     slice, `_set_box` splicing it back. Gated lossless + uniform + compact (<½ domain) + PML-disjoint
+     interior; else the whole domain falls back to MLX-op aniso. N=128 8³ inclusion **125 → 1124
+     Mcs/s (9.0×)**. Box cells are bit-identical to the whole-domain ops path (same local stencil,
+     real neighbours via the 2-cell halo); the diagonal bulk matches to float32.
 
 ## 10. Validation & integration
 

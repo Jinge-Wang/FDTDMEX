@@ -57,12 +57,14 @@ _warned_reasons: set[str] = set()
 
 
 def _metal_kernel_enabled() -> bool:
-    """Whether the M2 custom-Metal-kernel forward path is enabled (env ``FDTDMEX_METAL_KERNEL``).
+    """Whether the custom-Metal-kernel forward path is enabled (env ``FDTDMEX_METAL_KERNEL``).
 
-    Default off until the kernel path is parity-clean across the supported surface; the loop still
-    falls back to the compiled MLX-op cores for any case the kernel can't handle (``kernel_eligible``).
+    Default **on** (Phase 2 M3: CPML folded into the kernel, non-uniform metric + heterogeneous
+    full-tensor inclusions covered, parity-clean across the eligible surface). The loop still falls
+    back to the compiled MLX-op cores for any case the kernel can't handle (``kernel_eligible``).
+    Set ``FDTDMEX_METAL_KERNEL=0`` (or ``false``/``no``/``off``) to force the MLX-op path.
     """
-    return os.environ.get("FDTDMEX_METAL_KERNEL", "").lower() in ("1", "true", "yes", "on")
+    return os.environ.get("FDTDMEX_METAL_KERNEL", "").lower() not in ("0", "false", "no", "off")
 
 
 def _unsupported_reason(config, objects, stopping_condition) -> str | None:

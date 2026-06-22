@@ -44,8 +44,9 @@ carried-ψ RT, and by `profile_engine.py`'s eager-vs-compiled × CPML 2×2).
 | + `mx.compile` E/H cores | 211 | 47 |
 | + slab-CPML (Phase-1 default, MLX-op cores, CPML-on) | **277** | **36** |
 | compiled MLX-op cores, CPML off (op-graph ceiling) | 473 | 21 |
-| **+ Metal kernel (M2), CPML on** | **374** | **27** |
-| **+ Metal kernel (M2), CPML off** | **2219** | **5** |
+| + Metal kernel (M2), CPML on (spatial-hybrid slab correction) | 374 | 27 |
+| **+ Metal kernel (M3, CPML folded in), CPML on (default-on)** | **1826** | **5** |
+| **+ Metal kernel, CPML off** | **2219** | **5** |
 | necessary floor (read E,H + materials; write E,H) | ~3150¹ | ~3 |
 
 ¹ the M1 standalone microbench ([`benchmarks/m1_kernel.py`](../benchmarks/m1_kernel.py)) at the bare
@@ -54,13 +55,15 @@ source injection + detector recording.
 
 The MLX-op path is stuck near its op-graph ceiling at ~21–36 RT (op fusion can't keep a stencil's
 working set on-chip or merge neighbour reads). A custom Metal kernel reaches the bandwidth floor:
-**M2 lands those kernels in the engine** ([`phase2-metal-kernels.md`](phase2-metal-kernels.md),
-[`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py)) behind `FDTDMEX_METAL_KERNEL`. CPML-off
-hits the floor (4.5× over the op path); CPML-on is **1.31×** over the op path today — discounted
-because the spatial-hybrid slab-CPML correction (`_slab_add`) rebuilds full component arrays via
-`concatenate` (~22 RT on top of the 5 RT bulk). Closing that gap (CPML folded into the kernel for
-slab cells) is M3. *Kernel cores must be `mx.compile`d — run eager, the slab ops dispatch one-by-one
-and the CPML-on step is slower than the op path.*
+**M2 landed those kernels in the engine** ([`phase2-metal-kernels.md`](phase2-metal-kernels.md),
+[`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py)) behind `FDTDMEX_METAL_KERNEL`. CPML-off hit
+the floor (4.5× over the op path); CPML-on was **1.31×** because the M2 spatial-hybrid slab-CPML
+correction (`_slab_add`) rebuilt full component arrays via `concatenate` (~22 RT on top of the 5 RT
+bulk). **M3 folds CPML into the kernel** (`_corr_blocks`: per-slab-thread ψ recurrence + correction,
+the compact slab ψ + per-axis `a/b/1κ` as in/out buffers), dropping that rebuild — **CPML-on 374 →
+1826 Mcs/s, 27 → 5 RT (4.9×), at the bulk floor**. M3 also added in-kernel non-uniform metric and a
+block hybrid for full-tensor inclusions (heterogeneous 125 → 1124 Mcs/s), then flipped
+`FDTDMEX_METAL_KERNEL` **default-on** (`=0` forces the MLX-op path).
 
 ## Metal vs CPU/JAX — two factors
 
@@ -98,5 +101,24 @@ cores, CPML on. Numbers are the canonical figures above.
     so CPML-on still pays ~22 RT on top of the 5 RT bulk — this is the open CPML-on gap, to be closed
     in M3 by folding CPML into the kernel for slab cells. (3) The M1 kernel hard-coded a cubic `N`;
     real domains are not cubic (per-axis Nx/Ny/Nz was required).
+- **Phase 2 M3 — CPML folded in + coverage widened + default-on (CPML-on 374 → 1826 Mcs/s, 5 RT,
+  4.9×).** Three independent wins, each parity-gated (`test_mlx_kernel.py`: kernel-vs-ops rel < 1e-4,
+  vs-JAX rel < 1e-3):
+  - **CPML fold** — `_corr_blocks` runs the per-slab-thread ψ recurrence + κ-stretch/ψ correction
+    *inside* the bulk kernel (the compact slab ψ + per-axis `a/b/1κ` passed as extra in/out buffers),
+    so the kernel writes the final E/H. Dropped the M2 `_slab_add` `concatenate` rebuild → CPML-on
+    fell from 27 RT to the 5 RT bulk floor (1826 Mcs/s iso, 1711 diag). *With CPML folded in there is
+    no longer an op-chain in the core, so `mx.compile` is no longer load-bearing for the common path
+    (it still helps the block-hybrid splice).*
+  - **Non-uniform metric in-kernel** — each difference scaled by its per-axis `m{k}` buffer; the
+    non-uniform iso/diag path now rides the kernel at the same ~5 RT floor.
+  - **Block hybrid for full-tensor inclusions** — kernel does the diagonal bulk; the off-diagonal
+    inclusion bbox gets the MLX-op aniso update over a haloed interior slice, spliced back. N=128 8³
+    inclusion **125 → 1124 Mcs/s (9.0×)** vs the whole-domain aniso path. *Tried/decided:* the block
+    (bbox) hybrid was chosen over the per-cell in-kernel 3×3 branch — it reuses the validated aniso
+    ops and is bit-identical on box cells; per-cell branch (general but parity-risky) is left for
+    scattered/smoothed-interface domains. Gated lossless + uniform + compact interior; else full ops.
+  - `FDTDMEX_METAL_KERNEL` flipped **default-on** (`=0` opts out); full validation suite green
+    default-on (20 passed).
 
 Per-chip ceilings and the Apple-Silicon table: `phase2-metal-kernels.md` §8.
