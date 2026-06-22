@@ -35,9 +35,8 @@ constraint). **Kill** the Phase-2 component-last layout experiment — it measur
 
 ## Method note: why the old story needed re-measuring
 
-perf-baseline §1a derived "~3% of 273 GB/s" from an *assumed* 8-arrays/cell minimum
-([`microbench_fusion.py`](../benchmarks/microbench_fusion.py) L115–118) — a back-of-envelope, never a
-counter reading. `xctrace`/Xcode GPU traces are **unavailable on this machine** (Command-Line Tools
+perf-baseline §1a derived "~3% of 273 GB/s" from an *assumed* 8-arrays/cell minimum — a
+back-of-envelope, never a counter reading. `xctrace`/Xcode GPU traces are **unavailable on this machine** (Command-Line Tools
 only). So instead of per-kernel counters we use a **round-trip (RT) model**: measure the achieved
 coalesced bandwidth (240 GB/s), then express each variant's per-step time as the number of full
 `(3,N³)` read+write round-trips it equals at that bandwidth. Because the bus is saturated (shown
@@ -70,22 +69,27 @@ Real engine + the 2×2 predictive check (`profile_engine.py`, iso, consistent ac
 numbers below are N=192):
 
 ```
-                         Mcs/s     RT/step      removed vs prior
-eager,  CPML on (today)   ~105        ~96        — current engine
-compiled, CPML on         ~161        ~62        compile fuses ~34 intermediate RT
-compiled, CPML off        ~225        ~44        slab-CPML removes ~18 carried-ψ RT
-lean compiled (no pad/    ~440        ~23        drop pad + ψ-stack + ×1 metric
-  ψ-stack/metric)                                (microbench_fusion.py)
-necessary (R/W E,H + mat)  ~600+       ~5–8      a single fused custom kernel (Phase 2)
+                              Mcs/s   RT/step   note (realized via profile_engine.py, N=192 iso)
+eager, CPML on (pre-Phase-1)   ~105     ~99     original engine (pad+roll) — baseline
+eager, CPML on (pad-free)       130      77     drop-pad slice-diff alone (Fix 1.3)
+compiled, CPML on ← DEFAULT     211      47     + mx.compile E/H cores (Fix 1.1) — LANDED, 2.0×
+compiled, CPML off              338      30     slab-CPML headroom (the ψ traffic removed)
+lean (no CPML/pad/ψ-stack)     ~440     ~23     MLX-op ceiling (kernel-floor estimate)
+necessary (R/W E,H + mat)      ~600+    ~5–8    one fused custom kernel per field (Phase 2)
 ```
 
-Toggling CPML in the real loop removes exactly **24 RT** (99→75), confirming the carried-ψ recurrence
-is ~a quarter of all traffic. `compile` stalls at ~62 RT because **ψ_E/ψ_H and the ψ-stack are
-carried state that must round-trip to DRAM — fusion cannot remove them.** That is *why* slab-CPML
-(compute ψ only on the ~8-cell boundary slabs, not the full N³) is the necessary partner to compile,
-and why the ACTION_PLAN's "do it last" ordering is wrong.
+Toggling CPML in the compiled loop removes **~17 RT** (47→30); in the eager pad-free loop it removes
+~30 (77→47) — the carried-ψ recurrence is ~a quarter of all traffic at every stage. After compile +
+drop-pad the default path **stalls at 47 RT because ψ_E/ψ_H and the ψ-stack are carried state that
+must round-trip to DRAM — fusion cannot remove them.** That is *why* slab-CPML (compute ψ only on the
+~8-cell boundary slabs, not the full N³) is the next lever — it targets exactly the ~17 RT compile
+leaves on the floor, and `profile_engine` already shows the CPML-off path at 338 Mcs/s.
 
 ## Evidence-ranked fix list (reorders the ACTION_PLAN)
+
+> **STATUS (branch `mlx-fork`, commit `053a590`):** items 1 + 3 **LANDED together** — pad-free
+> slice-diff curl + compiled E/H cores. Default path 105 → **211 Mcs/s (2.0×, now > JAX-CPU)**,
+> 99 → 47 RT, all 14 validation tests green. **Item 2 (slab-CPML) is next** (→ ~330 toward ~440).
 
 1. **`mx.compile` the per-step core (Fix 1.2) — do first.** 1.52× at all N, low risk, and it makes
    the remaining fixes compile-friendly. Hoist source/detector gating host-side; inputs/outputs

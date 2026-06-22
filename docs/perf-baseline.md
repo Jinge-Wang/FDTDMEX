@@ -62,8 +62,8 @@ regenerate the figure with `uv run python benchmarks/plot_results.py benchmarks/
 arrays/cell-step (read+write E and H, read ε), so 97 Mcs/s of *useful* work is only **~9 GB/s — ~3%
 of the 273 GB/s** bus. The GPU shows "100% utilization" in Activity Monitor because it **is** busy —
 but busy moving **redundant** data across dozens of unfused kernels, not saturating bandwidth with
-useful work. Measured decomposition (`benchmarks/microbench_fusion.py` + a real-kernel isolation,
-N=192):
+useful work. Measured decomposition (step-level microbench, since superseded by
+`benchmarks/profile_engine.py`'s real-engine 2×2; N=192):
 
 | step variant (N=192) | Mcell·steps/s | note |
 |---|--:|--:|

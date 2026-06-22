@@ -36,3 +36,42 @@ def precompute_cpml_coeffs(
 
     dtype = alpha.dtype
     return a.astype(dtype), b.astype(dtype), inv_kappa.astype(dtype)
+
+
+def detect_pml_slabs(
+    a: np.ndarray, b: np.ndarray, inv_kappa: np.ndarray, pad: int = 1
+) -> list[tuple[int, int]]:
+    """Per-axis ``(lo, hi)`` PML slab thickness: the CPML correction is confined to indices
+    ``[0:lo]`` and ``[N-hi:N]`` along each axis ``k``.
+
+    ``a``/``b``/``inv_kappa`` have shape ``(6, Nx, Ny, Nz)``; index ``k`` is the E-side axis-``k``
+    profile, ``k+3`` the H-side. Each is non-trivial (``a≠0`` / ``b≠1`` / ``inv_kappa≠1``) only in
+    the two slabs perpendicular to axis ``k``. The slab correction ``(inv_kappa-1)·d + ψ`` is
+    exactly zero wherever all three are trivial, so the detected support is exact; ``pad`` widens
+    each slab by a safety margin of provably-zero cells (cheap, keeps it exact under float ramps).
+    """
+    slabs: list[tuple[int, int]] = []
+    for k in range(3):
+        active = np.zeros(a.shape[1:], dtype=bool)
+        for idx in (k, k + 3):
+            active |= a[idx] != 0.0
+            active |= b[idx] != 1.0
+            active |= inv_kappa[idx] != 1.0
+        other = tuple(ax for ax in range(3) if ax != k)
+        mask = active.any(axis=other)  # 1-D along axis k
+        n = int(mask.shape[0])
+        lo = 0
+        while lo < n and mask[lo]:
+            lo += 1
+        hi = 0
+        while hi < n and mask[n - 1 - hi]:
+            hi += 1
+        # widen by `pad` provably-zero cells, but never overlap (lo+hi <= n)
+        if lo:
+            lo = min(n, lo + pad)
+        if hi:
+            hi = min(n, hi + pad)
+        if lo + hi > n:
+            lo, hi = n, 0  # whole axis is PML (degenerate tiny domain) -> one slab covers it
+        slabs.append((lo, hi))
+    return slabs

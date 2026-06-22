@@ -45,3 +45,21 @@ GPU memory, and process RSS. The case is a cubic domain uniformly filled with on
 (`isotropic` / `diagonal` / `full_aniso` (9-tensor) / `iso_conductive`), CPML on all sides, a
 point-dipole source, no detector by default. Backends are forced with `fdtdx.use_backend(...)`;
 the harness asserts **MLX → Metal GPU** and **JAX → CPU** at startup and records both device lists.
+
+## Profiling (where the time / memory / bandwidth goes — MLX only)
+
+These dissect *why* the MLX engine performs as it does (see [`docs/metal-bottleneck-analysis.md`](../docs/metal-bottleneck-analysis.md)):
+
+- **`profile_engine.py`** — times the *real* engine loop in a 2×2 of `mx.compile` × CPML, and
+  reports the implied **DRAM round-trips per step** at the measured 240 GB/s roofline. This is the
+  per-fix audit: each Phase-1 fix must drop RT/step by its predicted amount.
+- **`profile_metal.py`** — measures achieved bandwidth from *known* traffic (coalesced copy vs
+  strided roll; component-leading vs component-last layout) and an eager-vs-compiled / eval-frequency
+  probe. Establishes the roofline denominator.
+- **`profile_memory.py`** — one `(backend, N)` per fresh subprocess for a clean peak-memory
+  high-water mark (loop a driver over N to find where each backend hits the memory wall).
+
+```bash
+uv run python benchmarks/profile_engine.py --N 192 --steps 200 --material isotropic
+uv run python benchmarks/profile_metal.py  --N 192 --iters 100
+```

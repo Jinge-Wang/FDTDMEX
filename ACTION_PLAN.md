@@ -98,7 +98,13 @@ Every fix below is a **pure performance transform**: it must reduce round-trips 
 1. **Functional / out-of-place — no races.** MLX updates compute *new* arrays and return them; this
    is what makes the Yee update race-free (no ping-pong buffers, no atomics). Do **not** introduce
    in-place mutation or buffer aliasing (incl. inside a custom kernel) that lets a cell's write be
-   read by a neighbor's update in the same pass.
+   read by a neighbor's update in the same pass. **Key asymmetry (drives the kernel design):** the
+   *isotropic* E-update reads only its own `E_old[i]` + `H` neighbors (no E-neighbor read → in-place
+   safe), but the *anisotropic* E-update's off-diagonal terms read `E_old` at **neighboring cells**
+   (the other components averaged to this component's Yee site) — so the anisotropic kernel **must
+   double-buffer E** (read old from the input buffer, write new to a separate output) and load an
+   E-halo. Same for H↔μ-tensor. This is *why* region/cube specialization (cheap isotropic path where
+   the cell is isotropic) is both faster and simpler.
 2. **Leapfrog order preserved.** The step is `update_E (reads Hⁿ⁻½) → inject E-sources → update_H
    (reads the just-updated Eⁿ⁺½, source included) → inject H-sources → record detectors`
    ([loop.py](src/fdtdx/mlx/loop.py)). When you compile, compile **two cores** (E-core, then H-core)
@@ -167,17 +173,23 @@ are **compile** and **slab-CPML**.
 - *Tripwire:* parity (uniform+nonuniform+periodic+CPML) unchanged; `profile_engine.py` shows
   CPML-on RT ~99 → ~62.
 
-**Fix 1.2 — slab-CPML: store/advance ψ only on the boundary slabs (~1.4× more → ~2.1× stacked).**
-- *Targets:* ~18–24 carried-ψ RT that compile *cannot* fuse (ψ is loop-carried state). Today ψ_E/ψ_H
-  are full `(6,N³)` and the `b·ψ + a·d` recurrence runs over every cell though a=b=0 except in the
-  ~8-cell slabs (≈ 23% of cells at N=192 do real ψ work; the rest is zero-valued traffic).
-- *Do:* carry ψ as the 6 boundary slabs (each ≈ `pml_thickness × N²`); run the recurrence and add ψ
-  into the curl **only on those slabs** (elsewhere the curl combine is just `inv_kappa·d`, and
-  `inv_kappa = 1`). Slab geometry comes from the placed boundary objects / nonzero support of
-  `arrays.alpha/kappa/sigma`. Keep it functional (build new slab arrays; add via sliced ops).
-- *Risk (highest in Phase 1):* boundary indexing/off-by-one → wrong absorption. But it is a
-  mathematical no-op (§P.4) → parity must be **exact**. Test CPML-on-all-faces *and* on-some-faces.
-- *Tripwire:* `profile_engine.py` CPML-on RT ~62 → ~44 after compile; parity exact.
+**Fix 1.2 — slab-CPML: carry/advance ψ only on the boundary slabs (~1.5× more → ~330 Mcs/s). ⭐ NEXT**
+- *Targets:* the ~17 carried-ψ RT compile can't fuse (realized: compiled CPML-on **47 RT** vs CPML-off
+  **30 RT**). ψ_E/ψ_H are full `(6,N³)` but `a=b=0` **and `inv_kappa=1`** except in the ~8-cell PML
+  slabs, so the whole ψ machinery is zero-valued traffic over ~77% of the domain.
+- *Approach (exact — decompose, don't approximate):* outside the PML, the curl combine is just the
+  plain difference `d_a − d_b` (since `inv_kappa=1`, `ψ=0`). Inside a slab it is
+  `(ik·d_a + ψ_a) − (ik·d_b + ψ_b)`. So compute `curl0 = d_a − d_b` **full-domain (cheap)**, then ADD a
+  **slab-localized correction** `(ik−1)·d + ψ` that is nonzero only on the slabs. Each ψ component is
+  tied to one axis (`a[0]↔x, a[1]↔y, a[2]↔z`) and lives only in that axis's low+high slabs (e.g.
+  `(2·p, N, N)` for x). Carry ψ as those small slab arrays in `MLXState`; advance the `b·ψ + a·d`
+  recurrence and build the correction on **slab slices of `d`** only.
+- *Geometry:* detect each axis's slab extent on the host at bridge time from the nonzero support of
+  `b−1` / `a` (`b=1, a=0` outside PML) — handles PML-on-some-faces and asymmetric thickness exactly.
+- *Risk (highest in Phase 1):* slab indexing / off-by-one. It is a mathematical no-op (§P.4) → parity
+  must be **EXACT**. Add a **PML-on-some-faces** parity case (only a subset of the 6 faces have PML).
+- *Tripwire:* `profile_engine.py` compiled CPML-on RT **47 → ~30**; parity exact; `bench_forward`
+  iso/diag/aniso each improve ~1.5×.
 
 **Fix 1.3 — drop per-step field padding + don't materialize the ψ-stack (~1.9× more → ~23 RT, ~440).**
 - *Targets:* the remaining ~21 RT — the 6 `mx.pad` full-field copies/step
@@ -197,23 +209,40 @@ a fresh `bench_forward` figure; roadmap WS-A row updated.
 
 ---
 
-## PHASE 2 — One fused custom Metal kernel (conditional; fusion, not layout)
+## PHASE 2 — Custom Metal update kernels (the deep lever; fp32; SEPARATE E and H kernels)
 
-**Why:** even the lean compiled step is ~23 RT — still 3–4× above the ~5–8 *necessary* RT, because
-MLX op-fusion can't merge a stencil's neighbor reads or keep the whole E/H/ψ working set in
-threadgroup memory across the sub-steps. Past ~440 Mcs/s the only lever is collapsing the step into
-**one (or two) hand-written kernels** that read E/H tiles once, compute curl+update+CPML, and write
-once. **Do this only if Phase 1 lands and you need >2.3× CPU** (the gate at top).
+**Why:** even the lean compiled step is ~23 RT — 3–4× above the ~5–8 *necessary* — because MLX
+op-fusion can't keep a stencil's working set in threadgroup memory or reuse neighbour reads across the
+sub-ops; each op still round-trips DRAM. Past ~440 Mcs/s the only lever is hand-written kernels via
+`mx.fast.metal_kernel` (confirmed 0.31.2). Target the ~5–8 RT floor → **~400–600 Mcs/s (~3× CPU)**.
+**fp32 is the floor — no mixed precision.** **Do this only after Phase 1 lands.**
 
-- Prototype curl+update (and ideally the CPML recurrence) as a single `mx.fast.metal_kernel`
-  (confirmed in 0.31.2) for the **isotropic uniform** common path; keep the MLX-ops path as fallback
-  for diagonal/anisotropic/non-uniform/CPML (a hybrid is fine).
-- *§P still binds:* the kernel must keep the leapfrog ordering and be race-free — within a pass each
-  thread writes its own cell only and reads neighbors from the *input* buffers (double-buffer E/H per
-  sub-step; never read a neighbor that another thread has already overwritten this pass).
-- *Validation:* same `test_mlx_parity.py` element-wise (add a dedicated test); gate behind a flag and
-  fall back to MLX-ops until parity-clean. Measure vs the compiled MLX-ops step; deliver a go/no-go.
-- **Not** a layout change: component-last is 1.00× (§0.6).
+**"Fused" means fusing the ~20 ops *within one field update* into one kernel — NOT fusing E and H
+together** (leapfrog forbids that; H must read the completed E). So: one **E-update kernel** and one
+**H-update kernel**.
+
+- *2.5D plane-marching with threadgroup memory.* Each threadgroup owns an XY tile and marches along z,
+  keeping the resident z-plane(s) it needs in threadgroup memory so each value is read from DRAM ~once
+  (the classic CUDA shared-memory stencil — Metal threadgroup memory = CUDA shared memory; threadgroup
+  = block). The Yee curl is **one-sided** (cell `i` needs `i−1` *or* `i+1`, not both) → a 1-cell halo
+  on one side per axis (a lean tile).
+- *Race / buffering (§P.1).* E-kernel reads H neighbours, writes E. **Isotropic** E reads only its own
+  `E_old` → in-place safe, no E-halo. **Anisotropic** E reads `E_old` at neighbours (off-diagonal
+  averaging) → **must double-buffer E + load an E-halo**. Same for H↔μ.
+- *Region / cube subdivision.* Today the engine runs ONE global path — if any cell is 9-tensor the
+  **whole** domain pays the anisotropic neighbour-averaging. Tag cells by material class and run the
+  cheap isotropic kernel on isotropic sub-blocks, the full per-cell 3×3 A/B kernel only on anisotropic
+  ones (per-block branch or separate launches over index sets). Big win for **heterogeneous** devices
+  (the target use case), and it removes needless double-buffering/halo where the cell is isotropic.
+- *CPML.* ψ recurrence runs only on the boundary-slab threadgroups — **slab-CPML (Fix 1.2) carries over
+  directly**; its slab geometry is exactly what the kernel's boundary path needs.
+- *Scope.* Start with the **isotropic-uniform interior** kernel (the common path, ~77% of cells); keep
+  the MLX-ops path as fallback for diagonal/anisotropic/non-uniform/CPML (a hybrid is fine). Extend per
+  measured payoff.
+
+- *Validation:* same `test_mlx_parity.py` element-wise (add a dedicated kernel test); gate behind a
+  flag, fall back to MLX-ops until parity-clean; measure vs the compiled MLX-ops step; deliver a
+  go/no-go. **Not** a layout change — component-last is 1.00× (§0.6).
 
 ---
 

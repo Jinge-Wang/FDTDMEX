@@ -14,8 +14,7 @@ were assumed:
   * capture    — optional .gputrace (MTL_CAPTURE_ENABLED=1) for offline Xcode inspection.
 
 Bandwidth is computed from *known* traffic: a copy/roll of an M-byte array moves 2M bytes
-(read+write), so GB/s = 2*M*iters/time is a real measurement, not the 8*4-bytes/cell guess
-in microbench_fusion.py.
+(read+write), so GB/s = 2*M*iters/time is a real measurement, not a per-cell bytes guess.
 
     uv run python benchmarks/profile_metal.py --N 192 --iters 100
     MTL_CAPTURE_ENABLED=1 uv run python benchmarks/profile_metal.py --capture
