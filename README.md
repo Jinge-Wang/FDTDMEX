@@ -22,7 +22,7 @@ isn't on Metal yet. **The plan for the next phase lives in [ACTION_PLAN.md](ACTI
 
 **What FDTDMEX adds over fdtdx**
 - **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution.
-- **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous (e.g. fully-anisotropic) domains that saturate a discrete GPU's VRAM still fit.
+- **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous domains that saturate a discrete GPU's VRAM still fit.
 - **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, interpolation, and off-diagonal averaging; *more correct* than upstream, which leaves the off-diagonal average unweighted (1st-order).
 
 **Not on Metal yet → transparently falls back to JAX**
