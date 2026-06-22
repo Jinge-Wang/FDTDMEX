@@ -1,11 +1,16 @@
 # FDTDMEX — forward-engine performance plan
 
 Single entry point. A fresh agent should be able to read this top-to-bottom and start the current
-next step (**Phase 2 M2**) without prior context. Depth references:
+next step (**Phase 2 M3**, see "NEXT STEP" below) without prior context. Depth references:
 - [`docs/performance.md`](docs/performance.md) — roofline, the round-trip (RT) model, current measured
-  results (the "why" behind every perf decision).
+  results + a **History** section (what was tried, the gains, what didn't work — the "why").
 - [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md) — custom-kernel design, region
-  specialization, memory/in-place, milestones, and the Apple-Silicon speedup table.
+  specialization, memory/in-place, milestones (§9), and the Apple-Silicon speedup table.
+
+> **Milestone naming.** "Phase 2 M1/M2/M3" in *this file* are the **Metal-kernel** performance
+> milestones (M1 microbench → M2 kernels-in-engine → M3 heterogeneous/CPML-fold). They are unrelated
+> to the **WS-A porting** milestones M1–M4 in [`docs/roadmap.md`](docs/roadmap.md) (which track the
+> physics surface: sources, anisotropy, non-uniform grids — all complete).
 
 ## What this project is
 
@@ -54,7 +59,8 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
 | `inject.py` / `accumulate.py` (+ `*_freeze.py`) | host-gated source injection / detector recording |
 | [`backend/dispatch.py`](src/fdtdx/backend/dispatch.py) | routing + milestone gating; [`backend/context.py`](src/fdtdx/backend/context.py) `use_backend` |
 
-Working custom kernels (validated, M2's starting point): [`benchmarks/m1_kernel.py`](benchmarks/m1_kernel.py).
+M1 microbench (the bit-exact standalone kernel M2 generalised, kept as the roofline reference):
+[`benchmarks/m1_kernel.py`](benchmarks/m1_kernel.py).
 
 ## Decisions (measured)
 
@@ -77,22 +83,40 @@ Working custom kernels (validated, M2's starting point): [`benchmarks/m1_kernel.
 M2 is done (custom Metal kernels in the engine; see Status). M3 widens the kernel path and recovers
 the CPML-on throughput the slab MLX-op correction currently leaves on the table.
 
+**Where M3 works** (all in [`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py) unless noted):
+- `kernel_eligible(state)` is the gate — it currently returns `False` for full-tensor (9-comp)
+  materials, any conductivity, and non-uniform metric, so those whole runs fall back to the MLX-op
+  cores. M3 widens it as each case lands.
+- `build_kernel_cores` generates the Metal source (`_e_source`/`_h_source`) and returns the compiled
+  cores; `_slab_correction` is the spatial-hybrid slab-CPML patch. These are what M3 extends.
+
 1. **Region specialization** for heterogeneous domains (isotropic bulk + local anisotropic/smoothed
    inclusions — the target use case): a per-cell material-class branch in the kernel (cheap diagonal
    update where iso, the 3×3 A/B + neighbour-average only where not). On unified memory + out-of-place
-   this is pure compute placement — no halo arrays, no neighbour bookkeeping. `docs/phase2-metal-kernels.md` §5.
-2. **Non-uniform metric in the kernel** — per-axis scale arrays (the `metric_fwd`/`metric_bwd` the
-   eligibility check currently gates off). The slab path already handles array metrics (`_slab_diff`).
+   this is pure compute placement — no halo arrays, no neighbour bookkeeping. Today an all-or-nothing
+   gate sends any domain containing a single 9-tensor cell entirely to the MLX-op cores; M3 keeps the
+   kernel on the iso/diagonal bulk. `docs/phase2-metal-kernels.md` §5.
+2. **Non-uniform metric in the kernel** — multiply each per-axis difference by the `metric_fwd`/
+   `metric_bwd` scale arrays (passed as buffers) instead of gating non-uniform grids off. The slab
+   path already handles array metrics (`curl._slab_diff` slices them), so only the bulk kernel source
+   needs the factor.
 3. **Fold CPML into the kernel for slab cells** to close the CPML-on gap: the spatial hybrid's
    `_slab_add` rebuilds full component arrays via `concatenate` (~22 RT on top of the 5 RT bulk at
-   N=192). A second small kernel that scatter-adds the κ-stretch + ψ correction over only the slab
-   cells (ψ as state) would drop CPML-on toward the bulk floor. (Deferred from M2 by design.)
+   N=192 → 27 RT total). A second small kernel that scatter-adds the κ-stretch + ψ correction over
+   only the slab cells (ψ carried as state) would drop CPML-on toward the bulk floor. (Deferred from
+   M2 by design; `docs/phase2-metal-kernels.md` §6.)
 4. **z-march tiling** only if `profile_engine.py` shows RT climbing above the floor at large N
    (N ≥ 384) — the cache already captures the neighbour reuse at N ≤ 256, so this is measurement-gated
    (`docs/phase2-metal-kernels.md` §3, §11). The thread-per-cell kernel is a self-contained swap.
 
-**Then** flip `FDTDMEX_METAL_KERNEL` default-on for the eligible cases once M3 lands and the surface
-is broad enough that the kernel rarely falls back. `docs/phase2-metal-kernels.md` §5, §9.
+Each sub-task is independent and gated by its own element-wise parity test (extend
+[`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py): kernel-core vs MLX-op-
+core rel < 1e-4, then vs the JAX oracle rel < 1e-3) before moving on.
+
+**Done when:** the kernel path covers heterogeneous iso/diagonal + full-tensor inclusions and
+non-uniform grids (the gate rarely falls back), CPML-on throughput climbs well above 374 Mcs/s toward
+the bulk floor, all validation green — **then** flip `FDTDMEX_METAL_KERNEL` default-on for the
+eligible cases. `docs/phase2-metal-kernels.md` §5, §9.
 
 ## Phase 3 — broaden supported surface (independent of perf)
 

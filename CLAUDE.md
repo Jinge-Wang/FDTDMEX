@@ -27,10 +27,13 @@ CUDA/JAX clusters.
   (`maybe_run_mlx_forward`, milestone gating, warn-once JAX fallback), `context` (`use_backend`).
 - `src/fdtdx/mlx/` — the forward engine: `bridge` (ArrayContainer↔MLX, host-precomputed
   time-invariant CPML coeffs), `curl`, `update`, `pml`, `interpolate`, `metrics`, `source_freeze`
-  + `inject`, `detector_freeze` + `accumulate`, `loop`.
+  + `inject`, `detector_freeze` + `accumulate`, `loop`, and `kernels` (Phase 2 M2: custom Metal E/H
+  bulk kernels + spatial-hybrid slab-CPML, behind `FDTDMEX_METAL_KERNEL`; see `ACTION_PLAN.md`).
 
 **Backend control:** auto on Apple Silicon for supported forward runs; force with
-`with fdtdx.use_backend("jax"|"mlx")` or `FDTDMEX_BACKEND=jax|mlx`. Forcing JAX (CPU) is how
+`with fdtdx.use_backend("jax"|"mlx")` or `FDTDMEX_BACKEND=jax|mlx`. The custom Metal kernels are an
+extra opt-in within the MLX path: `FDTDMEX_METAL_KERNEL=1` (default off until parity-clean across the
+surface). Forcing JAX (CPU) is how
 validation gets a reference oracle (JAX-Metal is unusable).
 
 ## Current state

@@ -32,7 +32,7 @@ def build_state(material, N, steps):
     from fdtdx.mlx.source_freeze import freeze_sources
 
     args = SimpleNamespace(spacing=50e-9, courant=0.99, pml=8, wavelength=1e-6, detector="none", steps=steps)
-    arrays, oc, config, key, info = build_case(material, N, args)
+    arrays, oc, config, _key, info = build_case(material, N, args)
     arrays = arrays.reset()
     periodic_axes = get_wrap_padding_axes(oc)
     state = to_mlx_state(arrays, config, periodic_axes)

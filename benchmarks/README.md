@@ -1,8 +1,9 @@
 # benchmarks/
 
 Forward-engine performance harness: **MLX (Metal GPU) vs JAX (CPU)** on one Apple-Silicon
-machine. See [`docs/perf-eval-plan.md`](../docs/perf-eval-plan.md) for methodology and
-[`docs/perf-baseline.md`](../docs/perf-baseline.md) for the measured baseline + findings.
+machine. See [`docs/performance.md`](../docs/performance.md) for the roofline, the round-trip (RT)
+model, current results + history, and [`docs/phase2-metal-kernels.md`](../docs/phase2-metal-kernels.md)
+for the custom-Metal-kernel design and staging.
 
 ## Run
 
@@ -48,11 +49,12 @@ the harness asserts **MLX → Metal GPU** and **JAX → CPU** at startup and rec
 
 ## Profiling (where the time / memory / bandwidth goes — MLX only)
 
-These dissect *why* the MLX engine performs as it does (see [`docs/metal-bottleneck-analysis.md`](../docs/metal-bottleneck-analysis.md)):
+These dissect *why* the MLX engine performs as it does (see [`docs/performance.md`](../docs/performance.md)):
 
-- **`profile_engine.py`** — times the *real* engine loop in a 2×2 of `mx.compile` × CPML, and
-  reports the implied **DRAM round-trips per step** at the measured 240 GB/s roofline. This is the
-  per-fix audit: each Phase-1 fix must drop RT/step by its predicted amount.
+- **`profile_engine.py`** — times the *real* engine loop in a 2×2 of `mx.compile` × CPML (and, with
+  `--kernel`, the M2 custom-Metal-kernel path), and reports the implied **DRAM round-trips per step**
+  at the measured 240 GB/s roofline. This is the per-fix audit: each fix must drop RT/step by its
+  predicted amount.
 - **`profile_metal.py`** — measures achieved bandwidth from *known* traffic (coalesced copy vs
   strided roll; component-leading vs component-last layout) and an eager-vs-compiled / eval-frequency
   probe. Establishes the roofline denominator.

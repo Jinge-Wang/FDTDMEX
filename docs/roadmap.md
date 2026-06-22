@@ -17,9 +17,9 @@ Validation suites: `tests/validation/test_mlx_parity.py` (uniform), `tests/valid
 
 **Not yet on MLX (gated → JAX):** dispersion (ADE), lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, mode sources/detectors, gradients. The dispatcher (`src/fdtdx/backend/dispatch.py`) declines these and falls back to the unchanged JAX engine.
 
-### WS-A performance — Phase 1 complete
-- **Status:** MLX/Metal now leads JAX-CPU for all N ≥ 64 (1.25–1.4×) with no plateau; default path 277 Mcs/s / 36 RT at N=192 iso (2.6× the original engine). Pad-free slice-diff curl + `mx.compile`d E/H cores + slab-CPML landed; physics exact.
-- **Next:** Phase 2 — custom Metal update kernels (M1 go/no-go). See [ACTION_PLAN.md](../ACTION_PLAN.md), [performance.md](performance.md) (roofline + results), [phase2-metal-kernels.md](phase2-metal-kernels.md) (kernel spec).
+### WS-A performance — Phase 1 ✅, Phase 2 M1 ✅ + M2 ✅
+- **Status:** MLX/Metal leads JAX-CPU for all N ≥ 64 (1.25–1.4×) with no plateau; Phase-1 default path 277 Mcs/s / 36 RT at N=192 iso (2.6× the original engine; pad-free slice-diff curl + `mx.compile`d E/H cores + slab-CPML). **Phase 2 M2 landed custom Metal E/H kernels in the engine** (`src/fdtdx/mlx/kernels.py`, behind `FDTDMEX_METAL_KERNEL`): iso CPML-off 2219 Mcs/s / 5 RT (4.5× over the op path, at the floor); CPML-on 374 / 27 (1.31×). Physics exact (element-wise vs JAX).
+- **Next:** Phase 2 M3 — heterogeneous-material region specialization + non-uniform metric in the kernel + fold CPML into the kernel for slab cells (close the CPML-on gap). See [ACTION_PLAN.md](../ACTION_PLAN.md), [performance.md](performance.md) (roofline + results + history), [phase2-metal-kernels.md](phase2-metal-kernels.md) (kernel spec).
 
 ## WS-C — Subpixel smoothing (parallel with WS-A)
 Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150 core lines) + `chi1p1` continuous-ε evaluator; validate vs MEEP. **~2 weeks.** Requires WS-A's tensor path to consume output.

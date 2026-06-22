@@ -1,9 +1,10 @@
-# Phase 2 scoping — custom Metal update kernels
+# Phase 2 — custom Metal update kernels (design + staging)
 
-> Status: scoping (not started). Phase 1 is complete (default path 277 Mcs/s / 36 RT, CPML on;
-> MLX-op ceiling 473 Mcs/s / 21 RT — see [performance.md](performance.md)).
-> This document scopes the next step: replacing the per-field MLX-op chain with one hand-written
-> Metal kernel per field. fp32 only.
+> Status: **M1 ✅ + M2 ✅ done; M3 next.** Phase 1 default = 277 Mcs/s / 36 RT (MLX-op cores, CPML on).
+> M2 landed the custom Metal E/H kernels in the engine ([`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py),
+> behind `FDTDMEX_METAL_KERNEL`): **CPML-off 2219 Mcs/s / 5 RT (4.5× over the op path, at the floor);
+> CPML-on 374 / 27 (1.31×)** — see [performance.md](performance.md) for the full table + history.
+> This document is the design/spec; §9 tracks the staging. fp32 only.
 
 ## 1. Goal
 
@@ -179,11 +180,31 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
    on the floor for the bulk update, and factor (b) is confirmed large. (JAX-CPU's effective traffic
    is ~36 RT — its 195 Mcs/s ≈ compiled-MLX at the CPU's ~170 GB/s — so the floor kernel is far above
    it.) **Proceed.** Even discounted for CPML/sources, the headroom is decisive.
-2. **M2 — + CPML** on boundary-slab tiles (reuse Fix 1.2 geometry); full-domain parity. Integrate the
-   kernels into `loop.py` behind a flag (fall back to the MLX-op path); add a kernel parity test.
+2. **M2 — + CPML, kernels in the engine. ✅ DONE ([`src/fdtdx/mlx/kernels.py`](../src/fdtdx/mlx/kernels.py)).**
+   The M1 kernel generalised to per-cell materials (iso + diagonal) and non-cubic domains (per-axis
+   Nx/Ny/Nz), with periodic wrap ghosts. CPML via the **spatial hybrid**, not in-kernel slab tiles:
+   the kernel computes the full-domain plain-curl bulk, then the thin PML slabs get an additive MLX-op
+   correction (`_slab_correction` → `curl._slab_add`/`_slab_diff`, reusing `detect_pml_slabs`
+   geometry + slab ψ). Integrated in `loop.py` behind `FDTDMEX_METAL_KERNEL` (default off), MLX-op
+   cores as fallback for ineligible cases (lossy / full-tensor / non-uniform metric). Validated
+   element-wise vs MLX-op cores (rel < 1e-4) and vs the JAX oracle (rel < 1e-3) for iso/diagonal/
+   periodic + CPML (`tests/validation/test_mlx_kernel.py`). M4 Pro, N=192 (`profile_engine.py --kernel`):
+
+   | | Mcs/s | RT/step |
+   |---|--:|--:|
+   | compiled MLX-op cores, CPML on | 285 | 35 |
+   | **Metal kernel, CPML on** | **374** | **27** |
+   | **Metal kernel, CPML off** | **2219** | **5** |
+
+   *Two findings:* (a) the kernel cores **must be `mx.compile`d** (the metal kernel composes as a graph
+   node) — eager, the slab-correction ops dispatch one-by-one and the CPML-on step is slower than the
+   op path; (b) the CPML-on gap (27 vs 5 RT) is the slab `_slab_add` rebuilding full arrays via
+   `concatenate` (~22 RT) — folding CPML into the kernel for the slab cells (the in-kernel slab-tile
+   approach §6 anticipated) is deferred to M3.
 3. **M3 — heterogeneous materials** via §5 region specialization (start with per-cell branch); **+
-   non-uniform metric** (per-axis scale arrays). Go/no-go on full replacement vs hybrid (kernel for
-   the isotropic bulk, MLX-op fallback for the rest).
+   non-uniform metric** (per-axis scale arrays); **+ fold CPML into the kernel for slab cells** to
+   close the CPML-on gap. Go/no-go on full replacement vs hybrid (kernel for the isotropic bulk,
+   MLX-op fallback for the rest).
 
 ## 10. Validation & integration
 
@@ -196,9 +217,13 @@ estimates anchored to one M4 Pro measurement; treat as order-of-magnitude.
 
 ## 11. Open questions
 
-- Threadgroup-memory budget on `applegpu_g16s` and the best tile shape (measure).
-- Cleanest way to pass the slab ψ (6 per-component arrays of differing shape) and per-axis metric
-  arrays into the kernel signature.
-- Interaction with `mx.compile` / `mx.eval` cadence when the step is one (or two) custom-kernel nodes.
-- Whether the isotropic interior kernel writing E in place (no double-buffer) composes safely with the
-  lazy graph, or whether to double-buffer uniformly for simplicity first, then optimize.
+- **Resolved (M2): `mx.compile` composes with `mx.fast.metal_kernel`** — the kernel is a normal graph
+  node, so wrapping the whole core (kernel + slab-CPML ops) in `mx.compile` works and is **required**:
+  eager, the slab ops dominate and CPML-on is slower than the op path. The per-step `mx.eval` cadence
+  (`eval_every`) is unchanged from the MLX-op loop.
+- Threadgroup-memory budget on `applegpu_g16s` and the best tile shape — only relevant if/when the
+  z-march tiled kernel is built (M3+, measurement-gated: thread-per-cell already hits the floor at
+  N ≤ 256; revisit if `profile_engine.py` shows RT climbing at large N).
+- M2 passes the slab ψ as a captured 6-tuple to the MLX-op slab correction (not into the kernel); the
+  open question is how to pass ψ + per-axis metric into the kernel itself when CPML/metric are folded
+  in (M3).
