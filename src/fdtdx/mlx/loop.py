@@ -23,14 +23,25 @@ from fdtdx.mlx.curl import pad_fields_mlx
 from fdtdx.mlx.detector_freeze import DetectorPlan
 from fdtdx.mlx.inject import inject_sources_E, inject_sources_H
 from fdtdx.mlx.interpolate import interpolate_fields_mlx
+from fdtdx.mlx.kernels import build_kernel_cores, kernel_eligible
 from fdtdx.mlx.source_freeze import SourcePlan
 from fdtdx.mlx.state import MLXState
 from fdtdx.mlx.update import _update_E, _update_H
 
 
-def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool):
+def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_metal_kernel: bool = False):
     """Build the per-step E-core/H-core. Time-invariant arrays are captured as constants so the
-    only graph inputs are the time-varying fields (E, H, ψ); ``mx.compile`` then fuses the body."""
+    only graph inputs are the time-varying fields (E, H, ψ); ``mx.compile`` then fuses the body.
+
+    With ``use_metal_kernel`` and an eligible case (iso/diag, no conductivity, uniform metric) the
+    bulk update runs on custom Metal kernels (the M2 win); otherwise the compiled MLX-op cores run.
+    """
+    if use_metal_kernel and kernel_eligible(state):
+        # Compile the whole core: the bulk kernel is one node, but the slab-CPML correction is a
+        # chain of small ops that dominate the step unless fused (the metal kernel composes inside
+        # mx.compile as a normal graph node).
+        return build_kernel_cores(state, c, sb, compile_step)
+
     inv_eps, sigma_E = state.inv_eps, state.sigma_E
     inv_mu, sigma_H = state.inv_mu, state.sigma_H
     a, b, ik = state.cpml_a, state.cpml_b, state.inv_kappa
@@ -58,10 +69,11 @@ def run_forward_mlx(
     simulate_boundaries: bool = True,
     eval_every: int = 8,
     compile_step: bool = True,
+    use_metal_kernel: bool = False,
 ) -> tuple[MLXState, dict[str, dict[str, mx.array]]]:
     """Advance ``state`` ``num_steps`` steps, recording detectors; return state + buffers."""
     record = bool(detector_plans)
-    e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step)
+    e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step, use_metal_kernel)
 
     for n in range(num_steps):
         H_prev = state.H

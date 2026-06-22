@@ -26,13 +26,26 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
   compiled MLX-ops, bit-exact**. This proves a hand kernel hits the bandwidth floor the MLX op-graph
   cannot (the op path is stuck at ~18–36 RT). JAX-CPU's effective traffic is ~36 RT, so the floor
   kernel is far above it.
-- **NEXT: Phase 2 M2** — bring those kernels into the engine. See "Next step" below.
+- **Phase 2 M2 — complete.** The iso/diagonal forward path runs on custom Metal E/H kernels in the
+  engine ([`src/fdtdx/mlx/kernels.py`](src/fdtdx/mlx/kernels.py)), CPML via the spatial hybrid (bulk
+  kernel + slab-CPML MLX-op correction), behind `FDTDMEX_METAL_KERNEL` (default off). Realized on M4
+  Pro at N=192 (`profile_engine.py --kernel`): iso **CPML-off 2219 Mcs/s / 5 RT (4.5× over compiled
+  ops, at the M1 floor)**; iso **CPML-on 374 Mcs/s / 27 RT (1.31× over compiled ops, 1.35× over the
+  Phase-1 277)**; diagonal 2036 / 346 Mcs/s. CPML-on is discounted by the slab correction
+  (`_slab_add` rebuilds full arrays via concatenate, ~22 RT on top of the 5 RT bulk). Kernel cores
+  are `mx.compile`d (the metal kernel composes as a graph node) — **uncompiled the slab ops dominate
+  and the CPML-on step is slower than ops**. Validated element-wise vs MLX-op cores (rel < 1e-4) and
+  vs the JAX oracle (rel < 1e-3) for iso/diagonal/periodic + CPML ([`tests/validation/test_mlx_kernel.py`](tests/validation/test_mlx_kernel.py)); full suite green with the flag forced on.
+- **NEXT: Phase 2 M3** — heterogeneous materials (per-cell/block region specialization) + non-uniform
+  metric in the kernel; and fold CPML into the kernel for slab cells to close the CPML-on gap. See
+  "Next step" below.
 
 ## Engine map (`src/fdtdx/mlx/`)
 
 | file | role |
 |---|---|
-| [`loop.py`](src/fdtdx/mlx/loop.py) | time-loop driver; `_build_cores` compiles E-core/H-core; host-gated source injection between them. **M2 adds the kernel path + flag here.** |
+| [`loop.py`](src/fdtdx/mlx/loop.py) | time-loop driver; `_build_cores` compiles E-core/H-core (kernel cores when `use_metal_kernel` + eligible, else MLX-op cores); host-gated source injection between them |
+| [`kernels.py`](src/fdtdx/mlx/kernels.py) | **M2**: custom Metal E/H bulk kernels (per-cell `cb=c·inv_eps`, periodic ghost) + slab-CPML hybrid (`_slab_correction`) + `kernel_eligible`; `build_kernel_cores` returns compiled cores |
 | [`curl.py`](src/fdtdx/mlx/curl.py) | pad-free slice-diff Yee curl + slab-CPML decomposition (`_cpml_curl`, `_slab_take/_slab_add`, `_AX`) |
 | [`update.py`](src/fdtdx/mlx/update.py) | E/H update — iso/diagonal fast path + full-tensor A/B path; pure `_update_E/_update_H` |
 | [`pml.py`](src/fdtdx/mlx/pml.py) | host CPML coeff precompute + `detect_pml_slabs` (slab geometry M2 reuses) |
@@ -59,33 +72,27 @@ Working custom kernels (validated, M2's starting point): [`benchmarks/m1_kernel.
 - **Mixed precision** — fp32 minimum.
 - **Manual in-place for speed** — in-place saves footprint, not bandwidth (capacity lever only; phase2 doc §7).
 
-## NEXT STEP — Phase 2 M2 (custom Metal kernels in the engine)
+## NEXT STEP — Phase 2 M3 (heterogeneous materials + close the CPML-on gap)
 
-**Goal:** the isotropic/diagonal forward path runs on custom Metal E/H kernels (the M1 win) including
-CPML, behind a flag, parity-clean — so real `run_fdtd` calls get the speedup, not just the microbench.
+M2 is done (custom Metal kernels in the engine; see Status). M3 widens the kernel path and recovers
+the CPML-on throughput the slab MLX-op correction currently leaves on the table.
 
-1. **Generalize the M1 kernels** ([`m1_kernel.py`](benchmarks/m1_kernel.py) has the working, bit-exact
-   source). Replace the scalar `Cb` with a per-cell material read: `Cb = c · inv_eps[cell]`
-   (isotropic 1-component first, then diagonal 3-component); uniform metric (=1) first, non-uniform
-   later. Keep the leapfrog/ghost rules already in the source (backward diff + zero/wrap ghost for E,
-   forward diff for H).
-2. **CPML.** Interior cells use the plain-curl kernel; the PML boundary slabs need the κ-stretch + ψ
-   correction. **Recommended approach: spatial hybrid** — the kernel computes the interior bulk; the
-   existing slab-CPML MLX-op path (`curl.py:_cpml_curl` + slab ψ from `state.cpml_extents`, geometry
-   from `pml.detect_pml_slabs`) handles the thin boundary slabs; merge the two (disjoint writes →
-   race-free, out-of-place). Slab cells are a few % of the domain, so the bulk still gets the kernel
-   speed. (Folding CPML into the kernel for slab cells is possible but more complex — defer.)
-3. **Integrate in [`loop.py`](src/fdtdx/mlx/loop.py)** behind a flag (e.g. a `use_metal_kernel` arg on
-   `run_forward_mlx`, default **off** until parity-clean), with the compiled MLX-op cores as fallback.
-   Preserve leapfrog exactly: E-kernel → inject E (host) → H-kernel → inject H (host) → detectors.
-4. **Validate.** Add an element-wise kernel parity test in `tests/validation/` vs forced-JAX
-   (rel < 1e-3) for isotropic + diagonal, CPML on, plus a periodic case. Then `profile_engine.py`
-   (RT/step) and `bench_forward.py` (scaling) for the realized gain.
+1. **Region specialization** for heterogeneous domains (isotropic bulk + local anisotropic/smoothed
+   inclusions — the target use case): a per-cell material-class branch in the kernel (cheap diagonal
+   update where iso, the 3×3 A/B + neighbour-average only where not). On unified memory + out-of-place
+   this is pure compute placement — no halo arrays, no neighbour bookkeeping. `docs/phase2-metal-kernels.md` §5.
+2. **Non-uniform metric in the kernel** — per-axis scale arrays (the `metric_fwd`/`metric_bwd` the
+   eligibility check currently gates off). The slab path already handles array metrics (`_slab_diff`).
+3. **Fold CPML into the kernel for slab cells** to close the CPML-on gap: the spatial hybrid's
+   `_slab_add` rebuilds full component arrays via `concatenate` (~22 RT on top of the 5 RT bulk at
+   N=192). A second small kernel that scatter-adds the κ-stretch + ψ correction over only the slab
+   cells (ψ as state) would drop CPML-on toward the bulk floor. (Deferred from M2 by design.)
+4. **z-march tiling** only if `profile_engine.py` shows RT climbing above the floor at large N
+   (N ≥ 384) — the cache already captures the neighbour reuse at N ≤ 256, so this is measurement-gated
+   (`docs/phase2-metal-kernels.md` §3, §11). The thread-per-cell kernel is a self-contained swap.
 
-**Done when:** engine isotropic/diagonal throughput jumps well above 277 Mcs/s toward the M1 floor
-(discounted for CPML/sources), all validation green, flag default-on for those cases. **Then M3**
-(heterogeneous materials via per-cell/block region specialization; non-uniform metric) —
-`docs/phase2-metal-kernels.md` §5, §9.
+**Then** flip `FDTDMEX_METAL_KERNEL` default-on for the eligible cases once M3 lands and the surface
+is broad enough that the kernel rarely falls back. `docs/phase2-metal-kernels.md` §5, §9.
 
 ## Phase 3 — broaden supported surface (independent of perf)
 
@@ -107,8 +114,9 @@ Build each compile/kernel-friendly (host-side gating, arrays carried as state).
 
 ```bash
 uv run --with pytest pytest tests/validation -q                                 # parity (uniform + non-uniform)
+FDTDMEX_METAL_KERNEL=1 uv run --with pytest pytest tests/validation -q          # parity with the M2 kernel path on
 uv run python benchmarks/m1_kernel.py --N 192 --iters 200                       # M1 kernel-vs-MLXops microbench
-uv run python benchmarks/profile_engine.py --N 192 --steps 200                  # per-step RT (compile × CPML 2×2)
+uv run python benchmarks/profile_engine.py --N 192 --steps 200 --kernel        # per-step RT (ops × CPML + metal-kernel)
 uv run python benchmarks/profile_metal.py  --N 192 --iters 100                  # roofline
 uv run python benchmarks/bench_forward.py --backends mlx,jax --sizes 96,128,192,256 --steps 500 --repeats 2
 uv run python benchmarks/plot_results.py benchmarks/results/<file>.jsonl

@@ -56,6 +56,15 @@ def _supported_detector_types() -> tuple:
 _warned_reasons: set[str] = set()
 
 
+def _metal_kernel_enabled() -> bool:
+    """Whether the M2 custom-Metal-kernel forward path is enabled (env ``FDTDMEX_METAL_KERNEL``).
+
+    Default off until the kernel path is parity-clean across the supported surface; the loop still
+    falls back to the compiled MLX-op cores for any case the kernel can't handle (``kernel_eligible``).
+    """
+    return os.environ.get("FDTDMEX_METAL_KERNEL", "").lower() in ("1", "true", "yes", "on")
+
+
 def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     """Return a human-readable reason the case can't run on MLX yet, or ``None``."""
     if config.gradient_config is not None:
@@ -172,7 +181,14 @@ def _run_mlx_forward(arrays, objects, config):
     c = float(config.courant_number)
 
     state, detector_buffers = run_forward_mlx(
-        state, source_plans, detector_plans, detector_buffers, num_steps, c, simulate_boundaries=True
+        state,
+        source_plans,
+        detector_plans,
+        detector_buffers,
+        num_steps,
+        c,
+        simulate_boundaries=True,
+        use_metal_kernel=_metal_kernel_enabled(),
     )
 
     detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None

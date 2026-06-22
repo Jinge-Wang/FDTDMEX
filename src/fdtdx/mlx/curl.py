@@ -136,6 +136,35 @@ def slab_to_full(slab: mx.array, axis: int, lo: int, hi: int, n: int) -> mx.arra
     return mx.concatenate(segs, axis=axis)
 
 
+def _slab_diff(f: mx.array, axis: int, lo: int, hi: int, periodic: bool, metric, forward: bool) -> mx.array:
+    """Metric-scaled finite difference of ``f`` restricted to the ``[0:lo]`` and ``[N-hi:N]``
+    boundary slab along ``axis`` (size ``lo+hi``), bit-identical to ``_bwd_diff``/``_fwd_diff`` there.
+
+    The difference direction equals the slab axis, so each kept slab cell needs at most a one-cell
+    halo: the interior-facing halo is sliced in (the domain-edge ghost is handled by the same
+    zero/wrap rule as the full-domain diff). Used by the Metal-kernel CPML hybrid to recompute the
+    slab differences the bulk kernel also computes, so the slab correction adds exactly.
+    """
+    n = f.shape[axis]
+    parts = []
+    if forward:
+        if lo:  # need f[0:lo+1]; the ghost at the top of the sub-slice is discarded
+            seg = _fwd_diff(_sl(f, 0, lo + 1, axis), axis, periodic)
+            parts.append(_sl(seg, 0, lo, axis))
+        if hi:  # f[N-hi:N]; index N-1 uses the real domain-edge ghost
+            parts.append(_fwd_diff(_sl(f, n - hi, None, axis), axis, periodic))
+    else:
+        if lo:  # f[0:lo]; index 0 uses the real domain-edge ghost
+            parts.append(_bwd_diff(_sl(f, 0, lo, axis), axis, periodic))
+        if hi:  # need f[N-hi-1:N]; the ghost at the bottom of the sub-slice is discarded
+            seg = _bwd_diff(_sl(f, n - hi - 1, None, axis), axis, periodic)
+            parts.append(_sl(seg, 1, None, axis))
+    d = parts[0] if len(parts) == 1 else mx.concatenate(parts, axis=axis)
+    if isinstance(metric, mx.array):
+        return d * _slab_take(metric, axis, lo, hi)
+    return _mul_metric(d, metric)
+
+
 def _cpml_curl(d, psi, a, b, ik, ab_off, extents, simulate_boundaries):
     """Assemble the curl from the 6 metric-scaled differences ``d`` as a cheap full-domain plain
     part plus a slab-localised CPML correction; advance the slab ψ. Exact algebraic split of the

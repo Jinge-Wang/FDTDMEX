@@ -44,14 +44,24 @@ def build_state(material, N, steps):
     return state, source_plans, detector_plans, detector_buffers, c, num_steps, info
 
 
-def time_loop(material, N, steps, simulate_boundaries, compile_step, repeats=3):
+def time_loop(material, N, steps, simulate_boundaries, compile_step, repeats=3, use_metal_kernel=False):
     from fdtdx.mlx.loop import run_forward_mlx
 
     state, sp, dp, db, c, num_steps, info = build_state(material, N, steps)
     cells = info["grid_shape"][0] * info["grid_shape"][1] * info["grid_shape"][2]
 
     # warmup (build Metal kernels / trace the compiled graph)
-    run_forward_mlx(state, sp, dp, db, num_steps, c, simulate_boundaries=simulate_boundaries, compile_step=compile_step)
+    run_forward_mlx(
+        state,
+        sp,
+        dp,
+        db,
+        num_steps,
+        c,
+        simulate_boundaries=simulate_boundaries,
+        compile_step=compile_step,
+        use_metal_kernel=use_metal_kernel,
+    )
     mx.synchronize()
     mx.reset_peak_memory()
 
@@ -60,7 +70,17 @@ def time_loop(material, N, steps, simulate_boundaries, compile_step, repeats=3):
         st, sp2, dp2, db2, c2, ns2, _ = build_state(material, N, steps)
         mx.synchronize()
         t0 = time.perf_counter()
-        run_forward_mlx(st, sp2, dp2, db2, ns2, c2, simulate_boundaries=simulate_boundaries, compile_step=compile_step)
+        run_forward_mlx(
+            st,
+            sp2,
+            dp2,
+            db2,
+            ns2,
+            c2,
+            simulate_boundaries=simulate_boundaries,
+            compile_step=compile_step,
+            use_metal_kernel=use_metal_kernel,
+        )
         mx.synchronize()
         times.append(time.perf_counter() - t0)
 
@@ -78,19 +98,22 @@ def main():
     p.add_argument("--steps", type=int, default=200)
     p.add_argument("--material", default="isotropic")
     p.add_argument("--repeats", type=int, default=3)
+    p.add_argument("--kernel", action="store_true", help="also time the custom Metal-kernel path (M2)")
     args = p.parse_args()
 
     print(f"device: {mx.default_device()}   material={args.material}  N={args.N}  steps={args.steps}")
     print(f"roofline (measured coalesced copy): {ROOFLINE_GBS} GB/s\n")
-    print(f"  {'config':22} {'per-step':>10} {'throughput':>13} {'RT/step':>9} {'peak':>9}")
-    base = None
+    print(f"  {'config':26} {'per-step':>10} {'throughput':>13} {'RT/step':>9} {'peak':>9}")
     for comp in (False, True):
         for sb in (True, False):
             r = time_loop(args.material, args.N, args.steps, sb, comp, args.repeats)
-            if base is None:
-                base = r["mcs"]
             tag = f"{'compiled' if comp else 'eager':8} CPML {'on' if sb else 'off'}"
-            print(f"  {tag:22} {r['per_step_ms']:8.2f}ms {r['mcs']:10.1f} Mcs/s {r['rt']:8.0f}  {r['peak_gb']:7.2f}GB")
+            print(f"  {tag:26} {r['per_step_ms']:8.2f}ms {r['mcs']:10.1f} Mcs/s {r['rt']:8.0f}  {r['peak_gb']:7.2f}GB")
+    if args.kernel:
+        for sb in (True, False):
+            r = time_loop(args.material, args.N, args.steps, sb, True, args.repeats, use_metal_kernel=True)
+            tag = f"metal-kernel CPML {'on' if sb else 'off'}"
+            print(f"  {tag:26} {r['per_step_ms']:8.2f}ms {r['mcs']:10.1f} Mcs/s {r['rt']:8.0f}  {r['peak_gb']:7.2f}GB")
     print("\nRT/step = full (3,N^3) DRAM round-trips the per-step time equals at the 240 GB/s roofline.")
     print("(eager CPML-on is the pre-Phase-1 engine; compiled CPML-on is now the default path.)")
 
