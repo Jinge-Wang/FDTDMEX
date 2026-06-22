@@ -1,13 +1,16 @@
 """Quickstart — define, see, run, inspect a simulation (notebook style).
 
 Open this in the VS Code interactive window (or Jupyter): the ``# %%`` markers are cells. It walks the
-FDTDMEX flow with **inline** matplotlib figures, the same plots a Tidy3D notebook would show:
+FDTDMEX flow with **inline** figures, the same plots a Tidy3D notebook would show, using the
+``fdtdx.Scene`` facade (``define -> .plot() -> .run()``) which bundles config + objects + constraints:
 
-    define config + objects  ->  plot the setup  ->  plot the material  ->  run  ->  plot the fields
-    solve a waveguide mode    ->  plot the mode   ->  assemble an S-matrix ->  plot the S-matrix
+    Scene(config).add(...).constrain(...)  ->  .plot() / .plot3d()  ->  .run()  ->  plot the fields
+    solve a waveguide mode  ->  plot the mode  ->  assemble an S-matrix  ->  plot the S-matrix
 
-Every ``fdtdx.plot_*`` call returns a matplotlib ``Figure`` that renders inline. On Apple Silicon the
-forward run auto-routes to the MLX/Metal backend; elsewhere it runs the JAX engine.
+``Scene`` only removes boilerplate; the low-level ``place_objects -> apply_params -> run_fdtd`` API is
+unchanged and ``.run()`` matches it exactly. Every ``fdtdx.plot_*`` call returns a matplotlib
+``Figure`` that renders inline; ``.plot3d()`` returns an interactive plotly figure (needs the ``viz``
+extra). On Apple Silicon the forward run auto-routes to the MLX/Metal backend; elsewhere it runs JAX.
 """
 
 # %%
@@ -69,26 +72,30 @@ detector = fdtdx.EnergyDetector(name="energy")  # default form keeps the run on 
 constraints += detector.same_position_and_size(volume)
 object_list.append(detector)
 
+# Bundle everything into a Scene (the low-level API still works if you prefer it).
+sim = fdtdx.Scene(config).add(*object_list).constrain(constraints)
+sim  # _repr_html_ summary: object / source / detector counts, time steps
+
 # %%
 # --- 2. Place the objects, then SEE the setup inline -------------------------------------------
 key, subkey = jax.random.split(key)
-objects, arrays, params, config, _ = fdtdx.place_objects(
-    object_list=object_list, config=config, constraints=constraints, key=subkey
-)
+sim.place(key=subkey)
 
 # Object layout (XY / XZ / YZ panels).
-fig_setup = fdtdx.plot_setup(config=config, objects=objects, exclude_object_list=[detector])
+fig_setup = sim.plot(exclude_object_list=[detector])
 fig_setup  # renders inline
+
+# Interactive 3D view (drag to rotate). Needs the `viz` extra (plotly); skip if not installed.
+# fig_3d = sim.plot3d(); fig_3d
 
 # %%
 # --- 3. SEE the material (permittivity) cross-section ------------------------------------------
-fig_mat = fdtdx.plot_material_from_side(config=config, arrays=arrays, viewing_side="x")
+fig_mat = sim.plot_material(positions=(0.0, 0.0, 0.0))
 fig_mat  # renders inline
 
 # %%
 # --- 4. RUN the forward simulation -------------------------------------------------------------
-arrays, objs, _ = fdtdx.apply_params(arrays, objects, params, key)
-_, result = fdtdx.run_fdtd(arrays=arrays, objects=objs, config=config, key=key, show_progress=False)
+result = sim.run(key=key)  # wraps place_objects -> apply_params -> run_fdtd (MLX auto-routed)
 
 # Final E/H field slice through the middle (one transverse plane).
 mid = result.fields.E.shape[1] // 2

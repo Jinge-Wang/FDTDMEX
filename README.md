@@ -14,20 +14,21 @@ On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the 
 else (and for gradients / inverse design) it runs the unchanged JAX engine, so results cross-check
 element-wise against the JAX reference.
 
-## Status — 2026-06-22
+## Status
 
-The forward engine is **complete, fast, and validated element-wise vs JAX-CPU.** The full fdtdx forward
-feature set runs on the Metal engine; the items below are what's *different* from upstream and what
-isn't on Metal yet. **The plan for the next phase lives in [ACTION_PLAN.md](ACTION_PLAN.md), not here.**
+The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**, and a native mode solver,
+a notebook front end, and a portable HDF5 hand-off are in place. **The plan for the next phase lives in
+[ACTION_PLAN.md](ACTION_PLAN.md).**
 
 **What FDTDMEX adds over fdtdx**
-- **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution.
+- **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution. Full anisotropy, lossy + 9-tensor conductivity, CPML / periodic / PEC-PMC boundaries, and Drude–Lorentz dispersion all run on Metal.
 - **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous domains that saturate a discrete GPU's VRAM still fit.
 - **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, interpolation, and off-diagonal averaging; *more correct* than upstream, which leaves the off-diagonal average unweighted (1st-order).
+- **Native full-vectorial mode solver** (no Tidy3D dependency), a **mode-expansion monitor**, a `Scene` facade with interactive **3D visualization**, and a **portable HDF5 contract** (`sim_init` → `sim_run` → `sim_postproc`) for remote / agent-driven runs.
 
 **Not on Metal yet → transparently falls back to JAX**
 - Gradients / inverse design (by design — the MLX backend is forward-only; inverse design stays on JAX/CUDA).
-- Mode sources / detectors (an independent, Tidy3D-free mode solver is the next milestone).
+- Mode sources / detectors route the forward time loop to JAX (the native mode solver they call is done).
 - Bloch / complex (nonzero-k) propagation; dispersive / randomized plane sources.
 - Non–Apple-Silicon platforms (everything runs on JAX).
 
@@ -159,6 +160,34 @@ _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=oc, config=config, key=key)  #
 print(arrays.detector_states["T"])   # transmitted flux vs time
 ```
 
+## Showcase — a silicon ring resonator
+
+The notebook [`examples/ring_resonator_demo.ipynb`](examples/ring_resonator_demo.ipynb) walks a complete
+photonic-IC workflow end to end. It runs on a deliberately **coarse 90 nm grid** so every cell finishes in
+seconds — the figures below are illustrative, not converged.
+
+| Layout (objects + ports) | Resolved geometry (90 nm voxels) |
+|---|---|
+| ![layout](docs/images/ring_layout.png) | ![3D](docs/images/ring_3d.png) |
+
+**Author → see → run → inspect.** Draw the device in **gdstk** (GDS) → convert to fdtdx geometry → view it
+in 2D and interactive **3D** (`plot_setup_3d`) → solve and inject the bus **mode** → recover the
+through-port response as a **mode expansion** (transmission per waveguide mode = S-parameters):
+
+| Injected bus mode | Mode-expansion transmission |
+|---|---|
+| ![mode](docs/images/bus_mode.png) | ![mode expansion](docs/images/mode_expansion.png) |
+
+**Analytical verification.** The mode solver matches the exact symmetric-slab dispersion to ~2×10⁻⁴, and
+the ring's resonance spacing is checked against the analytical free spectral range `FSR = λ²/(n_g·L)`:
+
+![ring response](docs/images/ring_response.png)
+
+**Portable hand-off.** `sim_init(scene) → config.hdf5` packs the resolved arrays; `sim_run(config.hdf5) →
+results.hdf5` runs them on the Metal engine (or a GPU-free mock); `sim_postproc` reduces them to the small
+quantities an agent or remote client reads. Regenerate the figures with
+[`examples/make_showcase_images.py`](examples/make_showcase_images.py).
+
 ## Relationship to upstream
 
 This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/main` stays clean and MLX
@@ -171,9 +200,9 @@ re-exports `fdtdx`.
 | | Workstream | Status |
 |---|---|---|
 | **WS-A** | Forward MLX engine (curl, E/H update, boundaries, sources, detectors, time loop; Metal kernels at the bandwidth floor) | **Complete** — full forward surface + performance phases, validated element-wise vs JAX |
-| **WS-B** | Independent, Tidy3D-free mode solver + overlap | Next |
-| **WS-C** | Subpixel smoothing (effective-tensor averaging) | Next |
-| **WS-D** | Agentic workspace — config + HDF5 hand-off + MCP server + web UI | Next |
+| **WS-B** | Native full-vectorial mode solver + mode-expansion monitor | **Complete** — straight waveguides, isotropic + diagonal anisotropy; matches analytic slab dispersion |
+| **WS-C** | Subpixel smoothing (effective-tensor averaging) | Core complete — validated; auto-application during placement is pending |
+| **WS-D** | Front end + portable workspace — `Scene`, 3D viz, config schema, HDF5 hand-off, MCP server, web UI | **In progress** — `Scene` + `plot_setup_3d`, `SceneModel`, and the `sim_init`/`sim_run`/`sim_postproc` HDF5 contract are done; MCP server + web UI next |
 
 Build order and the active plan: [ACTION_PLAN.md](ACTION_PLAN.md); longer arc: [docs/roadmap.md](docs/roadmap.md).
 

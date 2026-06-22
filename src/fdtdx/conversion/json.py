@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import jax
+import numpy as np
 
 from fdtdx.config import SimulationConfig
 from fdtdx.core.jax.pytrees import TreeClass
@@ -198,6 +199,11 @@ def _export_json(obj: Any) -> dict | float | int | str | bool | None:
     if isinstance(obj, float | int | str | bool):
         # basic data types
         return obj
+    # numpy / jax arrays (e.g. polygon vertices, resolved RectilinearGrid edges) — small geometry data
+    # kept in the editable JSON config.
+    if isinstance(obj, (np.ndarray, jax.Array)):
+        arr = np.asarray(obj)
+        return {"__ndarray__": {"data": arr.tolist(), "dtype": str(arr.dtype)}}
     # jax data types
     if obj in JAX_DTYPES:
         str_name = str(obj).split("'")[1]
@@ -275,6 +281,10 @@ def _import_obj_from_json(obj: dict | float | int | str | bool | None) -> Any:
     if isinstance(obj, int | float | str | bool):
         return obj
     assert isinstance(obj, dict)
+    # numpy arrays
+    if "__ndarray__" in obj:
+        spec = obj["__ndarray__"]
+        return np.array(spec["data"], dtype=spec["dtype"])
     # jax data types
     if "__dtype__" in obj:
         dtype_str = obj["__dtype__"]

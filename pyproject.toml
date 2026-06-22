@@ -33,10 +33,12 @@ dependencies = [
 # (mode_backend="fdtdmex", default) removes the hard dependency; install this only to use
 # mode_backend="tidy3d" for fully tensorial media, bends, or dev-time cross-checks.
 tidy3d = ["tidy3d>=2.8.0"]
+# Config schema + HDF5 sim_init/sim_run/sim_postproc IO layer (the agentic hand-off seam).
+io = ["h5py>=3.10", "pydantic>=2.6"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
 viz = ["plotly>=5.22", "pyvista>=0.44", "trame>=3.6"]
-# MCP server for LLM orchestration (WS-D).
-mcp = ["mcp>=1.0"]
+# MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
+mcp = ["mcp>=1.0", "h5py>=3.10", "pydantic>=2.6", "plotly>=5.22"]
 dev = [
     "black>=24.10.0",
     "ipykernel>=6.29.5",

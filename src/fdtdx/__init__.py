@@ -128,8 +128,10 @@ from fdtdx.objects.static_material.polygon import (
 )
 from fdtdx.objects.static_material.sphere import Sphere
 from fdtdx.objects.static_material.static import SimulationVolume, UniformMaterialObject
+from fdtdx.scene import Scene
 from fdtdx.utils.extend_pml import extend_material_to_pml
 from fdtdx.utils.logger import Logger
+from fdtdx.utils.mode_expansion import ModeExpansionResult, compute_mode_expansion
 from fdtdx.utils.plot_field_slice import plot_field_slice, plot_field_slice_component
 from fdtdx.utils.plot_material import plot_material, plot_material_from_side
 from fdtdx.utils.plot_modes import plot_mode, plot_mode_from_source
@@ -187,6 +189,7 @@ __all__ = [
     "Logger",
     "LorentzPole",
     "Material",
+    "ModeExpansionResult",
     "ModeOverlapDetector",
     "ModePlaneSource",
     "ObjectContainer",
@@ -212,6 +215,7 @@ __all__ = [
     "RectilinearGrid",
     "RemoveFloatingMaterial",
     "SMatrixResult",
+    "Scene",
     "SimulationConfig",
     "SimulationObject",
     "SimulationState",
@@ -243,6 +247,7 @@ __all__ = [
     "compute_eps_spectrum_from_coefficients",
     "compute_impedance_corrected_temporal_profile",
     "compute_mode",
+    "compute_mode_expansion",
     "compute_pole_coefficients",
     "compute_poynting_flux",
     "detectors_from_gds_ports",

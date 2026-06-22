@@ -1034,8 +1034,15 @@ dev = [
     { name = "tox-uv" },
     { name = "ty" },
 ]
+io = [
+    { name = "h5py" },
+    { name = "pydantic" },
+]
 mcp = [
+    { name = "h5py" },
     { name = "mcp" },
+    { name = "plotly" },
+    { name = "pydantic" },
 ]
 tidy3d = [
     { name = "tidy3d" },
@@ -1052,6 +1059,8 @@ requires-dist = [
     { name = "chex", marker = "extra == 'dev'", specifier = ">=0.1.91" },
     { name = "equinox", specifier = ">=0.11.10" },
     { name = "gdstk", specifier = ">=0.9" },
+    { name = "h5py", marker = "extra == 'io'", specifier = ">=3.10" },
+    { name = "h5py", marker = "extra == 'mcp'", specifier = ">=3.10" },
     { name = "ipykernel", marker = "extra == 'dev'", specifier = ">=6.29.5" },
     { name = "jax", specifier = ">=0.4.36" },
     { name = "loguru", specifier = ">=0.7.3" },
@@ -1062,8 +1071,11 @@ requires-dist = [
     { name = "myst-nb", marker = "extra == 'dev'", specifier = ">=1.3.0" },
     { name = "nbsphinx", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "optax", specifier = ">=0.2.4" },
+    { name = "plotly", marker = "extra == 'mcp'", specifier = ">=5.22" },
     { name = "plotly", marker = "extra == 'viz'", specifier = ">=5.22" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=4.0.1" },
+    { name = "pydantic", marker = "extra == 'io'", specifier = ">=2.6" },
+    { name = "pydantic", marker = "extra == 'mcp'", specifier = ">=2.6" },
     { name = "pydoclint", marker = "extra == 'dev'", specifier = ">=0.6.6" },
     { name = "pymdown-extensions", marker = "extra == 'dev'", specifier = ">=10.12" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3.4" },
@@ -1088,7 +1100,7 @@ requires-dist = [
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.49" },
     { name = "typing-extensions", specifier = ">=4.14.1" },
 ]
-provides-extras = ["tidy3d", "viz", "mcp", "dev"]
+provides-extras = ["tidy3d", "io", "viz", "mcp", "dev"]
 
 [[package]]
 name = "filelock"

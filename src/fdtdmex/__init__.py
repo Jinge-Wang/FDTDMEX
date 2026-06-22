@@ -8,7 +8,7 @@ fdtdx public API.
 
 from importlib.metadata import PackageNotFoundError, version
 
-from fdtdx import *  # noqa: F401,F403
+from fdtdx import *  # noqa: F403
 
 try:
     __version__ = version("fdtdx")

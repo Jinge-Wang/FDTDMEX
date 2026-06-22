@@ -1,146 +1,100 @@
 # FDTDMEX — action plan
 
-Single entry point for a fresh agent. **The forward engine and the mode solver are done and
-validated.** The next phase is the **front end + agentic workspace** so simulations are easy to
-define, see, run, and orchestrate (today everything is Python-only, which is limiting). A new agent
-can read this top-to-bottom without prior context.
+Single entry point for the project. The forward engine, the native mode solver, the notebook front end,
+and the portable HDF5 hand-off are **done and validated**. What remains is the orchestration layer (MCP
+server, web UI), widening the Metal engine to cover the mode-source path, and a few engine-backlog items.
+A new contributor can read this top-to-bottom without prior context.
 
 ## What this project is
 
 FDTDMEX is a fork of [fdtdx](https://github.com/ymahlau/fdtdx) (a JAX FDTD Maxwell solver) that adds a
 native **MLX/Metal forward backend** for Apple Silicon. On a Mac a supported forward `run_fdtd`
-auto-routes to the MLX time loop; gradients / unsupported features / non-Apple platforms run the
+auto-routes to the MLX time loop; gradients, unsupported features, and non-Apple platforms run the
 unchanged JAX engine (also the **parity oracle**). Import stays `import fdtdx`; `src/fdtdmex` is a thin
-brand alias. The engine is functional / out-of-place (race-free), mirrors fdtdx element-wise, and is
-fp32. Goal: fast, large *forward* simulations on a single Mac; inverse design stays on JAX/CUDA.
+brand alias. The engine is functional / out-of-place (race-free), mirrors fdtdx element-wise, and is fp32.
+Goal: fast, large *forward* simulations on a single Mac; inverse design stays on JAX/CUDA.
 
-## Status — done
+## Done
 
-- **Engine (Phases 1–3).** MLX/Metal custom kernels at the memory-bandwidth floor, default-on
+- **Forward engine.** MLX/Metal custom kernels at the memory-bandwidth floor, default-on
   (`FDTDMEX_METAL_KERNEL=0` forces the MLX-op cores). Full anisotropy, lossy + 9-tensor conductivity,
-  CPML + periodic + PEC/PMC, non-uniform grids, and Drude–Lorentz ADE dispersion (folded into the
-  E-kernel). All element-wise parity-validated vs forced-JAX. Depth: [`docs/performance.md`](docs/performance.md),
+  CPML + periodic + PEC/PMC, non-uniform grids, and Drude–Lorentz dispersion (folded into the E-kernel).
+  All element-wise parity-validated vs forced-JAX. Depth: [`docs/performance.md`](docs/performance.md),
   [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md).
-- **Mode solver (Phase 4 Track A).** Native, **Tidy3D-free** full-vectorial FD mode solver in
-  [`src/fdtdx/core/physics/mode_backend/`](src/fdtdx/core/physics/mode_backend/), behind a
-  `mode_backend` seam in [`modes.py`](src/fdtdx/core/physics/modes.py) (**default `"fdtdmex"`**, env
-  `FDTDMEX_MODE_BACKEND`). **Tidy3D is now optional** (`tidy3d` extra). Straight waveguide, uniform +
-  rectilinear grids, isotropic + diagonal anisotropy; off-diagonal tensors + bends raise and auto-route
-  to Tidy3D if installed. Matches Tidy3D to ~1e-16 on a Si strip. Depth: [`docs/mode-solver.md`](docs/mode-solver.md).
-- **Subpixel smoothing (WS-C core).** [`core/physics/subpixel.py`](src/fdtdx/core/physics/subpixel.py)
-  Kottke/Farjadpour tensor smoothing (validated vs analytic effective medium; ~15× mode staircase-error
-  cut). Standalone utility today; not yet auto-applied during placement. Depth:
-  [`docs/subpixel-smoothing.md`](docs/subpixel-smoothing.md).
-- **First front-end pieces.** [`utils/plot_modes.py`](src/fdtdx/utils/plot_modes.py) (`plot_mode`) and
-  [`utils/smatrix.py`](src/fdtdx/utils/smatrix.py) (`SMatrixResult` + `plot_smatrix`).
+- **Mode solver.** Native, Tidy3D-optional full-vectorial FD mode solver
+  ([`core/physics/mode_backend/`](src/fdtdx/core/physics/mode_backend/)) behind a `mode_backend` seam
+  ([`modes.py`](src/fdtdx/core/physics/modes.py), default `"fdtdmex"`). Straight waveguides, uniform +
+  rectilinear grids, isotropic + diagonal anisotropy; matches the analytic slab dispersion to ~2e-4.
+  Depth: [`docs/mode-solver.md`](docs/mode-solver.md).
+- **Mode-expansion monitor.** [`utils/mode_expansion.py`](src/fdtdx/utils/mode_expansion.py)
+  (`compute_mode_expansion`) projects a recorded field onto a user-specified mode set → per-mode
+  transmission + complex S-parameters, with a validated mode cache.
+- **Subpixel smoothing.** [`core/physics/subpixel.py`](src/fdtdx/core/physics/subpixel.py) Kottke tensor
+  smoothing (validated; standalone utility, not yet auto-applied during placement).
+- **Notebook front end.** `Scene` facade ([`scene.py`](src/fdtdx/scene.py)), interactive 3D
+  ([`utils/plot_setup_3d.py`](src/fdtdx/utils/plot_setup_3d.py)), and the matplotlib utilities
+  (`plot_setup`, `plot_material`, `plot_mode`). Tour: [`examples/ring_resonator_demo.ipynb`](examples/ring_resonator_demo.ipynb).
+- **Portable HDF5 hand-off.** [`src/fdtdmex/io/`](src/fdtdmex/io/) — `SceneModel` (pydantic facade over
+  fdtdx's JSON), and the `sim_init` → `sim_run` → `sim_postproc` trio, with a GPU-free `mock` backend.
+  `sim_init → sim_run(mlx)` reproduces a direct `run_fdtd` bit-for-bit.
 
-## Phase 5 — front end + agentic workspace (next, the focus)
+## Next — orchestration layer (the focus)
 
-Make FDTDMEX usable like Tidy3D in a notebook: **define → see → run → inspect**, then expose the same
-flow to an LLM through an MCP server. Spec: [`docs/mcp-and-ui.md`](docs/mcp-and-ui.md). Three layers,
-build bottom-up; each is independently useful.
+Build bottom-up; each piece is independently useful. The schema and IO contract are done, so this layer
+can be built directly against them.
 
-### The flow today (what we're improving)
+### 1. MCP server ([`server/fdtdmex_mcp/`](server/fdtdmex_mcp/), stub today)
 
-A simulation is assembled as `config` + an `object_list` + placement `constraints`, then
-`place_objects(...) → apply_params(...) → run_fdtd(...)`, and results read from
-`arrays.detector_states`. See [`examples/simulate_gaussian_source.py`](examples/simulate_gaussian_source.py).
-Visualization exists but is matplotlib/save-to-disk via `Logger`: `plot_setup`, `plot_material`,
-`plot_field_slice`, detector `plot2d`/`video`, plus the new `plot_mode` / `plot_smatrix`. The gaps:
-no single object to hold/inspect a whole setup, no inline reprs, no one-call run, no schema/serialization
-for hand-off, no interactive 3D.
+The API-discovery + execution surface so an LLM can drive a simulation. Tools:
+- **introspect** — type names + parameter schemas from the pydantic `SceneModel` / `autoinit` models.
+- **build / edit / validate** — construct or mutate a `SceneModel`; return validation errors.
+- **sim_init / sim_run / sim_postproc** — the existing trio.
 
-### Start here — next implementation tasks (in order)
+**Done when** an agent can introspect the API, assemble a valid `SceneModel`, run it (mock or Metal), and
+read back only the small `sim_postproc` result. Install via the `mcp` extra. Depends on nothing new.
 
-1. **`Scene`/`Simulation` facade** (5a) — new `src/fdtdx/scene.py`. A class bundling
-   `config + object_list + constraints` with `.add(...)`, `.place()`, `.plot()` (wrap
-   `plot_setup`/`plot_material`), `.run()` (wrap `place_objects → apply_params → run_fdtd`), `.results`,
-   and `_repr_html_`/`__repr__`. **Done when** a notebook can do `sim = Scene(config); sim.add(...);
-   sim.plot(); data = sim.run()` and `.run()` matches the explicit path; refactor
-   [`examples/quickstart_notebook.py`](examples/quickstart_notebook.py) onto it. Export from `fdtdx`.
-2. **Config schema** (5b) — new `src/fdtdmex/io/schema.py`: pydantic models for Volume/Materials/
-   Structures/Sources/Detectors/Boundaries/Grid/Run; JSON round-trip; align names with
-   [`conversion/json.py`](src/fdtdx/conversion/json.py). **Done when** a `Scene` round-trips to/from JSON.
-3. **`sim_init`/`sim_run`/`sim_postproc`** (5b) — `src/fdtdmex/io/`: `sim_init` resolves a setup →
-   config HDF5 (h5py, resolved `ArrayContainer` only); `sim_run` unwraps → feeds
-   [`to_mlx_state`](src/fdtdx/mlx/bridge.py)/`freeze_*` → results HDF5; `sim_postproc` → small results.
-   **Done when** a resolved config reproduces a direct `run_fdtd` (validate round-trip; mockable backend).
-4. **MCP server** (5c) — `server/fdtdmex_mcp/` (stub today): `introspect` + `build`/`edit`/`validate` +
-   the trio. `mcp` extra. Depends on task 2's schema.
-5. **Web UI** (5d) — later; plotly or pyvista-trame first.
+### 2. Mode sources / detectors on Metal
 
-Detail for each below. Engine backlog (tensorial solver, bends, WS-C auto-integration, Bloch/complex)
-is separate and non-blocking.
+Today the mode-expansion workflow (mode source + mode-overlap detector) routes the forward time loop to
+**JAX**. Porting mode-source injection and the mode-overlap detector into the MLX path (the freeze seam in
+[`mlx/source_freeze.py`](src/fdtdx/mlx/source_freeze.py) / [`mlx/detector_freeze.py`](src/fdtdx/mlx/detector_freeze.py))
+would run the whole PIC workflow — and the showcase — on the Metal engine. **Done when** a mode-source
+forward run is MLX-eligible and parity-clean vs JAX.
 
-### 5a. Notebook front end (do first — unblocks day-to-day use)
+### 3. Web UI ([`web/`](web/), placeholder)
 
-Goal: a Tidy3D-like notebook experience reusing the existing matplotlib utilities (they already return
-`Figure`s, so they render inline).
-- **A `Scene`/`Simulation` facade** (thin, optional) that bundles `config + objects + constraints` and
-  offers `.place()`, `.plot()` (wrap `plot_setup`/`plot_material` so the *unplaced* setup can be viewed),
-  `.run()` (wrap `place_objects → apply_params → run_fdtd`, MLX auto-routed), and `.results` access. Keep
-  the existing low-level API intact; the facade only removes boilerplate.
-- **Inline reprs** — `_repr_html_` / `__repr__` summaries for the facade and key objects (counts,
-  extents, materials, sources/detectors) so a notebook cell shows the setup at a glance.
-- **A quickstart notebook — done** ([`examples/quickstart_notebook.py`](examples/quickstart_notebook.py),
-  `# %%` cells): define → `plot_setup` → `plot_material` → run → `plot_field_slice` →
-  `compute_mode`/`plot_mode` → `SMatrixResult`/`plot_smatrix`, inline, verified on the MLX backend.
-  Refactor it onto the `Scene` facade once that lands.
-- Verify each plot renders inline and the facade `.run()` matches the explicit-call result.
+A locally-hostable reactive editor consuming `SceneModel` + `to_plotly_json(plot_setup_3d(...))`: click to
+select objects, tabbed panels for materials / sources / boundaries, field overlays, and a confirm-before-run
+gate that records only the confirmed setup. Start with plotly or pyvista-via-trame. The largest, most
+open-ended piece.
 
-### 5b. Config schema + the sim_init/sim_run/sim_postproc trio (the agentic seam)
+## Engine + front-end backlog (deferred, non-blocking)
 
-The portable contract an LLM and any compute node agree on; the **LLM never touches large arrays**.
-- **Config schema** (`fdtdmex/io/`, pydantic): typed, validated models for Volume, Materials,
-  Structures, Sources, Detectors, Boundaries, Grid, Run. Round-trips to **JSON**; align field names with
-  fdtdx's JSON round-trip ([`conversion/json.py`](src/fdtdx/conversion/json.py)) so fdtdx setups ingest.
-- **`sim_init(setup) → config.hdf5`** — front-end creation utility: resolve objects + design params →
-  assemble the **resolved** ε/µ/σ + dispersion + frozen source/detector profiles + grid/boundary spec →
-  write a self-contained config HDF5 (h5py). **Bare-minimum rule:** ship the resolved
-  `ArrayContainer`, not the pre-sim data that produces it (no device ρ / optimization params / CSG).
-- **`sim_run(config.hdf5) → results.hdf5`** — unwrap and run on any FDTDMEX machine (local/remote). The
-  unwrap feeds the existing [`to_mlx_state`](src/fdtdx/mlx/bridge.py)/`freeze_*` seam (the MLX bridge is
-  already a "resolved arrays → run" boundary, so the HDF5 is essentially its serialized form).
-- **`sim_postproc(results.hdf5) → small results`** — reduce to scalars/fluxes/n_eff/S-params/thumbnails.
-- Buildable now against a **mocked backend**; validate JSON/HDF5 round-trip and that a resolved config
-  reproduces a direct `run_fdtd`.
+- **`SceneModel` ↔ `ExtrudedPolygon` round-trip** — the JSON config exports GDS-derived polygons but
+  reconstructing live `ExtrudedPolygon` objects hits their derived-shape guard; small follow-up.
+- **WS-C auto-integration** — apply [`subpixel.py`](src/fdtdx/core/physics/subpixel.py) during placement
+  (host-side supersampling), opt-in, default off to preserve parity.
+- **Tensorial mode solver** — off-diagonal 9-tensor cross-sections (the 4N×4N complex eigenproblem);
+  routes to Tidy3D today if installed.
+- **Bends / leaky modes** in the native solver (route to Tidy3D meanwhile).
+- **Bloch / complex (nonzero-k) propagation** — promote the MLX forward path to complex64 end-to-end;
+  parity vs the JAX complex oracle. Gradients stay out of scope.
+- **Production-resolution ring validation** — a converged (≤25 nm) ring run confirming resonance
+  positions / FSR quantitatively, as a benchmark.
 
-### 5c. MCP server (`server/fdtdmex_mcp/`, stub today)
-
-API discovery + the trio, so an LLM writes a valid script. Tools: **introspect** (type names + param
-schemas from the pydantic/`autoinit` models), **build/edit/validate**, and **sim_init/sim_run/
-sim_postproc**. Install via the `mcp` extra. Depends on 5b's schema.
-
-### 5d. Web UI (`web/`, placeholder) — later
-
-Locally-hostable, Lumerical-like 3D editor (click-select, tabbed material/source/boundary panels, field
-overlays). Start with plotly or pyvista-via-trame (reuse the Python scene); three.js later. Largest,
-most open-ended piece — after 5a–5c.
-
-## Engine backlog (deferred, not blocking Phase 5)
-
-- **Tensorial mode solver** — off-diagonal 9-tensor cross-sections (the 4N×4N complex eigenproblem;
-  even Tidy3D's base package defers this to a paid extra). Today these auto-route to Tidy3D if installed.
-- **Bends / PML leaky modes** in the native solver (route to Tidy3D meanwhile).
-- **WS-C auto-integration** — apply `subpixel.py` during placement (host-side geometry supersampling),
-  opt-in, default off to preserve parity.
-- **Bloch / complex (nonzero-k) propagation** — promote the MLX forward path to complex64 end-to-end
-  (curl, E/H update, CPML, sources, detectors, kernels). Parity vs the JAX complex oracle. The last
-  same-port-pattern engine feature; gradients stay out of scope.
-
-## Engine map (`src/fdtdx/mlx/` + mode backend)
+## Engine map (`src/fdtdx/mlx/` + mode backend + front end)
 
 | file | role |
 |---|---|
 | [`mlx/loop.py`](src/fdtdx/mlx/loop.py) | time-loop driver; builds E/H cores (kernel or MLX-op), host-gated source injection |
-| [`mlx/kernels.py`](src/fdtdx/mlx/kernels.py) | custom Metal E/H bulk kernels (per-cell `cb`, in-kernel CPML fold, non-uniform metric, ADE dispersion) + block hybrid for full-tensor inclusions; `kernel_eligible` |
-| [`mlx/curl.py`](src/fdtdx/mlx/curl.py) · [`update.py`](src/fdtdx/mlx/update.py) · [`pml.py`](src/fdtdx/mlx/pml.py) | pad-free Yee curl + slab-CPML; E/H update (iso/diag + full-tensor); CPML coeff precompute |
-| [`mlx/bridge.py`](src/fdtdx/mlx/bridge.py) · [`state.py`](src/fdtdx/mlx/state.py) | ArrayContainer ↔ MLXState (the resolved-arrays seam Phase 5b serializes) |
-| [`backend/dispatch.py`](src/fdtdx/backend/dispatch.py) | routing + feature gating; [`backend/context.py`](src/fdtdx/backend/context.py) `use_backend` |
-| [`core/physics/mode_backend/`](src/fdtdx/core/physics/mode_backend/) | native FD mode solver (operator + eigensolver + adapter) |
-| [`core/physics/modes.py`](src/fdtdx/core/physics/modes.py) | `compute_mode` + `mode_backend` seam (fdtdmex default, tidy3d optional) |
-| [`core/physics/subpixel.py`](src/fdtdx/core/physics/subpixel.py) | Kottke/Farjadpour subpixel smoothing |
-| [`utils/plot_*`](src/fdtdx/utils/) · [`utils/smatrix.py`](src/fdtdx/utils/smatrix.py) | matplotlib visualization + S-matrix result |
+| [`mlx/kernels.py`](src/fdtdx/mlx/kernels.py) | custom Metal E/H bulk kernels (per-cell `cb`, in-kernel CPML fold, non-uniform metric, ADE dispersion) + block hybrid for full-tensor inclusions |
+| [`mlx/curl.py`](src/fdtdx/mlx/curl.py) · [`update.py`](src/fdtdx/mlx/update.py) · [`pml.py`](src/fdtdx/mlx/pml.py) | pad-free Yee curl + slab-CPML; E/H update; CPML coeff precompute |
+| [`mlx/bridge.py`](src/fdtdx/mlx/bridge.py) · [`state.py`](src/fdtdx/mlx/state.py) · [`serialize.py`](src/fdtdx/mlx/serialize.py) | ArrayContainer ↔ MLXState (the resolved-arrays seam) + numpy↔mx serialization for HDF5 |
+| [`backend/dispatch.py`](src/fdtdx/backend/dispatch.py) | routing + feature gating; `run_forward_from_plans` (the HDF5 run tail) |
+| [`core/physics/mode_backend/`](src/fdtdx/core/physics/mode_backend/) · [`modes.py`](src/fdtdx/core/physics/modes.py) | native FD mode solver + `compute_mode` seam |
+| [`utils/mode_expansion.py`](src/fdtdx/utils/mode_expansion.py) | mode-expansion monitor + mode cache |
+| [`scene.py`](src/fdtdx/scene.py) · [`utils/plot_setup_3d.py`](src/fdtdx/utils/plot_setup_3d.py) | `Scene` facade + interactive plotly 3D |
+| [`src/fdtdmex/io/`](src/fdtdmex/io/) | `SceneModel` schema + `sim_init`/`sim_run`/`sim_postproc` + mock backend |
 
 ## Physics-correctness contract (every engine change)
 
@@ -154,10 +108,9 @@ most open-ended piece — after 5a–5c.
 ```bash
 uv run --with pytest pytest tests/validation -q                          # parity (kernel default-on)
 FDTDMEX_METAL_KERNEL=0 uv run --with pytest pytest tests/validation -q   # parity, MLX-op cores
-uv run --with pytest pytest tests/validation/test_mode_solver.py tests/validation/test_subpixel.py -q
+uv run --with pytest pytest tests/validation/test_mode_solver.py tests/validation/test_mode_expansion.py tests/validation/test_io_roundtrip.py -q
 uv run python benchmarks/bench_forward.py --backends mlx,jax --sizes 96,128,192,256 --steps 500 --repeats 2
-uvx ruff format src/fdtdx && uvx ruff check src/fdtdx
+uvx ruff format src/fdtdx src/fdtdmex && uvx ruff check src/fdtdx src/fdtdmex
 ```
 Force a backend: `with fdtdx.use_backend("mlx"|"jax")` or `FDTDMEX_BACKEND=mlx|jax`. Mode backend:
-`FDTDMEX_MODE_BACKEND=fdtdmex|tidy3d` or the `mode_backend=` arg. Work on a branch off `mlx-fork`;
-local commits only.
+`FDTDMEX_MODE_BACKEND=fdtdmex|tidy3d`. Work on a branch off `mlx-fork`; local commits only.

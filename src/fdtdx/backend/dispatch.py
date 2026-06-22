@@ -157,13 +157,40 @@ def maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition):
     return _run_mlx_forward(arrays, objects, config)
 
 
+def run_forward_from_plans(state, source_plans, detector_plans, num_steps, courant, *, simulate_boundaries=True):
+    """Run the MLX forward time loop from an already-resolved ``MLXState`` + frozen plans.
+
+    This is the post-freeze tail of :func:`_run_mlx_forward`, factored out so the HDF5 IO layer
+    (``fdtdmex.io.sim_run``) can drive a run from a *deserialized* state + plans — no
+    ``ObjectContainer`` and no re-resolution needed. Returns ``(final_state, detector_states)``
+    where ``detector_states`` is the host (jnp) ``{name: {key: array}}`` mapping, or ``None`` when
+    there are no detectors.
+    """
+    from fdtdx.mlx.bridge import buffers_to_detector_states
+    from fdtdx.mlx.detector_freeze import allocate_buffers
+    from fdtdx.mlx.loop import run_forward_mlx
+
+    detector_buffers = allocate_buffers(detector_plans)
+    state, detector_buffers = run_forward_mlx(
+        state,
+        source_plans,
+        detector_plans,
+        detector_buffers,
+        int(num_steps),
+        float(courant),
+        simulate_boundaries=simulate_boundaries,
+        use_metal_kernel=_metal_kernel_enabled(),
+    )
+    detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
+    return state, detector_states
+
+
 def _run_mlx_forward(arrays, objects, config):
     import jax.numpy as jnp
 
     from fdtdx.fdtd.update import get_wrap_padding_axes
-    from fdtdx.mlx.bridge import buffers_to_detector_states, to_array_container, to_mlx_state
-    from fdtdx.mlx.detector_freeze import allocate_buffers, freeze_detectors
-    from fdtdx.mlx.loop import run_forward_mlx
+    from fdtdx.mlx.bridge import to_array_container, to_mlx_state
+    from fdtdx.mlx.detector_freeze import freeze_detectors
     from fdtdx.mlx.source_freeze import freeze_sources
 
     # Match checkpointed_fdtd: zero dynamic fields + detector states before stepping.
@@ -175,21 +202,9 @@ def _run_mlx_forward(arrays, objects, config):
     state = to_mlx_state(arrays, config, periodic_axes, objects=objects)
     source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
-    detector_buffers = allocate_buffers(detector_plans)
     num_steps = int(config.time_steps_total)
     c = float(config.courant_number)
 
-    state, detector_buffers = run_forward_mlx(
-        state,
-        source_plans,
-        detector_plans,
-        detector_buffers,
-        num_steps,
-        c,
-        simulate_boundaries=True,
-        use_metal_kernel=_metal_kernel_enabled(),
-    )
-
-    detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
+    state, detector_states = run_forward_from_plans(state, source_plans, detector_plans, num_steps, c)
     out_arrays = to_array_container(arrays, state, detector_states)
     return jnp.asarray(num_steps, dtype=jnp.int32), out_arrays
