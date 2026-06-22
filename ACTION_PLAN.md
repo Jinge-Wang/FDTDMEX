@@ -1,8 +1,8 @@
 # FDTDMEX — forward-engine performance plan
 
 Single entry point. A fresh agent should be able to read this top-to-bottom and start the current
-next step (**Phase 3 — broaden supported surface**, see "NEXT STEP" below; Phase 2 M1–M3 are
-complete and the Metal kernel path is default-on) without prior context. Depth references:
+next step (**Phase 3 item 3 — Drude–Lorentz ADE dispersion**, see "Phase 3" below; items 1–2 done,
+Phase 2 M1–M3 complete and the Metal kernel path is default-on) without prior context. Depth references:
 - [`docs/performance.md`](docs/performance.md) — roofline, the round-trip (RT) model, current measured
   results + a **History** section (what was tried, the gains, what didn't work — the "why").
 - [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md) — custom-kernel design, region
@@ -53,7 +53,9 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
 
   `FDTDMEX_METAL_KERNEL` is now default-on (`=0` forces the MLX-op cores); ineligible cases fall back
   automatically via `kernel_eligible`. Full validation suite green default-on (20 passed).
-- **NEXT: Phase 3** — broaden the supported physics surface (independent of perf). See "Next step".
+- **Phase 3 — in progress.** Item 1 (lossy full-anisotropic + 9-tensor conductivity) and item 2
+  (PEC/PMC boundaries) complete and parity-validated (25 validation tests green, kernel on and off).
+  **NEXT: item 3 — Drude–Lorentz (ADE) dispersion.** See the "Phase 3" section.
 
 ## Engine map (`src/fdtdx/mlx/`)
 
@@ -138,13 +140,33 @@ dedicated full-tensor Metal kernel. Worth investigating in a later phase **if de
 domains become a target use case** (the stated target is local inclusions, where the block hybrid is
 already at the floor). Until then this is a documented, intentional limit, not a TODO blocking Phase 3.
 
-## NEXT STEP — Phase 3: broaden supported surface (independent of perf)
+## Phase 3 — broaden supported surface (independent of perf)
 
 Spec: [`docs/widening-mlx-port-plan.md`](docs/widening-mlx-port-plan.md). Order (ascending effort):
 lossy full-anisotropic + 9-tensor conductivity; PEC/PMC boundaries; Drude–Lorentz (ADE) dispersion.
-Build each compile/kernel-friendly (host-side gating, arrays carried as state). As each lands, widen
-`kernel_eligible` so the new surface rides the Metal kernels where it can (the dual-conductivity /
-full-tensor cases currently fall back to the MLX-op cores).
+Build each compile/kernel-friendly (host-side gating, arrays carried as state).
+
+- **Item 1 — lossy full-anisotropic + 9-tensor conductivity: done.** Un-gate only — the MLX-op aniso
+  A/B cores ([`aniso.py`](src/fdtdx/mlx/aniso.py) `compute_anisotropic_update_matrices_mlx`) already
+  consume `sigma`. Removed the two array-level gates in
+  [`backend/dispatch.py`](src/fdtdx/backend/dispatch.py); parity in
+  [`tests/validation/test_mlx_lossy_aniso.py`](tests/validation/test_mlx_lossy_aniso.py). These cases
+  run on the MLX-op cores (the lossless block-hybrid kernel stays as-is; `kernel_eligible` falls them
+  back). Off-diagonal ε kept ≤0.5 (Quirk A explicit-update instability; finiteness asserted to match
+  both backends).
+- **Item 2 — PEC/PMC boundaries: done.** Frozen multiplicative keep-masks
+  ([`mlx/boundary_mask.py`](src/fdtdx/mlx/boundary_mask.py), built by running an all-ones field
+  through fdtdx's own `apply_boundary_post_E/H_update` → bit-exact) carried in
+  [`MLXState`](src/fdtdx/mlx/state.py) and applied in [`loop.py`](src/fdtdx/mlx/loop.py) **after
+  source injection** (matching fdtdx ordering). Masks live outside the cores, so they compose with the
+  Metal kernel *and* the MLX-op cores — no `kernel_eligible` change. Un-gated in `dispatch.py`; parity
+  + exact tangential-zero checks in
+  [`tests/validation/test_mlx_pec_pmc.py`](tests/validation/test_mlx_pec_pmc.py).
+- **NEXT — Item 3: Drude–Lorentz (ADE) dispersion.** Drude + Lorentz poles only (Debye is *not* in
+  upstream fdtdx → no parity oracle, excluded). The one piece adding mutable per-step state: thread
+  `P_curr`/`P_prev` through the loop (host-precompute c1/c2/c3, add the ADE term in the non-full-tensor
+  E-update, include P in the `mx.eval` leaf list). Keep the dispersive-plane-source gate. As it lands,
+  widen `kernel_eligible` where the new surface can ride the Metal kernels.
 
 ## Physics-correctness contract (every change)
 

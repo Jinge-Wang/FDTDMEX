@@ -44,11 +44,13 @@ unusable).
 `tests/validation/test_mlx_nonuniform.py`):
 - Engine: curl → E/H update → CPML → source → detector → time loop.
 - Materials: isotropic, diagonal-anisotropic, **full-tensor (9-component) anisotropic**,
-  electric/magnetic conductivity (lossy).
+  electric/magnetic conductivity (lossy) — including **lossy + full-anisotropic together** and
+  **full-tensor (9-component) conductivity** (Phase 3; via the MLX-op aniso A/B cores).
 - Sources: `PointDipoleSource`; `UniformPlaneSource` / `GaussianPlaneSource` (TFSF), including
   **tilted (azimuth/elevation)** beams.
 - Detectors: `EnergyDetector`, `FieldDetector`, `PoyntingFluxDetector`, `PhasorDetector`.
-- Boundaries: CPML, and **periodic** (wrap-padding, real-valued / Bloch-k0).
+- Boundaries: CPML, **periodic** (wrap-padding, real-valued / Bloch-k0), and **PEC/PMC** (Phase 3;
+  frozen tangential keep-masks applied post-injection, composing with the Metal kernel and MLX-op cores).
 - **Non-uniform (rectilinear) grids (M4):** metric-scaled curl, spacing-weighted detector
   interpolation, and **spacing-weighted off-diagonal anisotropic averaging** (2nd-order on graded
   meshes — *more correct* than fdtdx, which leaves that average unweighted). On uniform grids every
@@ -56,10 +58,10 @@ unusable).
 - fdtdx's own physics tests (plane wave, Fresnel slab, skin depth, birefringence, non-uniform grid)
   pass auto-routed to MLX.
 
-**Deferred → falls back to JAX:** dispersive (ADE) materials; lossy + full-anisotropic together;
-full-anisotropic (9-tensor) conductivity; tilted+randomized / dispersive plane sources; mode
-sources/detectors; Bloch (nonzero-k) / forced-complex propagation; PEC/PMC boundaries; gradients.
-The dispatcher gates all of these; widen the gate as kernels land.
+**Deferred → falls back to JAX:** dispersive (ADE) materials; tilted+randomized / dispersive plane
+sources; mode sources/detectors; Bloch (nonzero-k) / forced-complex propagation; gradients.
+The dispatcher gates all of these; widen the gate as kernels land. (Phase 3 removed lossy +
+full-anisotropic, 9-tensor conductivity, and PEC/PMC from this list.)
 
 ## Commands
 

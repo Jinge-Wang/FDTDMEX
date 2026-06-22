@@ -15,11 +15,11 @@ Estimates are part-time, AI-paired. Code generation is cheap; **physics validati
 
 Validation suites: `tests/validation/test_mlx_parity.py` (uniform), `tests/validation/test_mlx_nonuniform.py` (non-uniform + convergence), `tests/visualization/` (birefringence + convergence figures); fdtdx's own physics tests pass auto-routed to MLX.
 
-**Not yet on MLX (gated → JAX):** dispersion (ADE), lossy-anisotropic, 9-tensor conductivity, Bloch/complex propagation, PEC/PMC, mode sources/detectors, gradients. The dispatcher (`src/fdtdx/backend/dispatch.py`) declines these and falls back to the unchanged JAX engine.
+**Not yet on MLX (gated → JAX):** dispersion (ADE), Bloch/complex propagation, mode sources/detectors, gradients. The dispatcher (`src/fdtdx/backend/dispatch.py`) declines these and falls back to the unchanged JAX engine. *(Phase 3 added lossy-anisotropic + 9-tensor conductivity and PEC/PMC — now supported.)*
 
 ### WS-A performance — Phase 1 ✅, Phase 2 M1 ✅ + M2 ✅ + M3 ✅
 - **Status:** custom Metal E/H kernels run the forward loop and are **default-on** (`src/fdtdx/mlx/kernels.py`; `FDTDMEX_METAL_KERNEL=0` forces the MLX-op cores). M3 folded CPML into the kernel (N=192 iso CPML-on 374 → **1826 Mcs/s / 5 RT**, at the bandwidth floor; diagonal 1711), added in-kernel non-uniform metric, and a block hybrid that keeps the kernel on the diagonal bulk around compact full-tensor inclusions (N=128 8³ inclusion 125 → 1124 Mcs/s). Physics exact (element-wise vs JAX). Ineligible cases (lossy, scattered/oversized tensor, gradients) fall back to the MLX-op cores via `kernel_eligible`.
-- **Next:** Phase 2 perf is complete; remaining work is Phase 3 — broaden the supported physics surface (lossy full-anisotropic + 9-tensor conductivity, PEC/PMC, ADE dispersion), widening `kernel_eligible` as each lands. See [ACTION_PLAN.md](../ACTION_PLAN.md), [performance.md](performance.md) (roofline + results + history), [phase2-metal-kernels.md](phase2-metal-kernels.md) (kernel spec).
+- **Next:** Phase 2 perf is complete; Phase 3 (broaden the supported physics surface) is in progress — lossy full-anisotropic + 9-tensor conductivity and PEC/PMC are **done**; remaining is **Drude–Lorentz ADE dispersion** (Drude/Lorentz only; Debye is absent upstream), widening `kernel_eligible` as it lands. See [ACTION_PLAN.md](../ACTION_PLAN.md), [performance.md](performance.md) (roofline + results + history), [phase2-metal-kernels.md](phase2-metal-kernels.md) (kernel spec).
 
 ## WS-C — Subpixel smoothing (parallel with WS-A)
 Port the Kottke/Farjadpour kernel (`../meep/src/anisotropic_averaging.cpp`, ~150 core lines) + `chi1p1` continuous-ε evaluator; validate vs MEEP. **~2 weeks.** Requires WS-A's tensor path to consume output.
@@ -43,8 +43,8 @@ These features **already exist in upstream fdtdx's JAX engine**; the dispatcher 
 | Feature | Where it lives in fdtdx | MLX port effort |
 |---|---|---|
 | **Drude-Lorentz dispersion (ADE)** | [`dispersion.py`](../src/fdtdx/dispersion.py) + `fdtd/update.py` ADE block | low–medium: c1/c2/c3 are time-invariant → precompute on host like CPML; carry `P_curr`/`P_prev` in `MLXState`; add one `E += inv_eps·Σ(P_curr − P_new)` term; non-dispersive cells have c3=0 so it's inert elsewhere |
-| **Lossy (conductive) full-anisotropic** | the 9-tensor A/B update already takes `sigma` | low: `mlx/aniso.py` already has the A/B path; thread the σ tensor through `compute_anisotropic_update_matrices_mlx` and un-gate |
-| **PEC / PMC boundaries** | `objects/boundaries/{pec,pmc}.py` | low: a per-step field-masking pass in the MLX loop + un-gate |
+| **Lossy (conductive) full-anisotropic + 9-tensor conductivity** | the 9-tensor A/B update already takes `sigma` | ✅ **done (Phase 3)**: `mlx/aniso.py` A/B path already consumes σ; un-gated in `dispatch.py`; parity in `test_mlx_lossy_aniso.py`. Runs on the MLX-op cores (lossless kernel falls back via `kernel_eligible`) |
+| **PEC / PMC boundaries** | `objects/boundaries/{pec,pmc}.py` | ✅ **done (Phase 3)**: frozen tangential keep-masks (`mlx/boundary_mask.py`) applied post-injection in `loop.py`, composing with the Metal kernel + MLX-op cores; un-gated; parity + tangential-zero in `test_mlx_pec_pmc.py` |
 
 ## Genuinely new physics (needs MEEP reference or new derivation)
 - **Subpixel smoothing** — WS-C; fdtdx lacks it (Kottke/Farjadpour, `../meep/src/anisotropic_averaging.cpp`).
