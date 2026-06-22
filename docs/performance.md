@@ -6,20 +6,24 @@ Measured reference for the MLX/Metal forward engine on Apple Silicon. fp32 throu
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](images/forward_scaling.png)
 
-`benchmarks/results/scaling_s500.jsonl` (500 steps, warmup excluded → steady-state wall-clock).
-This sweep is the **Phase-1 default path** (MLX-op cores, CPML on; the M2 Metal-kernel path is the RT
-table + History below, not yet a full scaling sweep).
+Full `run_fdtd` wall-clock (warmup excluded), 500 steps, **kernel path default-on** (M3). Regenerate:
+`bench_forward.py --backends mlx,jax --materials isotropic,diagonal,full_aniso --sizes 64,96,128,192,256
+--steps 500 --repeats 2 --isolate` then `plot_results.py <file>.jsonl --out docs/images/forward_scaling.png`.
 **MLX/Metal leads JAX-CPU for every N ≥ 64 across all three materials, with no plateau:**
 
-| material | MLX Mcs/s (N=256) | JAX-CPU | speedup | crossover |
-|---|--:|--:|--:|--:|
-| isotropic | 266.8 | 194.7 | 1.37× | N≈64 |
-| diagonal | 267.6 | 196.3 | 1.36× | N≈64 |
-| full_aniso | 120.9 | 96.5 | 1.25× | N≈48–64 |
+| material | MLX Mcs/s (N=192 / 256) | JAX-CPU | speedup | path |
+|---|--:|--:|--:|---|
+| isotropic | 1392 / 1300 | 197 / 201 | **~6.5–7×** | Metal kernel (CPML folded) |
+| diagonal | 1359 / 1293 | 196 / 200 | **~6.5–7×** | Metal kernel (CPML folded) |
+| full_aniso | 123 / 116 | 96 / 98 | ~1.3× | MLX-op cores (uniform 9-tensor → kernel fallback) |
 
-Below N≈48 JAX-CPU wins (MLX kernel-launch overhead dominates tiny domains). Panel (d) memory: MLX
-peak is exact; the JAX line is in-process RSS (use `benchmarks/profile_memory.py` for a clean
-per-cell figure).
+The iso/diagonal full-`run_fdtd` throughput (~1.3–1.4k Mcs/s) sits below the ~1826 Mcs/s pure-loop
+profile because it includes source injection, the host↔device bridge, and per-run setup; the kernel
+update itself is at the bandwidth floor (RT table below). The uniform full-tensor sweep fills the
+whole domain with a 9-tensor, which the block hybrid does not accelerate (it targets *compact*
+inclusions) — so it runs on the MLX-op aniso cores, keeping the pre-existing ~1.3× edge. Panel (d)
+memory: MLX peak is exact; the JAX line is in-process RSS (use `benchmarks/profile_memory.py` for a
+clean per-cell figure).
 
 ## Roofline (M4 Pro, `benchmarks/profile_metal.py`)
 
