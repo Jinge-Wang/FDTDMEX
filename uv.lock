@@ -1005,8 +1005,8 @@ dependencies = [
     { name = "optax" },
     { name = "pytreeclass" },
     { name = "rich" },
+    { name = "scipy" },
     { name = "seaborn" },
-    { name = "tidy3d" },
     { name = "trimesh" },
     { name = "typing-extensions" },
 ]
@@ -1030,11 +1030,15 @@ dev = [
     { name = "sphinx-book-theme" },
     { name = "sphinx-copybutton" },
     { name = "sphinx-design" },
+    { name = "tidy3d" },
     { name = "tox-uv" },
     { name = "ty" },
 ]
 mcp = [
     { name = "mcp" },
+]
+tidy3d = [
+    { name = "tidy3d" },
 ]
 viz = [
     { name = "plotly" },
@@ -1068,6 +1072,7 @@ requires-dist = [
     { name = "pyvista", marker = "extra == 'viz'", specifier = ">=0.44" },
     { name = "rich", specifier = ">=13.9.4" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.2" },
+    { name = "scipy", specifier = ">=1.11" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "sphinx", marker = "extra == 'dev'", specifier = "<9.0" },
     { name = "sphinx-autobuild", marker = "extra == 'dev'", specifier = ">=2025.8.25" },
@@ -1075,14 +1080,15 @@ requires-dist = [
     { name = "sphinx-book-theme", marker = "extra == 'dev'", specifier = ">=1.1.4" },
     { name = "sphinx-copybutton", marker = "extra == 'dev'", specifier = ">=0.5.2" },
     { name = "sphinx-design", marker = "extra == 'dev'" },
-    { name = "tidy3d", specifier = ">=2.8.0" },
+    { name = "tidy3d", marker = "extra == 'dev'", specifier = ">=2.8.0" },
+    { name = "tidy3d", marker = "extra == 'tidy3d'", specifier = ">=2.8.0" },
     { name = "tox-uv", marker = "extra == 'dev'", specifier = ">=1.16.1" },
     { name = "trame", marker = "extra == 'viz'", specifier = ">=3.6" },
     { name = "trimesh", specifier = ">=4.5.3" },
     { name = "ty", marker = "extra == 'dev'", specifier = ">=0.0.49" },
     { name = "typing-extensions", specifier = ">=4.14.1" },
 ]
-provides-extras = ["viz", "mcp", "dev"]
+provides-extras = ["tidy3d", "viz", "mcp", "dev"]
 
 [[package]]
 name = "filelock"

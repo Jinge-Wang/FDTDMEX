@@ -1,3 +1,4 @@
+import os
 from collections import namedtuple
 from types import SimpleNamespace
 from typing import List, Literal, Sequence
@@ -5,13 +6,19 @@ from typing import List, Literal, Sequence
 import jax
 import jax.numpy as jnp
 import numpy as np
-import tidy3d
 from jax.typing import ArrayLike
-from tidy3d.components.mode.solver import compute_modes as _compute_modes
 
+from fdtdx.constants import eta0
 from fdtdx.core.axis import get_transverse_axes
 from fdtdx.core.misc import expand_to_3x3
 from fdtdx.core.physics.metrics import normalize_by_poynting_flux
+
+#: Default mode-solver backend. ``"fdtdmex"`` selects the native, Tidy3D-free full-vectorial FD
+#: solver (Phase 4 Track A); ``"tidy3d"`` selects the legacy Tidy3D path (optional dependency, kept
+#: for fully tensorial media, bends, and dev-time cross-checks). Override with the
+#: ``FDTDMEX_MODE_BACKEND`` environment variable or the ``mode_backend`` argument of
+#: :func:`compute_mode`.
+_DEFAULT_MODE_BACKEND = "fdtdmex"
 
 ModeTupleType = namedtuple("ModeTupleType", ["neff", "Ex", "Ey", "Ez", "Hx", "Hy", "Hz"])
 """A named tuple containing the mode fields and effective index.
@@ -90,6 +97,37 @@ def sort_modes(
     return matching_sorted + non_matching_sorted
 
 
+def _resolve_mode_backend(mode_backend: Literal["fdtdmex", "tidy3d"] | None) -> str:
+    """Resolve the active mode backend from the argument, env var, or the module default."""
+    if mode_backend is None:
+        mode_backend = os.environ.get("FDTDMEX_MODE_BACKEND", _DEFAULT_MODE_BACKEND)
+    if mode_backend not in ("fdtdmex", "tidy3d"):
+        raise ValueError(f"mode_backend must be 'fdtdmex' or 'tidy3d', got {mode_backend!r}")
+    return mode_backend
+
+
+def _dispatch_mode_solver(mode_backend: str, **kwargs) -> List[ModeTupleType]:
+    """Call the selected mode backend, auto-routing fdtdmex's deferred cases to Tidy3D if present.
+
+    The fdtdmex backend raises :class:`NotImplementedError` for fully tensorial media and bends. When
+    that happens we transparently fall back to the Tidy3D solver if it is installed; otherwise the
+    original error is re-raised so the user gets an actionable message.
+    """
+    if mode_backend == "tidy3d":
+        return tidy3d_mode_computation_wrapper(**kwargs)
+
+    from fdtdx.core.physics.mode_backend import fdtdmex_mode_computation_wrapper
+
+    try:
+        return fdtdmex_mode_computation_wrapper(**kwargs)
+    except NotImplementedError:
+        try:
+            import tidy3d  # noqa: F401
+        except ImportError:
+            raise
+        return tidy3d_mode_computation_wrapper(**kwargs)
+
+
 def compute_mode(
     frequency: float,
     inv_permittivities: jax.Array,  # shape (nx, ny, nz)
@@ -103,6 +141,7 @@ def compute_mode(
     bend_axis: int | None = None,
     symmetry: tuple[int, int] = (0, 0),
     transverse_coords: Sequence[jax.Array] | None = None,
+    mode_backend: Literal["fdtdmex", "tidy3d"] | None = None,
 ) -> tuple[
     jax.Array,  # E
     jax.Array,  # H
@@ -164,6 +203,7 @@ def compute_mode(
     if (bend_radius is None) != (bend_axis is None):
         raise ValueError("bend_radius and bend_axis must both be set or both be None")
 
+    backend = _resolve_mode_backend(mode_backend)
     np_complex_dtype = np.complex128 if dtype == jnp.float64 else np.complex64
 
     def mode_helper(permittivity, permeability, c0_um, c1_um):
@@ -179,7 +219,8 @@ def compute_mode(
             tidy3d_bend_axis = None
             bend_radius_um = None
             plane_center = None
-        modes = tidy3d_mode_computation_wrapper(
+        modes = _dispatch_mode_solver(
+            backend,
             frequency=frequency,
             permittivity_cross_section=permittivity,
             permeability_cross_section=permeability,
@@ -337,8 +378,8 @@ def compute_mode(
     mode_E = jnp.expand_dims(mode_E_raw, axis=propagation_axis + 1)
     mode_H = jnp.expand_dims(mode_H_raw, axis=propagation_axis + 1)
 
-    # Tidy3D uses different scaling internally, so convert back
-    mode_H = mode_H * tidy3d.constants.ETA_0
+    # The solver returns H scaled by -1j/eta0; restore the standard H units expected downstream.
+    mode_H = mode_H * eta0
 
     mode_E_norm, mode_H_norm = normalize_by_poynting_flux(
         mode_E,
@@ -399,6 +440,15 @@ def tidy3d_mode_computation_wrapper(
         List[ModeTupleType]: List of computed modes sorted by decreasing real part of
             effective index. Each mode contains the field components and effective index.
     """
+    try:
+        from tidy3d.components.mode.solver import compute_modes as _compute_modes
+    except ImportError as exc:  # pragma: no cover - exercised only without tidy3d installed
+        raise ImportError(
+            "mode_backend='tidy3d' requires the optional 'tidy3d' dependency. Install it with "
+            "'pip install tidy3d' / 'uv add tidy3d', or use the default native backend "
+            "(mode_backend='fdtdmex')."
+        ) from exc
+
     # see https://docs.flexcompute.com/projects/tidy3d/en/latest/_autosummary/tidy3d.ModeSpec.html#tidy3d.ModeSpec
     mode_spec = SimpleNamespace(
         # Note that the filter_pol argument is not used here since it does not work from tidy3d

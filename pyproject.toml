@@ -17,7 +17,7 @@ dependencies = [
     "optax>=0.2.4",
     "equinox>=0.11.10",
     "trimesh>=4.5.3",
-    "tidy3d>=2.8.0",
+    "scipy>=1.11",
     "seaborn>=0.13.2",
     "matplotlib>=3.9.4",
     "rich>=13.9.4",
@@ -29,6 +29,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Tidy3D mode solver — now an optional, legacy backend. The native full-vectorial FD solver
+# (mode_backend="fdtdmex", default) removes the hard dependency; install this only to use
+# mode_backend="tidy3d" for fully tensorial media, bends, or dev-time cross-checks.
+tidy3d = ["tidy3d>=2.8.0"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
 viz = ["plotly>=5.22", "pyvista>=0.44", "trame>=3.6"]
 # MCP server for LLM orchestration (WS-D).
@@ -53,6 +57,8 @@ dev = [
     "chex>=0.1.91",
     "sphinx-design",
     "ty>=0.0.49",
+    # Legacy Tidy3D mode backend, kept in dev for the native-solver cross-check tests.
+    "tidy3d>=2.8.0",
 ]
 
 [project.urls]

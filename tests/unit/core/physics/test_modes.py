@@ -212,6 +212,7 @@ class TestComputeMode:
             resolution=1e-8,
             direction="+",
             transverse_coords=[np.asarray([0.0, 1e-6, 3e-6]), np.asarray([0.0, 2e-6, 5e-6])],
+            mode_backend="tidy3d",
         )
 
         wrapper_kwargs = mock_tidy3d_wrapper.call_args.kwargs
@@ -263,6 +264,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Check what was passed to tidy3d_wrapper
@@ -312,6 +314,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Check what was passed to tidy3d_wrapper
@@ -361,6 +364,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Check what was passed to tidy3d_wrapper
@@ -411,6 +415,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=inv_permeabilities,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Check what was passed to tidy3d_wrapper
@@ -453,6 +458,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Check what was passed to tidy3d_wrapper
@@ -496,6 +502,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Verify the wrapper was called with 9-component permittivity
@@ -556,6 +563,7 @@ class TestAnisotropicModeComputation:
             inv_permeabilities=inv_permeabilities,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
         )
 
         # Verify the wrapper was called with 9-component permeability
@@ -607,7 +615,7 @@ class TestTidy3DModeComputationWrapper:
 
         return MockEH(E_data, H_data)
 
-    @patch("fdtdx.core.physics.modes._compute_modes")
+    @patch("tidy3d.components.mode.solver.compute_modes")
     def test_single_mode(self, mock_compute_modes):
         """Test single mode computation."""
         # Create properly structured mock data
@@ -629,7 +637,7 @@ class TestTidy3DModeComputationWrapper:
         assert modes[0].neff == 1.5 + 0.1j
         assert modes[0].Ex.shape == (5, 5)
 
-    @patch("fdtdx.core.physics.modes._compute_modes")
+    @patch("tidy3d.components.mode.solver.compute_modes")
     def test_multiple_modes(self, mock_compute_modes):
         """Test multiple mode computation."""
         # Create properly structured mock data for multiple modes
@@ -651,7 +659,7 @@ class TestTidy3DModeComputationWrapper:
         assert modes[1].neff == 1.4 + 0.1j
         assert modes[2].neff == 1.3 + 0.1j
 
-    @patch("fdtdx.core.physics.modes._compute_modes")
+    @patch("tidy3d.components.mode.solver.compute_modes")
     def test_with_permeability(self, mock_compute_modes):
         """Test mode computation with permeability cross-section."""
         mock_EH = self.create_mock_eh_data((4, 4), num_modes=1)
@@ -701,7 +709,7 @@ class TestComputeModeBendPassthrough:
             jnp.ones((3, 5, 6, 1), dtype=jnp.complex64),
         )
 
-        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+")
+        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+", mode_backend="tidy3d")
 
         kwargs = mock_wrapper.call_args.kwargs
         assert kwargs["bend_radius"] is None
