@@ -209,7 +209,7 @@ a fresh `bench_forward` figure; roadmap WS-A row updated.
 
 ---
 
-## PHASE 2 — Custom Metal update kernels (the deep lever; fp32; SEPARATE E and H kernels)
+## PHASE 2 — Custom Metal update kernels (fp32; separate E and H kernels)
 
 **Why:** even the lean compiled step is ~23 RT — 3–4× above the ~5–8 *necessary* — because MLX
 op-fusion can't keep a stencil's working set in threadgroup memory or reuse neighbour reads across the
@@ -221,11 +221,10 @@ sub-ops; each op still round-trips DRAM. Past ~440 Mcs/s the only lever is hand-
 together** (leapfrog forbids that; H must read the completed E). So: one **E-update kernel** and one
 **H-update kernel**.
 
-- *2.5D plane-marching with threadgroup memory.* Each threadgroup owns an XY tile and marches along z,
-  keeping the resident z-plane(s) it needs in threadgroup memory so each value is read from DRAM ~once
-  (the classic CUDA shared-memory stencil — Metal threadgroup memory = CUDA shared memory; threadgroup
-  = block). The Yee curl is **one-sided** (cell `i` needs `i−1` *or* `i+1`, not both) → a 1-cell halo
-  on one side per axis (a lean tile).
+- *Plane-marching with threadgroup memory.* Partition the domain into XY tiles; each tile marches
+  along z, holding the z-plane(s) currently needed in Metal threadgroup memory so each field value is
+  loaded from DRAM ~once per step. The Yee curl is **one-sided** (cell `i` uses `i−1` *or* `i+1`, not
+  both) → a 1-cell halo on one side per axis.
 - *Race / buffering (§P.1).* E-kernel reads H neighbours, writes E. **Isotropic** E reads only its own
   `E_old` → in-place safe, no E-halo. **Anisotropic** E reads `E_old` at neighbours (off-diagonal
   averaging) → **must double-buffer E + load an E-halo**. Same for H↔μ.
