@@ -1,16 +1,15 @@
 """MLX Yee curl operators with CPML auxiliary-field recurrences.
 
-Line-for-line translation of ``fdtdx.core.physics.curl.curl_H`` / ``curl_E`` using
-``mx.roll`` for the staggered finite differences and the precomputed CPML ``a``/``b`` /
-``1/kappa`` (see :mod:`fdtdx.mlx.pml`). Each finite difference along an axis is multiplied by
-that axis's metric scale (port of ``_metric_scale``): the scalar ``1.0`` on uniform grids (so
-the uniform path is unchanged), or ``reference_spacing / cell_width`` broadcasting along the
-axis on non-uniform grids. ``curl_E`` uses the forward stencil (primal widths); ``curl_H`` the
-backward stencil (dual widths).
+Line-for-line translation of ``fdtdx.core.physics.curl.curl_H`` / ``curl_E``. Finite differences
+are computed **pad-free**, by slicing: a backward/forward difference along an axis is assembled from
+``f[1:] - f[:-1]`` plus a single edge cell whose ghost value is **zero on PML/PEC axes** or the
+**wrapped neighbour on periodic axes** — reproducing byte-for-byte what one-cell zero/wrap padding
+produced, without the full-array ``mx.pad`` copy per field per step. Each difference is then scaled
+by that axis's metric (port of ``_metric_scale``): the scalar ``1.0`` on uniform grids (skipped as a
+no-op), or ``reference_spacing / cell_width`` broadcasting along the axis on non-uniform grids.
+``curl_E`` uses the forward stencil (primal widths); ``curl_H`` the backward stencil (dual widths).
 
-Fields are passed pre-padded with one zero ghost cell per side (shape (3, Nx+2, Ny+2,
-Nz+2)); the ``[1:-1, 1:-1, 1:-1]`` interior slice recovers (Nx, Ny, Nz), exactly as the
-JAX reference.
+``pad_fields_mlx`` is retained for the anisotropic averaging and detector interpolation paths.
 """
 
 from __future__ import annotations
@@ -51,29 +50,69 @@ def pad_zero(field: mx.array) -> mx.array:
     return pad_fields_mlx(field, (False, False, False))
 
 
+def _sl(arr: mx.array, start, stop, axis: int) -> mx.array:
+    """``arr`` sliced ``[start:stop]`` along ``axis`` (other axes untouched)."""
+    idx = [slice(None)] * arr.ndim
+    idx[axis] = slice(start, stop)
+    return arr[tuple(idx)]
+
+
+def _bwd_diff(f: mx.array, axis: int, periodic: bool) -> mx.array:
+    """Backward difference ``d[i] = f[i] - f[i-1]`` along ``axis`` (same shape as ``f``).
+
+    Low-edge ghost: ``f[-1]`` (wrap) on periodic axes, else ``0`` — matching one-cell padding.
+    """
+    body = _sl(f, 1, None, axis) - _sl(f, 0, -1, axis)  # f[i] - f[i-1] for i = 1..N-1
+    lo = _sl(f, 0, 1, axis)  # zero ghost: f[0] - 0
+    if periodic:
+        lo = lo - _sl(f, -1, None, axis)  # wrap: f[0] - f[N-1]
+    return mx.concatenate([lo, body], axis=axis)
+
+
+def _fwd_diff(f: mx.array, axis: int, periodic: bool) -> mx.array:
+    """Forward difference ``d[i] = f[i+1] - f[i]`` along ``axis`` (same shape as ``f``).
+
+    High-edge ghost: ``f[0]`` (wrap) on periodic axes, else ``0`` — matching one-cell padding.
+    """
+    body = _sl(f, 1, None, axis) - _sl(f, 0, -1, axis)  # f[i+1] - f[i] for i = 0..N-2
+    hi = -_sl(f, -1, None, axis)  # zero ghost: 0 - f[N-1]
+    if periodic:
+        hi = _sl(f, 0, 1, axis) - _sl(f, -1, None, axis)  # wrap: f[0] - f[N-1]
+    return mx.concatenate([body, hi], axis=axis)
+
+
+def _mul_metric(d: mx.array, m) -> mx.array:
+    """Scale a difference by its per-axis metric; skip the no-op multiply on uniform grids."""
+    if isinstance(m, float) and m == 1.0:
+        return d
+    return d * m
+
+
 def curl_H_mlx(
-    H_pad: mx.array,
+    H: mx.array,
     psi_E: mx.array,
     cpml_a: mx.array,
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
     metric: tuple = (1.0, 1.0, 1.0),
+    periodic_axes: tuple = (False, False, False),
 ) -> tuple[mx.array, mx.array]:
     """Curl of H (-> E-type field) plus updated psi_E. See ``curl_H`` in fdtdx.
 
-    ``metric`` is the per-axis backward-stencil (dual-width) derivative scale; each finite
-    difference along an axis is multiplied by ``metric[axis]`` (``1.0`` on uniform grids).
+    ``H`` is the un-padded (3, Nx, Ny, Nz) field; backward differences are taken pad-free
+    (``_bwd_diff``). ``metric`` is the per-axis dual-width derivative scale (``1.0`` on uniform).
     """
     a, b, ik = cpml_a, cpml_b, inv_kappa
     mx_, my_, mz_ = metric
+    px, py, pz = periodic_axes
 
-    dyHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=1))[1:-1, 1:-1, 1:-1] * my_
-    dzHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=2))[1:-1, 1:-1, 1:-1] * mz_
-    dzHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=2))[1:-1, 1:-1, 1:-1] * mz_
-    dxHz = (H_pad[2] - mx.roll(H_pad[2], 1, axis=0))[1:-1, 1:-1, 1:-1] * mx_
-    dxHy = (H_pad[1] - mx.roll(H_pad[1], 1, axis=0))[1:-1, 1:-1, 1:-1] * mx_
-    dyHx = (H_pad[0] - mx.roll(H_pad[0], 1, axis=1))[1:-1, 1:-1, 1:-1] * my_
+    dyHz = _mul_metric(_bwd_diff(H[2], 1, py), my_)
+    dzHy = _mul_metric(_bwd_diff(H[1], 2, pz), mz_)
+    dzHx = _mul_metric(_bwd_diff(H[0], 2, pz), mz_)
+    dxHz = _mul_metric(_bwd_diff(H[2], 0, px), mx_)
+    dxHy = _mul_metric(_bwd_diff(H[1], 0, px), mx_)
+    dyHx = _mul_metric(_bwd_diff(H[0], 1, py), my_)
 
     psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy = (
         psi_E[0],
@@ -91,8 +130,9 @@ def curl_H_mlx(
         psi_Eyx = b[0] * psi_Eyx + a[0] * dxHz
         psi_Ezx = b[0] * psi_Ezx + a[0] * dxHy
         psi_Ezy = b[1] * psi_Ezy + a[1] * dyHx
-
-    psi_E_updated = mx.stack([psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy], axis=0)
+        psi_E_updated = mx.stack([psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy], axis=0)
+    else:
+        psi_E_updated = psi_E  # untouched -> don't rebuild the (6,N^3) stack
 
     curl_x = (ik[1] * dyHz + psi_Exy) - (ik[2] * dzHy + psi_Exz)
     curl_y = (ik[2] * dzHx + psi_Eyz) - (ik[0] * dxHz + psi_Eyx)
@@ -103,28 +143,30 @@ def curl_H_mlx(
 
 
 def curl_E_mlx(
-    E_pad: mx.array,
+    E: mx.array,
     psi_H: mx.array,
     cpml_a: mx.array,
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
     metric: tuple = (1.0, 1.0, 1.0),
+    periodic_axes: tuple = (False, False, False),
 ) -> tuple[mx.array, mx.array]:
     """Curl of E (-> H-type field) plus updated psi_H. See ``curl_E`` in fdtdx.
 
-    ``metric`` is the per-axis forward-stencil (primal-width) derivative scale; each finite
-    difference along an axis is multiplied by ``metric[axis]`` (``1.0`` on uniform grids).
+    ``E`` is the un-padded (3, Nx, Ny, Nz) field; forward differences are taken pad-free
+    (``_fwd_diff``). ``metric`` is the per-axis primal-width derivative scale (``1.0`` on uniform).
     """
     a, b, ik = cpml_a, cpml_b, inv_kappa
     mx_, my_, mz_ = metric
+    px, py, pz = periodic_axes
 
-    dyEz = (mx.roll(E_pad[2], -1, axis=1) - E_pad[2])[1:-1, 1:-1, 1:-1] * my_
-    dzEy = (mx.roll(E_pad[1], -1, axis=2) - E_pad[1])[1:-1, 1:-1, 1:-1] * mz_
-    dzEx = (mx.roll(E_pad[0], -1, axis=2) - E_pad[0])[1:-1, 1:-1, 1:-1] * mz_
-    dxEz = (mx.roll(E_pad[2], -1, axis=0) - E_pad[2])[1:-1, 1:-1, 1:-1] * mx_
-    dxEy = (mx.roll(E_pad[1], -1, axis=0) - E_pad[1])[1:-1, 1:-1, 1:-1] * mx_
-    dyEx = (mx.roll(E_pad[0], -1, axis=1) - E_pad[0])[1:-1, 1:-1, 1:-1] * my_
+    dyEz = _mul_metric(_fwd_diff(E[2], 1, py), my_)
+    dzEy = _mul_metric(_fwd_diff(E[1], 2, pz), mz_)
+    dzEx = _mul_metric(_fwd_diff(E[0], 2, pz), mz_)
+    dxEz = _mul_metric(_fwd_diff(E[2], 0, px), mx_)
+    dxEy = _mul_metric(_fwd_diff(E[1], 0, px), mx_)
+    dyEx = _mul_metric(_fwd_diff(E[0], 1, py), my_)
 
     psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy = (
         psi_H[0],
@@ -142,8 +184,9 @@ def curl_E_mlx(
         psi_Hyx = b[3] * psi_Hyx + a[3] * dxEz
         psi_Hzx = b[3] * psi_Hzx + a[3] * dxEy
         psi_Hzy = b[4] * psi_Hzy + a[4] * dyEx
-
-    psi_H_updated = mx.stack([psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy], axis=0)
+        psi_H_updated = mx.stack([psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy], axis=0)
+    else:
+        psi_H_updated = psi_H  # untouched -> don't rebuild the (6,N^3) stack
 
     curl_x = (ik[1] * dyEz + psi_Hxy) - (ik[2] * dzEy + psi_Hxz)
     curl_y = (ik[2] * dzEx + psi_Hyz) - (ik[0] * dxEz + psi_Hyx)

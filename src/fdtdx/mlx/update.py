@@ -3,8 +3,13 @@
 Translation of ``fdtdx.fdtd.update.update_E`` / ``update_H``. The non-9-tensor branch is the
 component-wise fast path; the 9-tensor branch builds per-cell A/B matrices and uses the
 spacing-weighted off-diagonal averaging (see :mod:`fdtdx.mlx.aniso`). Each curl is metric-scaled
-per axis (``state.metric_fwd``/``metric_bwd``; ``1.0`` on uniform grids). Source injection and
-detector recording are handled by the loop driver. Conductivity follows Schneider ch. 3.12.
+per axis (``metric_bwd``/``metric_fwd``; ``1.0`` on uniform grids) and computed pad-free
+(:mod:`fdtdx.mlx.curl`). Source injection and detector recording are handled by the loop driver.
+Conductivity follows Schneider ch. 3.12.
+
+``update_E_mlx``/``update_H_mlx`` are thin wrappers over the pure array functions ``_update_E`` /
+``_update_H`` (all inputs explicit), so the loop driver can wrap those in ``mx.compile`` — the
+time-invariant material/CPML/metric arrays become captured constants and only E/H/ψ flow through.
 """
 
 from __future__ import annotations
@@ -26,73 +31,83 @@ def _is_full_tensor(arr) -> bool:
     return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
 
 
-def update_E_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
-    """Return ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)``."""
-    H_pad = pad_fields_mlx(state.H, state.periodic_axes)
-    curl, psi_E = curl_H_mlx(
-        H_pad, state.psi_E, state.cpml_a, state.cpml_b, state.inv_kappa, simulate_boundaries, state.metric_bwd
-    )
-
-    inv_eps = state.inv_eps
-    sigma_E = state.sigma_E
+def _update_E(E, H, psi_E, inv_eps, sigma_E, cpml_a, cpml_b, inv_kappa, metric_bwd, periodic_axes, aniso_widths, c, sb):
+    """Pure ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)``. All inputs explicit (compilable)."""
+    curl, psi_E_new = curl_H_mlx(H, psi_E, cpml_a, cpml_b, inv_kappa, sb, metric_bwd, periodic_axes)
 
     if not _is_full_tensor(inv_eps) and not _is_full_tensor(sigma_E):
         factor = 1.0
         if sigma_E is not None:
             factor = 1.0 - c * sigma_E * eta0 * inv_eps / 2.0
-        E = factor * state.E + c * curl * inv_eps
+        E = factor * E + c * curl * inv_eps
         if sigma_E is not None:
             E = E / (1.0 + c * sigma_E * eta0 * inv_eps / 2.0)
-        return E, psi_E
+        return E, psi_E_new
 
     return (
         _update_aniso(
-            state.E,
-            curl,
-            inv_eps,
-            sigma_E,
-            c,
-            eta0,
-            add=True,
-            periodic_axes=state.periodic_axes,
-            aniso_widths=state.aniso_widths,
+            E, curl, inv_eps, sigma_E, c, eta0, add=True, periodic_axes=periodic_axes, aniso_widths=aniso_widths
         ),
-        psi_E,
+        psi_E_new,
     )
 
 
-def update_H_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
-    """Return ``(H_new, psi_H_new)`` from ``dH/dt = -(1/mu) curl(E)``."""
-    E_pad = pad_fields_mlx(state.E, state.periodic_axes)
-    curl, psi_H = curl_E_mlx(
-        E_pad, state.psi_H, state.cpml_a, state.cpml_b, state.inv_kappa, simulate_boundaries, state.metric_fwd
-    )
-
-    inv_mu = state.inv_mu
-    sigma_H = state.sigma_H
+def _update_H(E, H, psi_H, inv_mu, sigma_H, cpml_a, cpml_b, inv_kappa, metric_fwd, periodic_axes, aniso_widths, c, sb):
+    """Pure ``(H_new, psi_H_new)`` from ``dH/dt = -(1/mu) curl(E)``. All inputs explicit (compilable)."""
+    curl, psi_H_new = curl_E_mlx(E, psi_H, cpml_a, cpml_b, inv_kappa, sb, metric_fwd, periodic_axes)
 
     if not _is_full_tensor(inv_mu) and not _is_full_tensor(sigma_H):
         factor = 1.0
         if sigma_H is not None:
             factor = 1.0 - c * sigma_H / eta0 * inv_mu / 2.0
-        H = factor * state.H - c * curl * inv_mu
+        H = factor * H - c * curl * inv_mu
         if sigma_H is not None:
             H = H / (1.0 + c * sigma_H / eta0 * inv_mu / 2.0)
-        return H, psi_H
+        return H, psi_H_new
 
     return (
         _update_aniso(
-            state.H,
-            curl,
-            inv_mu,
-            sigma_H,
-            c,
-            1.0 / eta0,
-            add=False,
-            periodic_axes=state.periodic_axes,
-            aniso_widths=state.aniso_widths,
+            H, curl, inv_mu, sigma_H, c, 1.0 / eta0, add=False, periodic_axes=periodic_axes, aniso_widths=aniso_widths
         ),
-        psi_H,
+        psi_H_new,
+    )
+
+
+def update_E_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
+    """Return ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)`` (eager wrapper over ``_update_E``)."""
+    return _update_E(
+        state.E,
+        state.H,
+        state.psi_E,
+        state.inv_eps,
+        state.sigma_E,
+        state.cpml_a,
+        state.cpml_b,
+        state.inv_kappa,
+        state.metric_bwd,
+        state.periodic_axes,
+        state.aniso_widths,
+        c,
+        simulate_boundaries,
+    )
+
+
+def update_H_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) -> tuple[mx.array, mx.array]:
+    """Return ``(H_new, psi_H_new)`` from ``dH/dt = -(1/mu) curl(E)`` (eager wrapper over ``_update_H``)."""
+    return _update_H(
+        state.E,
+        state.H,
+        state.psi_H,
+        state.inv_mu,
+        state.sigma_H,
+        state.cpml_a,
+        state.cpml_b,
+        state.inv_kappa,
+        state.metric_fwd,
+        state.periodic_axes,
+        state.aniso_widths,
+        c,
+        simulate_boundaries,
     )
 
 

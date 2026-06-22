@@ -50,6 +50,14 @@ regenerate the figure with `uv run python benchmarks/plot_results.py benchmarks/
 
 ## 1a. Why does MLX plateau at ~100 Mcell·steps/s? (root-cause analysis)
 
+> **Superseded in part by [metal-bottleneck-analysis.md](metal-bottleneck-analysis.md)** (GPU-measured,
+> not inferred). *Confirmed:* the plateau is **redundant memory traffic**, not bandwidth (engine ≈99
+> full-array DRAM round-trips/step when ~5–8 are needed). *Corrected:* the roofline is the **measured
+> 240 GB/s** (not 273); the **"deeper ceiling = `(3,N,N,N)` layout"** claim below is **wrong** —
+> component-last measures **1.00×**; the real post-`compile` limit is the **carried CPML ψ** traffic
+> (compile fuses ~37 RT then stalls at ~62, because ψ is loop-carried state). And there is **no memory
+> advantage** over JAX-CPU (footprints ~equal to N=384). See that doc for the fix ordering.
+
 97 Mcell·steps/s is **not** the M4 Pro's memory roofline. A minimally-fused FDTD step moves ~8
 arrays/cell-step (read+write E and H, read ε), so 97 Mcs/s of *useful* work is only **~9 GB/s — ~3%
 of the 273 GB/s** bus. The GPU shows "100% utilization" in Activity Monitor because it **is** busy —
