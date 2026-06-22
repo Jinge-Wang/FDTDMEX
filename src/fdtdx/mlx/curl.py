@@ -88,109 +88,138 @@ def _mul_metric(d: mx.array, m) -> mx.array:
     return d * m
 
 
+# Per-ψ-component derivative axis. The 6 ψ components (and the 6 differences below) are ordered
+# so that component i is the difference along axis _AX[i]; its CPML coefficients live only in the
+# two PML slabs perpendicular to that axis. curl_H (E-side) uses a/b index _AX[i]; curl_E (H-side)
+# uses _AX[i]+3. The inv_kappa combine uses index _AX[i] for BOTH (mirrors fdtdx exactly).
+_AX = (1, 2, 2, 0, 0, 1)
+
+
+def _slab_take(f: mx.array, axis: int, lo: int, hi: int) -> mx.array:
+    """Gather the ``[0:lo]`` and ``[N-hi:N]`` boundary slab of ``f`` along ``axis`` (size ``lo+hi``)."""
+    if lo and hi:
+        return mx.concatenate([_sl(f, 0, lo, axis), _sl(f, f.shape[axis] - hi, None, axis)], axis=axis)
+    if lo:
+        return _sl(f, 0, lo, axis)
+    if hi:
+        return _sl(f, f.shape[axis] - hi, None, axis)
+    return _sl(f, 0, 0, axis)  # empty (no PML on this axis)
+
+
+def _slab_add(comp: mx.array, axis: int, lo: int, hi: int, corr: mx.array) -> mx.array:
+    """Add the slab-shaped ``corr`` (size ``lo+hi`` along ``axis``) back into ``comp``'s slab cells."""
+    n = comp.shape[axis]
+    segs = []
+    if lo:
+        segs.append(_sl(comp, 0, lo, axis) + _sl(corr, 0, lo, axis))
+    segs.append(_sl(comp, lo, n - hi, axis))  # untouched interior
+    if hi:
+        segs.append(_sl(comp, n - hi, None, axis) + _sl(corr, lo, lo + hi, axis))
+    return mx.concatenate(segs, axis=axis) if len(segs) > 1 else segs[0]
+
+
+def slab_to_full(slab: mx.array, axis: int, lo: int, hi: int, n: int) -> mx.array:
+    """Inverse of ``_slab_take``: scatter a slab array back into a full ``n``-long axis (zeros
+    in the interior). Used once per run to hand ψ back to the host container."""
+    full_shape = list(slab.shape)
+    full_shape[axis] = n
+    if lo + hi == 0:
+        return mx.zeros(full_shape, dtype=slab.dtype)
+    segs = []
+    if lo:
+        segs.append(_sl(slab, 0, lo, axis))
+    mid_shape = list(slab.shape)
+    mid_shape[axis] = n - lo - hi
+    segs.append(mx.zeros(mid_shape, dtype=slab.dtype))
+    if hi:
+        segs.append(_sl(slab, lo, lo + hi, axis))
+    return mx.concatenate(segs, axis=axis)
+
+
+def _cpml_curl(d, psi, a, b, ik, ab_off, extents, simulate_boundaries):
+    """Assemble the curl from the 6 metric-scaled differences ``d`` as a cheap full-domain plain
+    part plus a slab-localised CPML correction; advance the slab ψ. Exact algebraic split of the
+    full-domain combine ``(ik*d_a + psi_a) - (ik*d_b + psi_b)`` (ik=1, psi=0 outside the slabs).
+
+    ``psi`` is a 6-tuple of per-component slab arrays; ``a``/``b``/``ik`` are full ``(6,N³)``;
+    ``ab_off`` is 0 (E-side) or 3 (H-side); ``extents`` is ``((lo,hi),…)`` per axis.
+    """
+    curl = [d[0] - d[1], d[2] - d[3], d[4] - d[5]]
+    if not simulate_boundaries:
+        return mx.stack(curl, axis=0), psi
+
+    psi_new = list(psi)
+    for i in range(6):
+        k = _AX[i]
+        lo, hi = extents[k]
+        if lo + hi == 0:
+            continue  # no PML on this axis -> ik=1, ψ=0 there: correction is exactly zero
+        d_slab = _slab_take(d[i], k, lo, hi)
+        a_s = _slab_take(a[ab_off + k], k, lo, hi)
+        b_s = _slab_take(b[ab_off + k], k, lo, hi)
+        ikm1_s = _slab_take(ik[k], k, lo, hi) - 1.0
+        pnew = b_s * psi[i] + a_s * d_slab
+        psi_new[i] = pnew
+        corr = ikm1_s * d_slab + pnew
+        if i % 2 == 1:
+            corr = -corr
+        curl[i // 2] = _slab_add(curl[i // 2], k, lo, hi, corr)
+    return mx.stack(curl, axis=0), tuple(psi_new)
+
+
 def curl_H_mlx(
     H: mx.array,
-    psi_E: mx.array,
+    psi_E,
     cpml_a: mx.array,
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
     metric: tuple = (1.0, 1.0, 1.0),
     periodic_axes: tuple = (False, False, False),
-) -> tuple[mx.array, mx.array]:
-    """Curl of H (-> E-type field) plus updated psi_E. See ``curl_H`` in fdtdx.
+    extents: tuple = ((0, 0), (0, 0), (0, 0)),
+):
+    """Curl of H (-> E-type field) + advanced slab ψ_E. See ``curl_H`` in fdtdx.
 
-    ``H`` is the un-padded (3, Nx, Ny, Nz) field; backward differences are taken pad-free
-    (``_bwd_diff``). ``metric`` is the per-axis dual-width derivative scale (``1.0`` on uniform).
+    Pad-free backward differences (``_bwd_diff``); CPML applied as a slab-localised correction
+    (``_cpml_curl``). ``psi_E`` is a 6-tuple of per-component boundary-slab arrays.
     """
-    a, b, ik = cpml_a, cpml_b, inv_kappa
     mx_, my_, mz_ = metric
     px, py, pz = periodic_axes
-
-    dyHz = _mul_metric(_bwd_diff(H[2], 1, py), my_)
-    dzHy = _mul_metric(_bwd_diff(H[1], 2, pz), mz_)
-    dzHx = _mul_metric(_bwd_diff(H[0], 2, pz), mz_)
-    dxHz = _mul_metric(_bwd_diff(H[2], 0, px), mx_)
-    dxHy = _mul_metric(_bwd_diff(H[1], 0, px), mx_)
-    dyHx = _mul_metric(_bwd_diff(H[0], 1, py), my_)
-
-    psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy = (
-        psi_E[0],
-        psi_E[1],
-        psi_E[2],
-        psi_E[3],
-        psi_E[4],
-        psi_E[5],
-    )
-
-    if simulate_boundaries:
-        psi_Exy = b[1] * psi_Exy + a[1] * dyHz
-        psi_Exz = b[2] * psi_Exz + a[2] * dzHy
-        psi_Eyz = b[2] * psi_Eyz + a[2] * dzHx
-        psi_Eyx = b[0] * psi_Eyx + a[0] * dxHz
-        psi_Ezx = b[0] * psi_Ezx + a[0] * dxHy
-        psi_Ezy = b[1] * psi_Ezy + a[1] * dyHx
-        psi_E_updated = mx.stack([psi_Exy, psi_Exz, psi_Eyz, psi_Eyx, psi_Ezx, psi_Ezy], axis=0)
-    else:
-        psi_E_updated = psi_E  # untouched -> don't rebuild the (6,N^3) stack
-
-    curl_x = (ik[1] * dyHz + psi_Exy) - (ik[2] * dzHy + psi_Exz)
-    curl_y = (ik[2] * dzHx + psi_Eyz) - (ik[0] * dxHz + psi_Eyx)
-    curl_z = (ik[0] * dxHy + psi_Ezx) - (ik[1] * dyHx + psi_Ezy)
-    curl = mx.stack([curl_x, curl_y, curl_z], axis=0)
-
-    return curl, psi_E_updated
+    d = [
+        _mul_metric(_bwd_diff(H[2], 1, py), my_),  # dyHz
+        _mul_metric(_bwd_diff(H[1], 2, pz), mz_),  # dzHy
+        _mul_metric(_bwd_diff(H[0], 2, pz), mz_),  # dzHx
+        _mul_metric(_bwd_diff(H[2], 0, px), mx_),  # dxHz
+        _mul_metric(_bwd_diff(H[1], 0, px), mx_),  # dxHy
+        _mul_metric(_bwd_diff(H[0], 1, py), my_),  # dyHx
+    ]
+    return _cpml_curl(d, psi_E, cpml_a, cpml_b, inv_kappa, 0, extents, simulate_boundaries)
 
 
 def curl_E_mlx(
     E: mx.array,
-    psi_H: mx.array,
+    psi_H,
     cpml_a: mx.array,
     cpml_b: mx.array,
     inv_kappa: mx.array,
     simulate_boundaries: bool,
     metric: tuple = (1.0, 1.0, 1.0),
     periodic_axes: tuple = (False, False, False),
-) -> tuple[mx.array, mx.array]:
-    """Curl of E (-> H-type field) plus updated psi_H. See ``curl_E`` in fdtdx.
+    extents: tuple = ((0, 0), (0, 0), (0, 0)),
+):
+    """Curl of E (-> H-type field) + advanced slab ψ_H. See ``curl_E`` in fdtdx.
 
-    ``E`` is the un-padded (3, Nx, Ny, Nz) field; forward differences are taken pad-free
-    (``_fwd_diff``). ``metric`` is the per-axis primal-width derivative scale (``1.0`` on uniform).
+    Pad-free forward differences (``_fwd_diff``); CPML applied as a slab-localised correction
+    (``_cpml_curl``, H-side coefficient offset 3). ``psi_H`` is a 6-tuple of slab arrays.
     """
-    a, b, ik = cpml_a, cpml_b, inv_kappa
     mx_, my_, mz_ = metric
     px, py, pz = periodic_axes
-
-    dyEz = _mul_metric(_fwd_diff(E[2], 1, py), my_)
-    dzEy = _mul_metric(_fwd_diff(E[1], 2, pz), mz_)
-    dzEx = _mul_metric(_fwd_diff(E[0], 2, pz), mz_)
-    dxEz = _mul_metric(_fwd_diff(E[2], 0, px), mx_)
-    dxEy = _mul_metric(_fwd_diff(E[1], 0, px), mx_)
-    dyEx = _mul_metric(_fwd_diff(E[0], 1, py), my_)
-
-    psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy = (
-        psi_H[0],
-        psi_H[1],
-        psi_H[2],
-        psi_H[3],
-        psi_H[4],
-        psi_H[5],
-    )
-
-    if simulate_boundaries:
-        psi_Hxy = b[4] * psi_Hxy + a[4] * dyEz
-        psi_Hxz = b[5] * psi_Hxz + a[5] * dzEy
-        psi_Hyz = b[5] * psi_Hyz + a[5] * dzEx
-        psi_Hyx = b[3] * psi_Hyx + a[3] * dxEz
-        psi_Hzx = b[3] * psi_Hzx + a[3] * dxEy
-        psi_Hzy = b[4] * psi_Hzy + a[4] * dyEx
-        psi_H_updated = mx.stack([psi_Hxy, psi_Hxz, psi_Hyz, psi_Hyx, psi_Hzx, psi_Hzy], axis=0)
-    else:
-        psi_H_updated = psi_H  # untouched -> don't rebuild the (6,N^3) stack
-
-    curl_x = (ik[1] * dyEz + psi_Hxy) - (ik[2] * dzEy + psi_Hxz)
-    curl_y = (ik[2] * dzEx + psi_Hyz) - (ik[0] * dxEz + psi_Hyx)
-    curl_z = (ik[0] * dxEy + psi_Hzx) - (ik[1] * dyEx + psi_Hzy)
-    curl = mx.stack([curl_x, curl_y, curl_z], axis=0)
-
-    return curl, psi_H_updated
+    d = [
+        _mul_metric(_fwd_diff(E[2], 1, py), my_),  # dyEz
+        _mul_metric(_fwd_diff(E[1], 2, pz), mz_),  # dzEy
+        _mul_metric(_fwd_diff(E[0], 2, pz), mz_),  # dzEx
+        _mul_metric(_fwd_diff(E[2], 0, px), mx_),  # dxEz
+        _mul_metric(_fwd_diff(E[1], 0, px), mx_),  # dxEy
+        _mul_metric(_fwd_diff(E[0], 1, py), my_),  # dyEx
+    ]
+    return _cpml_curl(d, psi_H, cpml_a, cpml_b, inv_kappa, 3, extents, simulate_boundaries)

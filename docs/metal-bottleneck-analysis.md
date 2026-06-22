@@ -72,9 +72,9 @@ numbers below are N=192):
                               Mcs/s   RT/step   note (realized via profile_engine.py, N=192 iso)
 eager, CPML on (pre-Phase-1)   ~105     ~99     original engine (pad+roll) — baseline
 eager, CPML on (pad-free)       130      77     drop-pad slice-diff alone (Fix 1.3)
-compiled, CPML on ← DEFAULT     211      47     + mx.compile E/H cores (Fix 1.1) — LANDED, 2.0×
-compiled, CPML off              338      30     slab-CPML headroom (the ψ traffic removed)
-lean (no CPML/pad/ψ-stack)     ~440     ~23     MLX-op ceiling (kernel-floor estimate)
+compiled, CPML on (1.1 only)    211      47     + mx.compile E/H cores (Fix 1.1)
+compiled, CPML on ← DEFAULT     277      36     + slab-CPML (Fix 1.2) — LANDED, 2.6×, ~1.45× CPU
+compiled, CPML off              473      21     MLX-op ceiling (≈ the lean estimate); Phase-2 target
 necessary (R/W E,H + mat)      ~600+    ~5–8    one fused custom kernel per field (Phase 2)
 ```
 

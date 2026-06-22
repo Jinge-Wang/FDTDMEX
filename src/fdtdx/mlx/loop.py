@@ -35,13 +35,13 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool):
     inv_mu, sigma_H = state.inv_mu, state.sigma_H
     a, b, ik = state.cpml_a, state.cpml_b, state.inv_kappa
     mfwd, mbwd = state.metric_fwd, state.metric_bwd
-    per, awid = state.periodic_axes, state.aniso_widths
+    per, awid, ext = state.periodic_axes, state.aniso_widths, state.cpml_extents
 
     def e_core(E, H, psi_E):
-        return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, awid, c, sb)
+        return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb)
 
     def h_core(E, H, psi_H):
-        return _update_H(E, H, psi_H, inv_mu, sigma_H, a, b, ik, mfwd, per, awid, c, sb)
+        return _update_H(E, H, psi_H, inv_mu, sigma_H, a, b, ik, mfwd, per, ext, awid, c, sb)
 
     if compile_step:
         return mx.compile(e_core), mx.compile(h_core)
@@ -87,7 +87,7 @@ def run_forward_mlx(
             )
 
         if (n + 1) % eval_every == 0:
-            leaves = [state.E, state.H, state.psi_E, state.psi_H]
+            leaves = [state.E, state.H, *state.psi_E, *state.psi_H]
             for bufs in detector_buffers.values():
                 leaves.extend(bufs.values())
             mx.eval(*leaves)

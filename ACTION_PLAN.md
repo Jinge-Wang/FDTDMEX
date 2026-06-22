@@ -155,12 +155,12 @@ additive. One fix = one commit, with its before/after RT and throughput in the m
 Goal: ~99 → ~23 RT/step (~440 Mcs/s, ~2.3× JAX-CPU). Order is by payoff-per-risk; the two big levers
 are **compile** and **slab-CPML**.
 
-> **Status (branch `mlx-fork`):** **Fix 1.1 + 1.3 landed together** (`curl.py` pad-free slice-diff +
-> guards; `update.py` split into pure cores; `loop.py` compiles E-core/H-core with host-gated
-> injection between). Measured N=192 iso: default path **105 → 211 Mcs/s (2.0×, now > JAX-CPU ~190)**,
-> 99 → **47 RT/step**; all 14 validation tests green (physics held). **Remaining: Fix 1.2 slab-CPML** —
-> the ~17 carried-ψ RT compile can't fuse; `profile_engine` shows CPML-off at **338 Mcs/s / 30 RT**,
-> i.e. slab-CPML is the lever from 211 → ~330 (~1.8× CPU) toward the ~440 lean ceiling.
+> **Status (branch `mlx-fork`): Phase 1 fixes 1.1 + 1.2 + 1.3 all LANDED.** Measured N=192 iso,
+> default path (compiled, CPML on): **105 → 211 → 276.7 Mcs/s** (1.1: compile+pad-free → 211/47 RT;
+> 1.2: slab-CPML → 276.7/36 RT). That is **2.6× the original engine and ~1.45× JAX-CPU (190)**, all
+> 14 validation tests green (physics exact). The compiled CPML-off ceiling is now **472.6 Mcs/s /
+> 21 RT** (≈ the lean ~440 estimate). Remaining op-level headroom to that ceiling is small; the next
+> decisive lever is Phase 2 (custom Metal kernels).
 
 **Fix 1.1 — `mx.compile` the per-step core (~1.5×; lowest risk; do first).**
 - *Targets:* ~37 RT of fusable intermediates (curl differences, the `inv_kappa` combine, the
@@ -173,7 +173,7 @@ are **compile** and **slab-CPML**.
 - *Tripwire:* parity (uniform+nonuniform+periodic+CPML) unchanged; `profile_engine.py` shows
   CPML-on RT ~99 → ~62.
 
-**Fix 1.2 — slab-CPML: carry/advance ψ only on the boundary slabs (~1.5× more → ~330 Mcs/s). ⭐ NEXT**
+**Fix 1.2 — slab-CPML: carry/advance ψ only on the boundary slabs. [LANDED: 211 → 276.7 Mcs/s, 47 → 36 RT]**
 - *Targets:* the ~17 carried-ψ RT compile can't fuse (realized: compiled CPML-on **47 RT** vs CPML-off
   **30 RT**). ψ_E/ψ_H are full `(6,N³)` but `a=b=0` **and `inv_kappa=1`** except in the ~8-cell PML
   slabs, so the whole ψ machinery is zero-valued traffic over ~77% of the domain.

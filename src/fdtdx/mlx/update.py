@@ -31,9 +31,11 @@ def _is_full_tensor(arr) -> bool:
     return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
 
 
-def _update_E(E, H, psi_E, inv_eps, sigma_E, cpml_a, cpml_b, inv_kappa, metric_bwd, periodic_axes, aniso_widths, c, sb):
+def _update_E(
+    E, H, psi_E, inv_eps, sigma_E, cpml_a, cpml_b, inv_kappa, metric_bwd, periodic_axes, extents, aniso_widths, c, sb
+):
     """Pure ``(E_new, psi_E_new)`` from ``dE/dt = (1/eps) curl(H)``. All inputs explicit (compilable)."""
-    curl, psi_E_new = curl_H_mlx(H, psi_E, cpml_a, cpml_b, inv_kappa, sb, metric_bwd, periodic_axes)
+    curl, psi_E_new = curl_H_mlx(H, psi_E, cpml_a, cpml_b, inv_kappa, sb, metric_bwd, periodic_axes, extents)
 
     if not _is_full_tensor(inv_eps) and not _is_full_tensor(sigma_E):
         factor = 1.0
@@ -52,9 +54,11 @@ def _update_E(E, H, psi_E, inv_eps, sigma_E, cpml_a, cpml_b, inv_kappa, metric_b
     )
 
 
-def _update_H(E, H, psi_H, inv_mu, sigma_H, cpml_a, cpml_b, inv_kappa, metric_fwd, periodic_axes, aniso_widths, c, sb):
+def _update_H(
+    E, H, psi_H, inv_mu, sigma_H, cpml_a, cpml_b, inv_kappa, metric_fwd, periodic_axes, extents, aniso_widths, c, sb
+):
     """Pure ``(H_new, psi_H_new)`` from ``dH/dt = -(1/mu) curl(E)``. All inputs explicit (compilable)."""
-    curl, psi_H_new = curl_E_mlx(E, psi_H, cpml_a, cpml_b, inv_kappa, sb, metric_fwd, periodic_axes)
+    curl, psi_H_new = curl_E_mlx(E, psi_H, cpml_a, cpml_b, inv_kappa, sb, metric_fwd, periodic_axes, extents)
 
     if not _is_full_tensor(inv_mu) and not _is_full_tensor(sigma_H):
         factor = 1.0
@@ -86,6 +90,7 @@ def update_E_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) ->
         state.inv_kappa,
         state.metric_bwd,
         state.periodic_axes,
+        state.cpml_extents,
         state.aniso_widths,
         c,
         simulate_boundaries,
@@ -105,6 +110,7 @@ def update_H_mlx(state: MLXState, c: float, simulate_boundaries: bool = True) ->
         state.inv_kappa,
         state.metric_fwd,
         state.periodic_axes,
+        state.cpml_extents,
         state.aniso_widths,
         c,
         simulate_boundaries,

@@ -22,10 +22,11 @@ class MLXState:
     E: mx.array
     #: Magnetic field (eta0-normalized), shape (3, Nx, Ny, Nz).
     H: mx.array
-    #: CPML auxiliary field for the E update, shape (6, Nx, Ny, Nz).
-    psi_E: mx.array
-    #: CPML auxiliary field for the H update, shape (6, Nx, Ny, Nz).
-    psi_H: mx.array
+    #: CPML auxiliary field for the E update — slab-CPML 6-tuple of per-component boundary-slab
+    #: arrays (component ``i`` is stored only on the PML slabs perpendicular to axis ``curl._AX[i]``).
+    psi_E: Any
+    #: CPML auxiliary field for the H update — slab-CPML 6-tuple of per-component boundary-slab arrays.
+    psi_H: Any
 
     #: Inverse permittivity, shape (1|3|9, Nx, Ny, Nz).
     inv_eps: mx.array
@@ -45,6 +46,9 @@ class MLXState:
 
     #: Per-axis periodic (wrap-padding) flags; True where a periodic/Bloch-k0 boundary sits.
     periodic_axes: tuple = (False, False, False)
+
+    #: Per-axis PML slab extents ``((lo, hi), …)`` for slab-CPML; ``(0, 0)`` = no PML on that axis.
+    cpml_extents: tuple = ((0, 0), (0, 0), (0, 0))
 
     #: Per-axis derivative metric scale for the curl (M4, non-uniform grids). Each entry is the
     #: scalar ``1.0`` on uniform grids, or an ``mx.array`` broadcasting along that axis equal to

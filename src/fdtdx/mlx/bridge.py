@@ -14,7 +14,8 @@ import numpy as np
 
 from fdtdx.constants import c as c_light
 from fdtdx.constants import eps0
-from fdtdx.mlx.pml import precompute_cpml_coeffs
+from fdtdx.mlx.curl import _AX, _slab_take, slab_to_full
+from fdtdx.mlx.pml import detect_pml_slabs, precompute_cpml_coeffs
 from fdtdx.mlx.state import MLXState
 
 
@@ -81,6 +82,13 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -
     a, b, inv_kappa = precompute_cpml_coeffs(
         np.asarray(arrays.alpha), np.asarray(arrays.kappa), np.asarray(arrays.sigma), dt, eps0
     )
+    # slab-CPML: ψ and the CPML correction are confined to the PML boundary slabs. Detect each
+    # axis's slab extent, then carry ψ only there (component i on the slabs perpendicular to _AX[i]).
+    extents = tuple(detect_pml_slabs(a, b, inv_kappa))
+    psi_E_full = _to_mx(arrays.fields.psi_E)
+    psi_H_full = _to_mx(arrays.fields.psi_H)
+    psi_E_slabs = tuple(_slab_take(psi_E_full[i], _AX[i], *extents[_AX[i]]) for i in range(6))
+    psi_H_slabs = tuple(_slab_take(psi_H_full[i], _AX[i], *extents[_AX[i]]) for i in range(6))
 
     inv_mu = arrays.inv_permeabilities
     if hasattr(inv_mu, "ndim") and getattr(inv_mu, "ndim", 0) > 0:
@@ -93,8 +101,8 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -
     return MLXState(
         E=_to_mx(arrays.fields.E),
         H=_to_mx(arrays.fields.H),
-        psi_E=_to_mx(arrays.fields.psi_E),
-        psi_H=_to_mx(arrays.fields.psi_H),
+        psi_E=psi_E_slabs,
+        psi_H=psi_H_slabs,
         inv_eps=_to_mx(arrays.inv_permittivities),
         inv_mu=inv_mu_state,
         cpml_a=_to_mx(a),
@@ -103,6 +111,7 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False)) -
         sigma_E=None if arrays.electric_conductivity is None else _to_mx(arrays.electric_conductivity),
         sigma_H=None if arrays.magnetic_conductivity is None else _to_mx(arrays.magnetic_conductivity),
         periodic_axes=periodic_axes,
+        cpml_extents=extents,
         metric_fwd=metric_fwd,
         metric_bwd=metric_bwd,
         interp_widths=interp_widths,
@@ -120,8 +129,14 @@ def to_array_container(template_arrays, state: MLXState, detector_states=None):
     arrays = template_arrays
     arrays = arrays.aset("fields->E", _to_jnp(state.E))
     arrays = arrays.aset("fields->H", _to_jnp(state.H))
-    arrays = arrays.aset("fields->psi_E", _to_jnp(state.psi_E))
-    arrays = arrays.aset("fields->psi_H", _to_jnp(state.psi_H))
+    # slab-CPML: scatter the per-component ψ slabs back into full (6, Nx, Ny, Nz) arrays (zeros in
+    # the interior) so the host container is indistinguishable from the full-domain engine.
+    shape = state.E.shape  # (3, Nx, Ny, Nz)
+    ext = state.cpml_extents
+    psi_E_full = mx.stack([slab_to_full(state.psi_E[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
+    psi_H_full = mx.stack([slab_to_full(state.psi_H[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
+    arrays = arrays.aset("fields->psi_E", _to_jnp(psi_E_full))
+    arrays = arrays.aset("fields->psi_H", _to_jnp(psi_H_full))
     if detector_states is not None:
         arrays = arrays.aset("detector_states", detector_states)
     return arrays

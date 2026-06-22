@@ -38,9 +38,7 @@ def precompute_cpml_coeffs(
     return a.astype(dtype), b.astype(dtype), inv_kappa.astype(dtype)
 
 
-def detect_pml_slabs(
-    a: np.ndarray, b: np.ndarray, inv_kappa: np.ndarray, pad: int = 1
-) -> list[tuple[int, int]]:
+def detect_pml_slabs(a: np.ndarray, b: np.ndarray, inv_kappa: np.ndarray, pad: int = 1) -> list[tuple[int, int]]:
     """Per-axis ``(lo, hi)`` PML slab thickness: the CPML correction is confined to indices
     ``[0:lo]`` and ``[N-hi:N]`` along each axis ``k``.
 
