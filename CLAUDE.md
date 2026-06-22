@@ -60,13 +60,23 @@ unusable).
   threaded through the E-side of the loop, the per-pole ADE recurrence folded into the Metal E-kernel
   (so dispersive media also hit the bandwidth floor) and present in the MLX-op `_update_E`. The
   non-dispersive kernel MSL is byte-identical (build-time gated, regression-tested).
+- **Mode solver (Phase 4 Track A):** native, **Tidy3D-free** full-vectorial FD mode solver
+  (`src/fdtdx/core/physics/mode_backend/`) behind a `mode_backend` seam in `core/physics/modes.py`
+  (**default `"fdtdmex"`**; `FDTDMEX_MODE_BACKEND` / `mode_backend=` arg). **Tidy3D is now optional**
+  (the `tidy3d` extra); off-diagonal-tensor media and bends auto-route to it when installed. Plus
+  Kottke subpixel smoothing (`core/physics/subpixel.py`).
+- **Visualization:** matplotlib utilities return `Figure`s (inline-friendly): `plot_setup`,
+  `plot_material`, `plot_field_slice`, detector `plot2d`/`video`, and the new `plot_mode` /
+  `SMatrixResult` + `plot_smatrix`. The notebook front end + agentic workspace (config schema, MCP) are
+  the next phase — see `ACTION_PLAN.md`.
 - fdtdx's own physics tests (plane wave, Fresnel slab, skin depth, birefringence, non-uniform grid)
   pass auto-routed to MLX.
 
 **Deferred → falls back to JAX:** tilted+randomized / dispersive plane sources; mode sources/detectors;
 Bloch (nonzero-k) / forced-complex propagation; gradients. The dispatcher gates all of these; widen
 the gate as kernels land. (Phase 3 removed lossy + full-anisotropic, 9-tensor conductivity, PEC/PMC,
-and Drude–Lorentz ADE dispersion from this list.)
+and Drude–Lorentz ADE dispersion from this list.) Note: mode *sources/detectors* still route the MLX
+forward time-loop to JAX, but the mode *solver* they call is now the native Tidy3D-free backend.
 
 ## Commands
 
