@@ -148,6 +148,81 @@ def test_kernel_diagonal_anisotropy_cpml():
     _assert_kernel_matches_jax(arrays, oc, config)
 
 
+def _stretched_z_edges(nz, res, amp=0.12):
+    """A mildly stretched z grid (smoothly varying widths), same total length as uniform."""
+    cells = np.arange(nz, dtype=float)
+    widths = res * (1.0 + amp * np.sin(2.0 * np.pi * (cells + 0.5) / nz))
+    widths *= (nz * res) / widths.sum()
+    return jnp.asarray(np.concatenate([[0.0], np.cumsum(widths)]), dtype=jnp.float32)
+
+
+def _nonuniform_case(material, polarization):
+    """Periodic-x/y, PML-z stretched-z grid with a material slab + a plane-wave source (M3 metric)."""
+    nz = 60
+    zedges = _stretched_z_edges(nz, _RES)
+    config = fdtdx.SimulationConfig(
+        grid=fdtdx.RectilinearGrid.custom(
+            x_edges=jnp.linspace(0.0, 3 * _RES, 4),
+            y_edges=jnp.linspace(0.0, 3 * _RES, 4),
+            z_edges=zedges,
+        ),
+        time=16e-15,
+        dtype=jnp.float32,
+    )
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(3 * _RES, 3 * _RES, nz * _RES))
+    objects.append(vol)
+    bcfg = fdtdx.BoundaryConfig.from_uniform_bound(
+        thickness=_PML,
+        override_types={"min_x": "periodic", "max_x": "periodic", "min_y": "periodic", "max_y": "periodic"},
+    )
+    bdict, clist = fdtdx.boundary_objects_from_config(bcfg, vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+
+    slab = fdtdx.UniformMaterialObject(partial_grid_shape=(None, None, 20), material=material)
+    constraints.extend(
+        [
+            slab.same_size(vol, axes=(0, 1)),
+            slab.place_at_center(vol, axes=(0, 1)),
+            fdtdx.RealCoordinateConstraint(
+                object=slab.name, axes=(2,), sides=("-",), coordinates=(float(zedges[_PML + 6]),)
+            ),
+        ]
+    )
+    objects.append(slab)
+
+    src = fdtdx.UniformPlaneSource(
+        partial_grid_shape=(None, None, 1),
+        wave_character=fdtdx.WaveCharacter(wavelength=1e-6),
+        direction="+",
+        fixed_E_polarization_vector=tuple(1 if a == polarization else 0 for a in range(3)),
+    )
+    constraints.extend(
+        [
+            src.same_size(vol, axes=(0, 1)),
+            src.place_at_center(vol, axes=(0, 1)),
+            fdtdx.RealCoordinateConstraint(
+                object=src.name, axes=(2,), sides=("-",), coordinates=(float(zedges[_PML + 2]),)
+            ),
+        ]
+    )
+    objects.append(src)
+    return objects, constraints, config
+
+
+def test_kernel_nonuniform_isotropic_cpml():
+    objects, constraints, config = _nonuniform_case(fdtdx.Material(permittivity=2.25), polarization=0)
+    arrays, oc, config = _assert_kernel_matches_ops(objects, constraints, config)
+    _assert_kernel_matches_jax(arrays, oc, config)
+
+
+def test_kernel_nonuniform_diagonal_cpml():
+    objects, constraints, config = _nonuniform_case(fdtdx.Material(permittivity=(2.25, 4.0, 1.0)), polarization=0)
+    arrays, oc, config = _assert_kernel_matches_ops(objects, constraints, config)
+    _assert_kernel_matches_jax(arrays, oc, config)
+
+
 def test_kernel_periodic_cpml():
     config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=16e-15, dtype=jnp.float32)
     objects, constraints = [], []

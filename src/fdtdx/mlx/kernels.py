@@ -19,9 +19,13 @@ captured. The two ψ-components that share a PML axis share its slab geometry an
 triple. (M2 computed the slab correction with MLX ops via ``concatenate`` — ~22 RT on top of the
 5 RT bulk; folding it in drops CPML-on toward the bulk floor.)
 
+**Non-uniform grids are handled in-kernel (M3).** Each difference is scaled by its per-axis
+``reference_spacing/cell_width`` buffer (``m{k}``, 1-D) before the curl combine and the CPML
+recurrence — mirroring ``curl._mul_metric``. Uniform axes carry a scalar ``1.0`` and emit no
+multiply, so the uniform path is byte-for-byte unchanged.
+
 Eligibility (else the loop uses the compiled MLX-op cores): isotropic/diagonal ``inv_eps``/
-``inv_mu`` (not 9-tensor), no conductivity, and a uniform metric. Lossy / full-tensor /
-non-uniform-grid cases keep the MLX-op path (M3+).
+``inv_mu`` (not 9-tensor) and no conductivity. Lossy / full-tensor cases keep the MLX-op path (M3+).
 """
 
 from __future__ import annotations
@@ -49,21 +53,19 @@ _AXIS_COMPS = {
 }
 
 
-def _is_uniform_metric(metric) -> bool:
-    return all(isinstance(m, float) and m == 1.0 for m in metric)
-
-
 def _is_full_tensor(arr) -> bool:
     return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
 
 
 def kernel_eligible(state) -> bool:
-    """Whether the custom Metal kernels can run this case (else fall back to the MLX-op cores)."""
+    """Whether the custom Metal kernels can run this case (else fall back to the MLX-op cores).
+
+    Non-uniform metric is handled in-kernel (M3: each difference is scaled by its per-axis
+    ``reference_spacing/cell_width`` buffer), so it no longer gates the kernel off.
+    """
     if _is_full_tensor(state.inv_eps) or _is_full_tensor(state.inv_mu):
         return False
     if state.sigma_E is not None or state.sigma_H is not None:
-        return False
-    if not (_is_uniform_metric(state.metric_fwd) and _is_uniform_metric(state.metric_bwd)):
         return False
     return True
 
@@ -122,6 +124,34 @@ def _slab_comps(extents) -> list[int]:
     return comps
 
 
+def _metric_side(metric) -> tuple[list[int], list, list[str]]:
+    """Split a per-axis metric tuple (``metric_fwd``/``metric_bwd``) into the non-uniform axes, their
+    1-D scale buffers (flattened to length ``N`` along that axis), and the kernel input names ``m{k}``.
+    Uniform axes (scalar ``1.0``) are dropped — they need no buffer and emit no multiply."""
+    axes, bufs, names = [], [], []
+    for k in range(3):
+        m = metric[k]
+        if isinstance(m, mx.array):
+            axes.append(k)
+            bufs.append(m.reshape(-1))
+            names.append(f"m{k}")
+    return axes, bufs, names
+
+
+def _metric_lines(metric_axes) -> str:
+    """Scale each difference ``d{i}`` by its per-axis metric buffer ``m{k}`` (``=reference_spacing/
+    cell_width``, 1-D, indexed by the cell's coordinate along axis ``k``). Mirrors ``curl._mul_metric``
+    applied to each ``_bwd_diff``/``_fwd_diff`` before the curl combine — so both the plain curl and
+    the CPML recurrence see metric-scaled differences. ``metric_axes`` is the set of non-uniform axes;
+    uniform axes carry a scalar ``1.0`` and emit nothing (the byte-for-byte uniform path)."""
+    lines = []
+    for k in sorted(metric_axes):
+        coord = _AXVAR[k]
+        for ci, _tgt, _sgn in _AXIS_COMPS[k]:
+            lines.append(f"        d{ci} = d{ci} * m{k}[{coord}];")
+    return ("\n" + "\n".join(lines)) if lines else ""
+
+
 def _corr_blocks(extents, nx: int, ny: int, nz: int) -> str:
     """MSL that, for each PML-slab thread, advances ψ and folds the κ-stretch + ψ correction into
     ``cx``/``cy``/``cz`` (identical for E and H; the side enters only via the captured a/b arrays
@@ -168,11 +198,12 @@ def _corr_blocks(extents, nx: int, ny: int, nz: int) -> str:
     return "".join(blocks)
 
 
-def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, forward: bool) -> str:
+def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, metric_axes, forward: bool) -> str:
     """Generate the MSL body for the E-kernel (``forward=False``) or H-kernel (``forward=True``).
 
     ``out = F (± cb·curl)`` with ``+`` for E and ``-`` for H; ``F`` is the field being updated and
-    ``G`` (``H`` for E, ``E`` for H) the one being differentiated. With ``sb`` the CPML correction
+    ``G`` (``H`` for E, ``E`` for H) the one being differentiated. Differences on the non-uniform
+    ``metric_axes`` are scaled by their per-axis ``m{k}`` buffer; with ``sb`` the CPML correction
     blocks (``_corr_blocks``) are interleaved before the ``cb`` multiply.
     """
     nx, ny, nz = shape
@@ -220,6 +251,7 @@ def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, forward:
         _common(nx, ny, nz)
         + _cb_lines(diagonal, scalar)
         + body
+        + _metric_lines(metric_axes)
         + """
         float cx = d0 - d1;
         float cy = d2 - d3;
@@ -261,6 +293,12 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     axes = _active_axes(ext)
     comps = _slab_comps(ext)
 
+    # Non-uniform metric: per-axis 1-D scale buffers (=reference_spacing/cell_width), captured as
+    # constants. E-update differentiates with the dual-width (backward) metric, H with the forward.
+    # Uniform axes carry the scalar 1.0 and contribute nothing (the byte-for-byte uniform path).
+    metric_axes_E, metric_E, metric_names_E = _metric_side(state.metric_bwd)
+    metric_axes_H, metric_H, metric_names_H = _metric_side(state.metric_fwd)
+
     # Captured slab coefficient buffers, one triple per active axis. E uses a/b[k]; H uses a/b[3+k];
     # both use 1/κ[k] (mirrors curl._cpml_curl). ψ flows through as core args (the MLXState slabs).
     coeff_E, coeff_H, coeff_names = [], [], []
@@ -272,14 +310,15 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     psi_names = [f"psi{i}" for i in comps]
     pso_names = [f"pso{i}" for i in comps]
 
-    to_eval = [cb_E] + ([] if cb_H is None else [cb_H]) + (coeff_E + coeff_H if do_cpml else [])
+    to_eval = [cb_E] + ([] if cb_H is None else [cb_H]) + metric_E + metric_H + (coeff_E + coeff_H if do_cpml else [])
     mx.eval(*to_eval)
 
     grid, tg = (nz, ny, nx), (min(32, nz), min(4, ny), min(4, nx))
 
-    e_inputs = ["E", "H", "cb"] + (coeff_names + psi_names if do_cpml else [])
+    cpml_in = (coeff_names + psi_names) if do_cpml else []
+    e_inputs = ["E", "H", "cb", *metric_names_E, *cpml_in]
     h_base = ["E", "H"] if mu_scalar is not None else ["E", "H", "cb"]
-    h_inputs = h_base + (coeff_names + psi_names if do_cpml else [])
+    h_inputs = [*h_base, *metric_names_H, *cpml_in]
     e_outputs = ["out"] + (pso_names if do_cpml else [])
     h_outputs = ["out"] + (pso_names if do_cpml else [])
 
@@ -287,19 +326,19 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
         name="fdtdmex_E",
         input_names=e_inputs,
         output_names=e_outputs,
-        source=_field_source(shape, per, e_diag, None, ext, do_cpml, forward=False),
+        source=_field_source(shape, per, e_diag, None, ext, do_cpml, metric_axes_E, forward=False),
         ensure_row_contiguous=True,
     )
     kH = mx.fast.metal_kernel(
         name="fdtdmex_H",
         input_names=h_inputs,
         output_names=h_outputs,
-        source=_field_source(shape, per, h_diag, mu_scalar, ext, do_cpml, forward=True),
+        source=_field_source(shape, per, h_diag, mu_scalar, ext, do_cpml, metric_axes_H, forward=True),
         ensure_row_contiguous=True,
     )
 
-    def _run(kern, base_inputs, psi, coeff, F_template):
-        inputs = list(base_inputs)
+    def _run(kern, base_inputs, metric_bufs, psi, coeff, F_template):
+        inputs = list(base_inputs) + list(metric_bufs)
         out_shapes = [F_template.shape]
         out_dtypes = [F_template.dtype]
         psi_new = list(psi)
@@ -315,11 +354,11 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
         return outs[0], tuple(psi_new)
 
     def e_core(E, H, psi_E):
-        return _run(kE, [E, H, cb_E], psi_E, coeff_E, E)
+        return _run(kE, [E, H, cb_E], metric_E, psi_E, coeff_E, E)
 
     def h_core(E, H, psi_H):
         base = [E, H] if mu_scalar is not None else [E, H, cb_H]
-        return _run(kH, base, psi_H, coeff_H, H)
+        return _run(kH, base, metric_H, psi_H, coeff_H, H)
 
     if compile_step and sb:
         return mx.compile(e_core), mx.compile(h_core)
