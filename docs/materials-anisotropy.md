@@ -22,9 +22,9 @@ Full-anisotropic E/H updates do a per-cell 3×3 solve with off-diagonal coupling
 Linear dispersion via auxiliary differential equations: ε(ω) = ε∞ + Σ χ_p(ω), each pole a 2nd-order recurrence in an auxiliary polarization field updated alongside E.
 - **Lorentz**: `χ = Δε·ω₀² / (ω₀² − ω² − iγω)`.
 - **Drude**: `χ = −ω_p² / (ω² + iγω)` (ω₀ = 0).
-Port from `../fdtdx/src/fdtdx/dispersion.py`. Coefficients computed once at setup (host).
+Coefficients computed once at setup (host). **Implemented on MLX (Phase 3):** `P_curr`/`P_prev` threaded through the E-side of the loop, the per-pole recurrence both in the MLX-op `_update_E` and folded into the Metal E-kernel (`mlx/kernels.py` `_ade_lines`) so dispersive media also hit the bandwidth floor. Drude + Lorentz only (no Debye — absent upstream, so no parity oracle).
 
-**Known FDTDX restriction to lift eventually:** full-anisotropic **+** dispersive simultaneously is not supported upstream (`NotImplementedError`). Lithium niobate (anisotropic + dispersive + χ²) is the motivating case — implementing this combination cleanly is a FDTDMEX differentiator. Forward-only makes it tractable (no autodiff entanglement).
+**Known FDTDX restriction (iso/diagonal dispersion only):** full-anisotropic **+** dispersive simultaneously is not supported upstream (`NotImplementedError`), so the MLX port is iso/diagonal only and there is no fdtdx oracle for the anisotropic case. Lithium niobate (anisotropic + dispersive + χ²) is the motivating case for lifting it — a documented low-priority future item with the MEEP state-of-the-art reference (per-pole 3×3 σ tensor with Yee-averaged off-diagonal coupling) in [roadmap.md](roadmap.md#genuinely-new-physics-needs-meep-reference-or-new-derivation).
 
 ## Subpixel smoothing → anisotropy
 

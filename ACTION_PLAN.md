@@ -1,9 +1,15 @@
 # FDTDMEX — forward-engine performance plan
 
-Single entry point. **Phase 3 is complete** (items 1–3 done: lossy full-aniso + 9-tensor conductivity,
-PEC/PMC, and Drude–Lorentz ADE dispersion — the last with the ADE term folded into the Metal E-kernel
-so dispersive media also ride the bandwidth floor). Phase 2 M1–M3 complete and the Metal kernel path
-is default-on. A fresh agent can read this top-to-bottom without prior context. Depth references:
+Single entry point. **Phases 1–3 are complete** — the forward engine is fast (Metal kernels at the
+bandwidth floor, default-on) and broad (full anisotropy, lossy + 9-tensor conductivity, CPML +
+periodic + PEC/PMC, non-uniform grids, Drude–Lorentz ADE dispersion folded into the kernel). **Phase 4
+is the next work, run as two parallel tracks plus one engine item** (see "Phase 4" below):
+**Track A — an independent, Tidy3D-free mode solver + overlap** (WS-B, [docs/mode-solver.md](docs/mode-solver.md)),
+coupled with subpixel smoothing (WS-C); **Track B — the agentic workspace** (the HDF5 wrap/unwrap
+contract + MCP server, [docs/mcp-and-ui.md](docs/mcp-and-ui.md)), buildable now against the
+resolved-arrays seam; and **Bloch/complex (nonzero-k) propagation**, the one remaining
+same-port-pattern engine feature. A fresh agent can read this top-to-bottom without prior context.
+Depth references:
 - [`docs/performance.md`](docs/performance.md) — roofline, the round-trip (RT) model, current measured
   results + a **History** section (what was tried, the gains, what didn't work — the "why").
 - [`docs/phase2-metal-kernels.md`](docs/phase2-metal-kernels.md) — custom-kernel design, region
@@ -59,6 +65,14 @@ mirrors fdtdx element-wise (the parity bar), and is fp32.
   (35 validation tests green). Item 3 folds the per-pole ADE recurrence into the Metal E-kernel, so
   dispersive media ride the bandwidth floor (1216 vs 255 Mcs/s on the MLX-op cores, N=160 1-pole,
   4.8×); the non-dispersive kernel is byte-identical (1843 Mcs/s, unchanged). See the "Phase 3" section.
+- **Phase 4 — next.** Two parallel tracks + one engine item. **Track A: independent mode solver +
+  overlap** (Tidy3D-free; the only Tidy3D coupling in the stack is the mode solver, so an own
+  Zhu–Brown solver removes the dependency) coupled with **subpixel smoothing** (WS-C; the two share the
+  same interface index-averaging). **Track B: the agentic workspace** — an HDF5 wrap/unwrap contract
+  (bare-minimum *resolved* payload) + an MCP server so an LLM discovers the API and writes/runs scripts;
+  buildable now against the resolved-arrays seam / a mocked backend. **Engine item: Bloch/complex
+  (nonzero-k)** propagation (promotes the engine to complex64 end-to-end). Gradients stay out of scope
+  (forward-only). See the "Phase 4" section.
 
 ## Engine map (`src/fdtdx/mlx/`)
 
@@ -185,6 +199,73 @@ Build each compile/kernel-friendly (host-side gating, arrays carried as state).
   Parity + kernel-vs-ops + the source-unchanged guard in
   [test_mlx_dispersion.py](tests/validation/test_mlx_dispersion.py). The dispersive-*plane-source* gate
   stays. **1216 vs 255 Mcs/s** dispersive (N=160, 1-pole, 4.8×); non-dispersive floor unchanged (1843).
+
+## Phase 4 — two parallel tracks + one engine item (next)
+
+Two independent tracks plus the last same-port-pattern engine feature. **Gradients are *not* in
+scope** — the MLX backend is forward-only by design; inverse design stays on JAX/CUDA.
+
+### Track A — Independent mode solver + overlap (Tidy3D-free) + subpixel smoothing
+
+Spec: [docs/mode-solver.md](docs/mode-solver.md) (WS-B) + [docs/subpixel-smoothing.md](docs/subpixel-smoothing.md) (WS-C).
+
+- **Why own it:** fdtdx delegates *all* mode work to **Tidy3D** ([`core/physics/modes.py`](src/fdtdx/core/physics/modes.py)
+  → `tidy3d ... compute_modes`) — and that is the **only** Tidy3D coupling in the whole stack. An own
+  solver removes the dependency and the conflict-of-interest optics; the algorithm is standard and small.
+- **Approach — a swappable backend, not a re-port.** Keep `ModePlaneSource`/`ModeOverlapDetector` and
+  the injection path *as-is*; introduce a `mode_backend` indirection in `modes.py` that returns
+  Tidy3D-**shaped** `ModeTupleType(neff, Ex..Hz)` (η₀-scaled). Implement full-vectorial FD on a 2-D Yee
+  cross-section per **Zhu & Brown 2002** ([`reference/oe-10-17-853.pdf`](reference/oe-10-17-853.pdf);
+  FOSS lineage: EMpy, modesolverpy) in `src/fdtdx/core/physics/mode_backend/` — sparse generalized
+  eigenproblem solved with `scipy.sparse.linalg.eigs`.
+- **Validation is physics, not byte-parity** (bit-identical to Tidy3D is not expected — nor is Tidy3D↔Lumerical):
+  analytic slab/fiber `n_eff`, cross-check vs MPB and (dev-time only) Tidy3D, single-mode transmission ≈ 1.
+- **Coupling to WS-C:** Zhu–Brown's interface **index averaging** (paper Eqs. 6) *is* subpixel
+  smoothing — the same averaging WS-C adds to the time-domain grid. Build them together so the solver
+  consumes WS-C's smoothed tensors; until WS-C lands, the 2/4-cell average is self-contained.
+
+### Track B — Agentic workspace (HDF5 contract + MCP)
+
+Spec: [docs/mcp-and-ui.md](docs/mcp-and-ui.md) (WS-D). Buildable **now** against the resolved-arrays
+seam (the MLX bridge) or a mocked backend — independent of the physics tracks.
+
+- **Public API — a matched trio `sim_init → sim_run → sim_postproc`:**
+  - **`sim_init(setup) → config.hdf5`** — the front-end creation utility (`fdtdmex/io/`): resolve
+    objects + design params → assemble ε/material distributions + frozen source/detector profiles →
+    write a self-contained config HDF5. Resolution lives here by design (not the agent, not the runner).
+  - **`sim_run(config.hdf5) → results.hdf5`** — any fdtdmex machine (local/remote) unwraps and runs.
+  - **`sim_postproc(results.hdf5) → small results`** — reduce to scalars/fluxes/n_eff/thumbnails.
+- **Data boundary:** the **LLM never touches large arrays** — it writes a script that calls the trio
+  with high-level params and reads only `sim_postproc` outputs. The config HDF5 is the portable artifact.
+- **Config-HDF5 contract — bare-minimum rule:** ship the *resolved* distributions (final
+  ε/µ/σ/dispersion + frozen source/detector profiles + grid + run config), **not** the pre-simulation
+  data that produces them (no device ρ / optimization params / CSG). The resolved `ArrayContainer` is
+  the canonical payload; `sim_run`'s unwrap feeds the existing
+  [`to_mlx_state`](src/fdtdx/mlx/bridge.py)/`freeze_*` seam.
+- **MCP server:** **API discovery** so the LLM writes a valid script — `introspect` (type names +
+  parameter schemas from the pydantic/`autoinit` models), `build`/`edit`/`validate`, and the
+  `sim_init`/`sim_run`/`sim_postproc` tools. Align dataset/field names with fdtdx's emerging JSON
+  round-trip (`../fdtdx/src/fdtdx/conversion/json.py`) so fdtdx setups ingest.
+
+### Engine item — Bloch / complex (nonzero-k) propagation (complex64 end-to-end)
+
+The one remaining "already in fdtdx, same JAX→MLX port pattern" forward feature; parity-validate vs the
+forced-JAX oracle (rel < 1e-3).
+  - **Where in fdtdx:** [`objects/boundaries/bloch.py`](src/fdtdx/objects/boundaries/bloch.py)
+    `BlochBoundary`; `needs_complex_fields` is True only for **nonzero k**. **Zero-k Bloch already runs
+    on MLX** as real-valued wrap-padding (periodic), so this item is specifically the nonzero-k /
+    forced-complex case ([`initialization.py`](src/fdtdx/fdtd/initialization.py) promotes fields to
+    `complex64`).
+  - **Why it's heavy:** the entire MLX forward path is real fp32. Supporting complex fields means a
+    complex E/H/ψ datatype through the **curl, E/H update, CPML recurrence, source injection, detectors,
+    and the Metal kernels** (which are real-only today — either a complex kernel variant carrying
+    interleaved re/im, or run the complex path on the MLX-op cores first and gate the kernel off via
+    `kernel_eligible`). The Bloch phase factor multiplies the wrap-around ghost reads in the curl.
+  - **Suggested staging:** (a) MLX-op cores complex first (correctness), kernel ineligible for complex;
+    (b) parity vs the JAX complex oracle (`use_complex_fields=True`); (c) only then consider a complex
+    Metal kernel if the perf matters. Un-gate the `use_complex_fields`/`needs_complex_fields` returns in
+    `_unsupported_reason` as each stage lands. Parity test `tests/validation/test_mlx_bloch.py`
+    (oblique-incidence band structure / phase-shifted periodicity vs JAX).
 
 ## Physics-correctness contract (every change)
 

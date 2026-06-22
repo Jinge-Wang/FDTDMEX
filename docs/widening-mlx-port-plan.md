@@ -1,5 +1,11 @@
 # Action Plan — Widening the MLX surface (ADE · lossy full-anisotropic · PEC/PMC)
 
+> ✅ **All three landed (Phase 3 complete).** This is the original how-to spec, kept as the
+> implementation record. As-built notes and results live in [ACTION_PLAN.md](../ACTION_PLAN.md)
+> ("Phase 3"). One deviation from the plan below: ADE was also **folded into the Metal E-kernel**
+> (not just the MLX-op cores) so dispersive media ride the bandwidth floor; the non-dispersive kernel
+> stays byte-identical. Drude/Lorentz only — there is **no `DebyePole`** in upstream fdtdx.
+
 > **For the agent picking this up in a fresh session.** Read this top-to-bottom, then
 > [CLAUDE.md](../CLAUDE.md), [roadmap.md](roadmap.md) ("Widening the MLX surface"), and the skill
 > [`.claude/skills/porting-from-fdtdx`](../.claude/skills/porting-from-fdtdx). These three features
@@ -147,7 +153,7 @@ each face's `grid_slice`→mask mapping right for all 6 faces / partial faces.
 ## 3. Drude–Lorentz dispersion (ADE) — *host coeffs + P-history + one E-term* (low–medium)
 
 **Where it lives in fdtdx:** [`src/fdtdx/dispersion.py`](../src/fdtdx/dispersion.py)
-(`compute_pole_coefficients`, the `DrudePole`/`LorentzPole`/`DebyePole` model) +
+(`compute_pole_coefficients`, the `DrudePole`/`LorentzPole` model — no Debye upstream) +
 the ADE block in `update.py` (the `if arrays.dispersive_P_curr is not None:` branch inside
 `update_E`, lines ~180–194). It lives **only in the iso/diagonal fast path** (not the 9-tensor
 branch) — so the MLX port targets the non-full-tensor branch of `update_E_mlx`.
