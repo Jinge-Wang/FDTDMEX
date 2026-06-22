@@ -1,4 +1,4 @@
-"""Custom Metal E/H update kernels for the isotropic/diagonal forward path (Phase 2 M2).
+"""Custom Metal E/H update kernels for the isotropic/diagonal forward path (Phase 2 M2 + M3).
 
 The bulk update (``E + c·inv_eps·curl_H(H)`` / ``H - c·inv_mu·curl_E(E)``) runs as one
 ``mx.fast.metal_kernel`` per field — thread-per-cell, the curl read from global with neighbour
@@ -8,13 +8,16 @@ per-cell material read: ``cb = c·inv_eps`` (isotropic 1-component, or diagonal 
 as a buffer, with the low/high-edge ghost wrapping on periodic axes (matching ``curl._bwd_diff`` /
 ``_fwd_diff``).
 
-**CPML is a spatial hybrid (not folded into the kernel).** The kernel computes the full-domain
-*plain* curl update; on PML boundary slabs that value differs from the truth by
-``c·inv_eps·corr`` where ``corr = (1/κ-1)·d_slab + ψ_new`` — exactly the per-component term
-``curl._cpml_curl`` accumulates. So we recompute the slab differences with ``curl._slab_diff``,
-advance ψ on the slabs, and add ``cb·corr`` back into the kernel output via ``curl._slab_add``
-(disjoint, additive → race-free, out-of-place). Interior cells (the bulk) get the kernel value
-untouched; only the thin slabs touch MLX ops.
+**CPML is folded into the kernel (M3).** Each thread computes the six metric-scaled differences
+``d[i]`` of the plain curl; a thread that lies in a PML boundary slab additionally advances that
+slab cell's ψ recurrence and adds the κ-stretch + ψ correction directly into the curl before the
+``cb`` multiply, so the kernel writes the *final* E/H — no post-kernel full-array rebuild. ψ is
+carried (and returned) as the compact per-component boundary-slab buffers already in ``MLXState``;
+the CPML coefficients ``a``/``b``/``1/κ`` are sliced to those same slabs once at build time and
+captured. The two ψ-components that share a PML axis share its slab geometry and its ``a``/``b``/
+``1/κ`` (per-cell, depth-only along the boundary normal), so each axis contributes one coefficient
+triple. (M2 computed the slab correction with MLX ops via ``concatenate`` — ~22 RT on top of the
+5 RT bulk; folding it in drops CPML-on toward the bulk floor.)
 
 Eligibility (else the loop uses the compiled MLX-op cores): isotropic/diagonal ``inv_eps``/
 ``inv_mu`` (not 9-tensor), no conductivity, and a uniform metric. Lossy / full-tensor /
@@ -25,20 +28,25 @@ from __future__ import annotations
 
 import mlx.core as mx
 
-from fdtdx.mlx.curl import _AX, _slab_add, _slab_diff, _slab_take
+from fdtdx.mlx.curl import _slab_take
 
 #: Bumped each time kernel cores are built; tests assert the kernel path actually engaged.
 KERNEL_CORES_BUILT = 0
 
-#: H/E component differentiated for each of the 6 ψ-components (mirrors ``curl.curl_H_mlx`` order).
-_COMP = (2, 1, 0, 2, 1, 0)
-
-#: Per spatial axis (x, y, z): thread coordinate var, the per-axis extent name, and the contiguous
-#: stride (in cells). Domains are not cubic, so each axis carries its own extent. The grid is
+#: Per spatial axis (x, y, z): thread coordinate var (matching ``_common`` below). The grid is
 #: (NZ, NY, NX) with thread_position_in_grid .x→k(z), .y→j(y), .z→i(x); z is contiguous (stride 1).
 _AXVAR = ("i", "j", "k")
 _NNAME = ("NX", "NY", "NZ")
 _STRIDE = ("SX", "SY", "1u")  # x plane (NY*NZ), y row (NZ), z element (1)
+
+#: For each PML axis, the (ψ-component index, curl-component target, sign) pairs whose differences
+#: are perpendicular to that axis. Mirrors ``curl._cpml_curl``: component ``i`` differentiates along
+#: ``_AX[i]``, contributes to curl component ``i//2`` with sign ``+`` (even ``i``) / ``-`` (odd ``i``).
+_AXIS_COMPS = {
+    0: ((3, "cy", "-"), (4, "cz", "+")),  # x slab: d3 (dxHz/dxEz), d4 (dxHy/dxEy)
+    1: ((0, "cx", "+"), (5, "cz", "-")),  # y slab: d0 (dyHz/dyEz), d5 (dyHx/dyEx)
+    2: ((1, "cx", "-"), (2, "cy", "+")),  # z slab: d1 (dzHy/dzEy), d2 (dzHx/dzEx)
+}
 
 
 def _is_uniform_metric(metric) -> bool:
@@ -100,114 +108,147 @@ def _cb_lines(diagonal: bool, scalar) -> str:
     return "        float cbx = cb[idx]; float cby = cbx; float cbz = cbx;\n"
 
 
-def _e_source(shape: tuple, periodic: tuple, diagonal: bool) -> str:
-    # backward differences of H; (var, component base, axis)
-    nbrs = [
-        ("Hx_jm", "", 1),
-        ("Hx_km", "", 2),
-        ("Hy_im", "N3+", 0),
-        ("Hy_km", "N3+", 2),
-        ("Hz_im", "2u*N3+", 0),
-        ("Hz_jm", "2u*N3+", 1),
-    ]
-    lines = [
-        "        float Hx = H[idx];        float Hy = H[N3+idx];        float Hz = H[2u*N3+idx];",
-    ]
-    for var, base, axis in nbrs:
-        expr = _ghost(base, axis, periodic[axis], forward=False).replace("F[", "H[")
-        lines.append(f"        float {var} = {expr};")
-    body = "\n".join(lines)
-    return (
-        _common(*shape)
-        + _cb_lines(diagonal, None)
-        + body
-        + """
-        float cx = (Hz - Hz_jm) - (Hy - Hy_km);
-        float cy = (Hx - Hx_km) - (Hz - Hz_im);
-        float cz = (Hy - Hy_im) - (Hx - Hx_jm);
-        out[idx]       = E[idx]       + cbx*cx;
-        out[N3+idx]    = E[N3+idx]    + cby*cy;
-        out[2u*N3+idx] = E[2u*N3+idx] + cbz*cz;
+def _active_axes(extents) -> list[int]:
+    """PML axes (in 0,1,2 order) that carry a boundary slab."""
+    return [k for k in range(3) if extents[k][0] + extents[k][1] > 0]
+
+
+def _slab_comps(extents) -> list[int]:
+    """ψ-component indices (0..5) whose axis has a slab, in (axis, component) order — the order the
+    ψ buffers are passed in / returned out of the kernel."""
+    comps: list[int] = []
+    for k in _active_axes(extents):
+        comps.extend(ci for ci, _tgt, _sgn in _AXIS_COMPS[k])
+    return comps
+
+
+def _corr_blocks(extents, nx: int, ny: int, nz: int) -> str:
+    """MSL that, for each PML-slab thread, advances ψ and folds the κ-stretch + ψ correction into
+    ``cx``/``cy``/``cz`` (identical for E and H; the side enters only via the captured a/b arrays
+    and the final ``out`` sign). Reads ``d0..d5`` and the slab buffers ``as{k}``/``bs{k}``/``is{k}``/
+    ``psi{i}``; writes the advanced slab ψ to ``pso{i}``. Slab strides are baked from the extents."""
+    blocks = []
+    for k in _active_axes(extents):
+        lo, hi = extents[k]
+        coord = _AXVAR[k]
+        n = (nx, ny, nz)[k]
+        nmhi = n - hi
+        d = lo + hi
+        # slab membership + slab-local coordinate along axis k (compact buffer ordering = [0:lo] ++ [n-hi:n])
+        if lo and hi:
+            cond = f"({coord} < {lo}u) || ({coord} >= {nmhi}u)"
+            sloc = f"({coord} < {lo}u) ? {coord} : ({lo}u + ({coord} - {nmhi}u))"
+        elif lo:
+            cond = f"{coord} < {lo}u"
+            sloc = coord
+        else:
+            cond = f"{coord} >= {nmhi}u"
+            sloc = f"{coord} - {nmhi}u"
+        # linear index into the (..., d on axis k, ...) compact slab buffer
+        if k == 0:
+            sidx = "sl*SX + j*SY + k"
+        elif k == 1:
+            sidx = f"i*{d * nz}u + sl*SY + k"
+        else:
+            sidx = f"i*{ny * d}u + j*{d}u + sl"
+        terms = []
+        for ci, tgt, sgn in _AXIS_COMPS[k]:
+            terms.append(
+                f"            {{ float p = bb*psi{ci}[si] + aa*d{ci}; pso{ci}[si] = p; {tgt} {sgn}= (ik1*d{ci} + p); }}"
+            )
+        blocks.append(
+            f"""
+        if ({cond}) {{
+            uint sl = {sloc};
+            uint si = {sidx};
+            float aa = as{k}[si]; float bb = bs{k}[si]; float ik1 = is{k}[si] - 1.0f;
+{chr(10).join(terms)}
+        }}"""
+        )
+    return "".join(blocks)
+
+
+def _field_source(shape, periodic, diagonal, scalar, extents, sb: bool, forward: bool) -> str:
+    """Generate the MSL body for the E-kernel (``forward=False``) or H-kernel (``forward=True``).
+
+    ``out = F (± cb·curl)`` with ``+`` for E and ``-`` for H; ``F`` is the field being updated and
+    ``G`` (``H`` for E, ``E`` for H) the one being differentiated. With ``sb`` the CPML correction
+    blocks (``_corr_blocks``) are interleaved before the ``cb`` multiply.
     """
-    )
+    nx, ny, nz = shape
+    if forward:  # H-kernel: forward differences of E
+        Gname, Fname, out_sign = "E", "H", "-"
+        nbrs = [
+            ("Ez_jp", "2u*N3+", 1),
+            ("Ey_kp", "N3+", 2),
+            ("Ex_kp", "", 2),
+            ("Ez_ip", "2u*N3+", 0),
+            ("Ey_ip", "N3+", 0),
+            ("Ex_jp", "", 1),
+        ]
+        comp0 = "        float Ex = E[idx];        float Ey = E[N3+idx];        float Ez = E[2u*N3+idx];"
+        d_lines = [
+            "        float d0 = Ez_jp - Ez; float d1 = Ey_kp - Ey;",
+            "        float d2 = Ex_kp - Ex; float d3 = Ez_ip - Ez;",
+            "        float d4 = Ey_ip - Ey; float d5 = Ex_jp - Ex;",
+        ]
+    else:  # E-kernel: backward differences of H
+        Gname, Fname, out_sign = "H", "E", "+"
+        nbrs = [
+            ("Hx_jm", "", 1),
+            ("Hx_km", "", 2),
+            ("Hy_im", "N3+", 0),
+            ("Hy_km", "N3+", 2),
+            ("Hz_im", "2u*N3+", 0),
+            ("Hz_jm", "2u*N3+", 1),
+        ]
+        comp0 = "        float Hx = H[idx];        float Hy = H[N3+idx];        float Hz = H[2u*N3+idx];"
+        d_lines = [
+            "        float d0 = Hz - Hz_jm; float d1 = Hy - Hy_km;",
+            "        float d2 = Hx - Hx_km; float d3 = Hz - Hz_im;",
+            "        float d4 = Hy - Hy_im; float d5 = Hx - Hx_jm;",
+        ]
 
-
-def _h_source(shape: tuple, periodic: tuple, diagonal: bool, scalar) -> str:
-    # forward differences of E; (var, component base, axis)
-    nbrs = [
-        ("Ez_jp", "2u*N3+", 1),
-        ("Ey_kp", "N3+", 2),
-        ("Ex_kp", "", 2),
-        ("Ez_ip", "2u*N3+", 0),
-        ("Ey_ip", "N3+", 0),
-        ("Ex_jp", "", 1),
-    ]
-    lines = [
-        "        float Ex = E[idx];        float Ey = E[N3+idx];        float Ez = E[2u*N3+idx];",
-    ]
+    lines = [comp0]
     for var, base, axis in nbrs:
-        expr = _ghost(base, axis, periodic[axis], forward=True).replace("F[", "E[")
+        expr = _ghost(base, axis, periodic[axis], forward=forward).replace("F[", f"{Gname}[")
         lines.append(f"        float {var} = {expr};")
-    body = "\n".join(lines)
+    body = "\n".join(lines + d_lines)
+
+    corr = _corr_blocks(extents, nx, ny, nz) if sb else ""
     return (
-        _common(*shape)
+        _common(nx, ny, nz)
         + _cb_lines(diagonal, scalar)
         + body
         + """
-        float cx = (Ez_jp - Ez) - (Ey_kp - Ey);
-        float cy = (Ex_kp - Ex) - (Ez_ip - Ez);
-        float cz = (Ey_ip - Ey) - (Ex_jp - Ex);
-        out[idx]       = H[idx]       - cbx*cx;
-        out[N3+idx]    = H[N3+idx]    - cby*cy;
-        out[2u*N3+idx] = H[2u*N3+idx] - cbz*cz;
+        float cx = d0 - d1;
+        float cy = d2 - d3;
+        float cz = d4 - d5;"""
+        + corr
+        + f"""
+        out[idx]       = {Fname}[idx]       {out_sign} cbx*cx;
+        out[N3+idx]    = {Fname}[N3+idx]    {out_sign} cby*cy;
+        out[2u*N3+idx] = {Fname}[2u*N3+idx] {out_sign} cbz*cz;
     """
     )
-
-
-def _slab_correction(field_list, src, psi, a, b, ik, ab_off, extents, periodic, metric, cb, sign):
-    """Patch ``field_list`` (the 3 component arrays of the kernel's plain update) on the PML slabs
-    and advance ψ. ``src`` is the field being differentiated (H for E-update, E for H-update);
-    ``ab_off`` 0 (E) or 3 (H); ``sign`` +1 (E adds the curl) or -1 (H subtracts). Mirrors
-    ``curl._cpml_curl`` then folds the per-cell material so the slab value matches the MLX-op path.
-    """
-    forward = ab_off == 3
-    psi_new = list(psi)
-    for i in range(6):
-        k = _AX[i]
-        lo, hi = extents[k]
-        if lo + hi == 0:
-            continue
-        d_slab = _slab_diff(src[_COMP[i]], k, lo, hi, periodic[k], metric[k], forward)
-        a_s = _slab_take(a[ab_off + k], k, lo, hi)
-        b_s = _slab_take(b[ab_off + k], k, lo, hi)
-        ikm1_s = _slab_take(ik[k], k, lo, hi) - 1.0
-        pnew = b_s * psi[i] + a_s * d_slab
-        psi_new[i] = pnew
-        corr = ikm1_s * d_slab + pnew
-        if i % 2 == 1:
-            corr = -corr
-        comp = i // 2
-        cb_comp = cb if isinstance(cb, float) else cb[0 if cb.shape[0] == 1 else comp]
-        cb_s = cb_comp if isinstance(cb_comp, float) else _slab_take(cb_comp, k, lo, hi)
-        field_list[comp] = _slab_add(field_list[comp], k, lo, hi, sign * cb_s * corr)
-    return field_list, tuple(psi_new)
 
 
 def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     """Build ``(e_core, h_core)`` Metal-kernel closures with the standard core signature
     ``core(F, G, psi) -> (F_new, psi_new)`` (drop-in for the compiled MLX-op cores in ``loop``).
 
-    The bulk kernel is one fused node, but the slab-CPML correction is a chain of small ops; run
-    eager they dispatch one-by-one and dominate the CPML-on step. ``mx.compile`` (the metal kernel
-    composes as a normal graph node) fuses the whole core, recovering the kernel speed with CPML on.
+    CPML is folded into the kernel (M3): with ``sb`` the kernel takes the per-axis slab coefficient
+    buffers + the compact ψ slabs as extra inputs and returns the advanced ψ slabs as extra outputs,
+    so the whole CPML-on step is one Metal node per field (no slab MLX-op rebuild).
     """
     global KERNEL_CORES_BUILT
     KERNEL_CORES_BUILT += 1
 
     shape = tuple(int(s) for s in state.E.shape[1:])  # (Nx, Ny, Nz)
+    nx, ny, nz = shape
     per = tuple(state.periodic_axes)
     a, b, ik = state.cpml_a, state.cpml_b, state.inv_kappa
-    ext, mbwd, mfwd = state.cpml_extents, state.metric_bwd, state.metric_fwd
+    ext = tuple(state.cpml_extents)
 
     cb_E = c * state.inv_eps  # (1|3, N, N, N)
     e_diag = cb_E.shape[0] == 3
@@ -215,45 +256,70 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     mu_scalar = float(c * inv_mu) if not isinstance(inv_mu, mx.array) else None
     cb_H = None if mu_scalar is not None else c * inv_mu
     h_diag = cb_H is not None and cb_H.shape[0] == 3
-    mx.eval(cb_E) if mu_scalar is not None else mx.eval(cb_E, cb_H)
 
-    nx, ny, nz = shape
+    do_cpml = sb and len(_active_axes(ext)) > 0
+    axes = _active_axes(ext)
+    comps = _slab_comps(ext)
+
+    # Captured slab coefficient buffers, one triple per active axis. E uses a/b[k]; H uses a/b[3+k];
+    # both use 1/κ[k] (mirrors curl._cpml_curl). ψ flows through as core args (the MLXState slabs).
+    coeff_E, coeff_H, coeff_names = [], [], []
+    for k in axes:
+        lo, hi = ext[k]
+        coeff_E += [_slab_take(a[k], k, lo, hi), _slab_take(b[k], k, lo, hi), _slab_take(ik[k], k, lo, hi)]
+        coeff_H += [_slab_take(a[3 + k], k, lo, hi), _slab_take(b[3 + k], k, lo, hi), _slab_take(ik[k], k, lo, hi)]
+        coeff_names += [f"as{k}", f"bs{k}", f"is{k}"]
+    psi_names = [f"psi{i}" for i in comps]
+    pso_names = [f"pso{i}" for i in comps]
+
+    to_eval = [cb_E] + ([] if cb_H is None else [cb_H]) + (coeff_E + coeff_H if do_cpml else [])
+    mx.eval(*to_eval)
+
     grid, tg = (nz, ny, nx), (min(32, nz), min(4, ny), min(4, nx))
+
+    e_inputs = ["E", "H", "cb"] + (coeff_names + psi_names if do_cpml else [])
+    h_base = ["E", "H"] if mu_scalar is not None else ["E", "H", "cb"]
+    h_inputs = h_base + (coeff_names + psi_names if do_cpml else [])
+    e_outputs = ["out"] + (pso_names if do_cpml else [])
+    h_outputs = ["out"] + (pso_names if do_cpml else [])
+
     kE = mx.fast.metal_kernel(
         name="fdtdmex_E",
-        input_names=["E", "H", "cb"],
-        output_names=["out"],
-        source=_e_source(shape, per, e_diag),
+        input_names=e_inputs,
+        output_names=e_outputs,
+        source=_field_source(shape, per, e_diag, None, ext, do_cpml, forward=False),
         ensure_row_contiguous=True,
     )
-    h_inputs = ["E", "H"] if mu_scalar is not None else ["E", "H", "cb"]
     kH = mx.fast.metal_kernel(
         name="fdtdmex_H",
         input_names=h_inputs,
-        output_names=["out"],
-        source=_h_source(shape, per, h_diag, mu_scalar),
+        output_names=h_outputs,
+        source=_field_source(shape, per, h_diag, mu_scalar, ext, do_cpml, forward=True),
         ensure_row_contiguous=True,
     )
 
+    def _run(kern, base_inputs, psi, coeff, F_template):
+        inputs = list(base_inputs)
+        out_shapes = [F_template.shape]
+        out_dtypes = [F_template.dtype]
+        psi_new = list(psi)
+        if do_cpml:
+            inputs += coeff + [psi[i] for i in comps]
+            for i in comps:
+                out_shapes.append(psi[i].shape)
+                out_dtypes.append(psi[i].dtype)
+        outs = kern(inputs=inputs, output_shapes=out_shapes, output_dtypes=out_dtypes, grid=grid, threadgroup=tg)
+        if do_cpml:
+            for n, i in enumerate(comps):
+                psi_new[i] = outs[1 + n]
+        return outs[0], tuple(psi_new)
+
     def e_core(E, H, psi_E):
-        (E_full,) = kE(inputs=[E, H, cb_E], output_shapes=[E.shape], output_dtypes=[E.dtype], grid=grid, threadgroup=tg)
-        if not sb:
-            return E_full, psi_E
-        comps, psi_new = _slab_correction(
-            [E_full[0], E_full[1], E_full[2]], H, psi_E, a, b, ik, 0, ext, per, mbwd, cb_E, 1.0
-        )
-        return mx.stack(comps, axis=0), psi_new
+        return _run(kE, [E, H, cb_E], psi_E, coeff_E, E)
 
     def h_core(E, H, psi_H):
-        inputs = [E, H] if mu_scalar is not None else [E, H, cb_H]
-        (H_full,) = kH(inputs=inputs, output_shapes=[H.shape], output_dtypes=[H.dtype], grid=grid, threadgroup=tg)
-        if not sb:
-            return H_full, psi_H
-        cb = mu_scalar if mu_scalar is not None else cb_H
-        comps, psi_new = _slab_correction(
-            [H_full[0], H_full[1], H_full[2]], E, psi_H, a, b, ik, 3, ext, per, mfwd, cb, -1.0
-        )
-        return mx.stack(comps, axis=0), psi_new
+        base = [E, H] if mu_scalar is not None else [E, H, cb_H]
+        return _run(kH, base, psi_H, coeff_H, H)
 
     if compile_step and sb:
         return mx.compile(e_core), mx.compile(h_core)
