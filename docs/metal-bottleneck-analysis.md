@@ -1,5 +1,23 @@
 # Metal GPU bottleneck analysis — measured, not inferred
 
+## Current scaling result (post-Phase-1)
+
+![Forward scaling — MLX/Metal vs JAX-CPU](images/forward_scaling.png)
+
+M4 Pro, float32, 500 steps (`benchmarks/results/scaling_s500.jsonl`, commit `6b69cf6`; warmup
+excluded so wall-clock is steady-state). After Phase 1 (compile + pad-free slice-diff + slab-CPML),
+**MLX/Metal leads JAX-CPU for every N ≥ 64 across all three materials**, with no plateau:
+
+| material | MLX Mcs/s (N=256) | JAX Mcs/s | speedup | crossover |
+|---|--:|--:|--:|--:|
+| isotropic | 266.8 | 194.7 | **1.37×** | N≈64 |
+| diagonal | 267.6 | 196.3 | **1.36×** | N≈64 |
+| full_aniso | 120.9 | 96.5 | **1.25×** | N≈48–64 |
+
+Below N≈48 JAX-CPU still wins (MLX kernel-launch overhead dominates the tiny domains). Panel (d)
+memory: MLX peak is exact; the JAX line is in-process RSS (a monotonic high-water mark — use
+`profile_memory.py` for a clean per-cell figure).
+
 > **Purpose.** The ACTION_PLAN proposed four eager-path fixes on the strength of a *wall-clock*
 > decomposition (perf-baseline §1a) that was never verified at the GPU. This document replaces that
 > inference with measurement: a real achieved-bandwidth roofline, a round-trip accounting of the

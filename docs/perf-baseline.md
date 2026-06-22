@@ -9,6 +9,11 @@ float32, commit `577af09`.
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](images/forward_scaling.png)
 
+> The figure above is the **current** (post-Phase-1) scaling result (MLX now leads JAX-CPU for all
+> N≥64). This document records the *original eager* baseline that motivated the work — the tables and
+> §1a below describe that starting point; see the §1a banner and
+> [metal-bottleneck-analysis.md](metal-bottleneck-analysis.md) for the realized state.
+
 Each cell is a cubic domain (cells = N³) uniformly filled with one material, CPML on all sides, a
 point-dipole source, no detector (pure update loop). Both backends run the **identical placed
 case**, forced with `fdtdx.use_backend(...)`. The same cases are validated element-wise between the
@@ -164,9 +169,6 @@ lift the plateau, not just the small-N tail. This baseline is the control to mea
 ### Largest domain that fit (the unified-memory claim)
 MLX-only large-domain sweep (`benchmarks/results/mlx_large.jsonl`, 120 steps), pushing past where
 JAX-CPU is practical (the MLX plateau extends across the whole range; JAX stops at N=192):
-
-![MLX scaling to 56M cells](images/forward_scaling_full.png)
-
 
 | material | N | cells | MLX peak | throughput |
 |---|--:|--:|--:|--:|
