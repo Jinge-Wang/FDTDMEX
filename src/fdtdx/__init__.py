@@ -8,6 +8,7 @@ if sys.version_info >= (3, 15):
         stacklevel=2,
     )
 
+from fdtdx.backend.context import use_backend
 from fdtdx.colors import Color
 from fdtdx.config import GradientConfig, SimulationConfig
 from fdtdx.constants import wavelength_to_period
@@ -47,7 +48,6 @@ from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, Pa
 from fdtdx.fdtd.initialization import apply_params, place_objects, resolve_object_constraints
 from fdtdx.fdtd.symmetry import unfold_array, unfold_detector_states, unfold_fields, unfold_source_mode
 from fdtdx.fdtd.wrapper import run_fdtd
-from fdtdx.backend.context import use_backend
 from fdtdx.interfaces.modules import DtypeConversion
 from fdtdx.interfaces.recorder import Recorder, RecordingState
 from fdtdx.interfaces.time_filter import LinearReconstructEveryK
@@ -131,7 +131,9 @@ from fdtdx.utils.extend_pml import extend_material_to_pml
 from fdtdx.utils.logger import Logger
 from fdtdx.utils.plot_field_slice import plot_field_slice, plot_field_slice_component
 from fdtdx.utils.plot_material import plot_material, plot_material_from_side
+from fdtdx.utils.plot_modes import plot_mode, plot_mode_from_source
 from fdtdx.utils.plot_setup import plot_setup, plot_setup_from_side
+from fdtdx.utils.smatrix import SMatrixResult, plot_smatrix
 from fdtdx.utils.sparams import PortSpec, calculate_sparam, calculate_sparams, setup_sparams_simulation
 
 # PeriodicBoundary is now an alias for BlochBoundary with bloch_vector=(0,0,0)
@@ -208,6 +210,7 @@ __all__ = [
     "RecordingState",
     "RectilinearGrid",
     "RemoveFloatingMaterial",
+    "SMatrixResult",
     "SimulationConfig",
     "SimulationObject",
     "SimulationState",
@@ -266,17 +269,20 @@ __all__ = [
     "plot_field_slice_component",
     "plot_material",
     "plot_material_from_side",
+    "plot_mode",
+    "plot_mode_from_source",
     "plot_setup",
     "plot_setup_from_side",
+    "plot_smatrix",
     "private_field",
     "resolve_object_constraints",
     "run_fdtd",
-    "use_backend",
     "setup_sparams_simulation",
     "sources_from_gds_ports",
     "unfold_array",
     "unfold_detector_states",
     "unfold_fields",
     "unfold_source_mode",
+    "use_backend",
     "wavelength_to_period",
 ]
