@@ -211,6 +211,36 @@ def _nonuniform_case(material, polarization):
     return objects, constraints, config
 
 
+def test_kernel_heterogeneous_full_tensor_cpml():
+    """Isotropic vacuum bulk + a compact full-tensor (off-diagonal) inclusion in the interior, CPML
+    all sides. The kernel runs the diagonal bulk; the inclusion bbox gets the MLX-op aniso update
+    spliced in (M3 block hybrid). Kernel-vs-ops rel<1e-4 (box cells are bit-identical, bulk ~float32)
+    and vs-JAX rel<1e-3."""
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=_RES), time=_TIME, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(_DOMAIN,) * 3)
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=_PML), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+
+    # mild x-z off-diagonal crystal (stable), placed as a small interior cube away from the PML
+    eps_tensor = ((2.5, 0.0, 0.3), (0.0, 3.0, 0.0), (0.3, 0.0, 4.0))
+    incl = fdtdx.UniformMaterialObject(partial_grid_shape=(5, 5, 5), material=fdtdx.Material(permittivity=eps_tensor))
+    constraints.append(incl.place_at_center(vol, axes=(0, 1, 2)))
+    objects.append(incl)
+
+    src = fdtdx.PointDipoleSource(
+        partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=1e-6), polarization=2
+    )
+    constraints.append(src.place_at_center(vol, axes=(0, 1, 2)))
+    objects.append(src)
+
+    arrays, oc, config = _assert_kernel_matches_ops(objects, constraints, config)
+    assert np.asarray(arrays.inv_permittivities).shape[0] == 9, "expected a full 9-tensor material array"
+    _assert_kernel_matches_jax(arrays, oc, config)
+
+
 def test_kernel_nonuniform_isotropic_cpml():
     objects, constraints, config = _nonuniform_case(fdtdx.Material(permittivity=2.25), polarization=0)
     arrays, oc, config = _assert_kernel_matches_ops(objects, constraints, config)

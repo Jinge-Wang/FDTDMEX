@@ -31,8 +31,17 @@ Eligibility (else the loop uses the compiled MLX-op cores): isotropic/diagonal `
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 
 from fdtdx.mlx.curl import _slab_take
+from fdtdx.mlx.update import _update_E, _update_H
+
+#: Halo (cells) around an anisotropic inclusion's bbox handed to the MLX-op aniso correction — the
+#: curl needs a 1-cell halo and the off-diagonal averaging another, so 2 strips the slice-edge ghost.
+_BOX_MARGIN = 2
+#: Max anisotropic-inclusion bbox fraction of the domain for the block hybrid to stay a win (else
+#: the whole-domain MLX-op aniso path is no slower than kernel-bulk + a near-full-domain correction).
+_BOX_MAX_FRAC = 0.5
 
 #: Bumped each time kernel cores are built; tests assert the kernel path actually engaged.
 KERNEL_CORES_BUILT = 0
@@ -57,16 +66,85 @@ def _is_full_tensor(arr) -> bool:
     return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
 
 
+def _is_uniform_metric(metric) -> bool:
+    return all(isinstance(m, float) and m == 1.0 for m in metric)
+
+
+def _diag_cb(inv_material, c: float):
+    """``c·inv_material`` reduced to the per-component diagonal the bulk kernel reads. A 9-tensor
+    keeps only its diagonal (entries 0/4/8 → a (3,N³) buffer); (1)/(3) materials pass through."""
+    if _is_full_tensor(inv_material):
+        return c * mx.stack([inv_material[0], inv_material[4], inv_material[8]], axis=0)
+    return c * inv_material
+
+
+def _offdiag_box(inv_material):
+    """Bounding box ``((x0,x1),(y0,y1),(z0,z1))`` (half-open) of the cells whose 9-tensor has any
+    non-zero *off-diagonal* entry — the only cells the bulk (diagonal) kernel gets wrong. ``None``
+    if the tensor is diagonal everywhere (then the diagonal ``cb`` already covers it). Host-side
+    (numpy), computed once at build."""
+    arr = np.array(inv_material)  # (9, nx, ny, nz)
+    off = np.zeros(arr.shape[1:], dtype=bool)
+    for idx in (1, 2, 3, 5, 6, 7):  # off-diagonal entries of the row-major 3x3
+        off |= arr[idx] != 0.0
+    if not off.any():
+        return None
+    box = []
+    for ax in range(3):
+        other = tuple(a for a in range(3) if a != ax)
+        nz = np.nonzero(off.any(axis=other))[0]
+        box.append((int(nz[0]), int(nz[-1]) + 1))
+    return tuple(box)
+
+
+def _box_ok(box, shape, extents) -> bool:
+    """Whether ``box`` is a compact interior inclusion the block hybrid can correct: it must clear
+    every PML slab *and* leave a ``_BOX_MARGIN`` halo to the domain edge (so the haloed slice is all
+    real interior cells, no CPML), and stay under ``_BOX_MAX_FRAC`` of the domain (else no win)."""
+    if box is None:
+        return True  # diagonal-only 9-tensor: no correction needed, kernel handles it
+    vol, tot = 1, 1
+    for ax in range(3):
+        lo, hi = box[ax]
+        n = shape[ax]
+        plo, phi = extents[ax]
+        if lo < max(plo, _BOX_MARGIN) or hi > n - max(phi, _BOX_MARGIN):
+            return False
+        vol *= hi - lo
+        tot *= n
+    return vol <= _BOX_MAX_FRAC * tot
+
+
+def _set_box(full, box, core):
+    """Functionally splice ``core`` (the corrected inclusion block) into ``full`` at ``box`` (out-of-
+    place, race-free): replace the z-range inside the x/y sub-block, then the y-range, then the x-range."""
+    (x0, x1), (y0, y1), (z0, z1) = box
+    xy = full[:, x0:x1, y0:y1, :]
+    xy = mx.concatenate([xy[:, :, :, :z0], core, xy[:, :, :, z1:]], axis=3)
+    xblk = full[:, x0:x1, :, :]
+    xblk = mx.concatenate([xblk[:, :, :y0, :], xy, xblk[:, :, y1:, :]], axis=2)
+    return mx.concatenate([full[:, :x0, :, :], xblk, full[:, x1:, :, :]], axis=1)
+
+
 def kernel_eligible(state) -> bool:
     """Whether the custom Metal kernels can run this case (else fall back to the MLX-op cores).
 
     Non-uniform metric is handled in-kernel (M3: each difference is scaled by its per-axis
-    ``reference_spacing/cell_width`` buffer), so it no longer gates the kernel off.
+    ``reference_spacing/cell_width`` buffer). Heterogeneous full-tensor materials are handled by the
+    block hybrid (M3: kernel for the iso/diag bulk, MLX-op aniso over a compact interior inclusion
+    bbox) — eligible only lossless, uniform-grid, with that bbox compact + PML-disjoint.
     """
-    if _is_full_tensor(state.inv_eps) or _is_full_tensor(state.inv_mu):
-        return False
     if state.sigma_E is not None or state.sigma_H is not None:
         return False
+    fe, fm = _is_full_tensor(state.inv_eps), _is_full_tensor(state.inv_mu)
+    if fe or fm:
+        if not (_is_uniform_metric(state.metric_fwd) and _is_uniform_metric(state.metric_bwd)):
+            return False
+        shape = tuple(int(s) for s in state.E.shape[1:])
+        if fe and not _box_ok(_offdiag_box(state.inv_eps), shape, state.cpml_extents):
+            return False
+        if fm and not _box_ok(_offdiag_box(state.inv_mu), shape, state.cpml_extents):
+            return False
     return True
 
 
@@ -282,12 +360,19 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     a, b, ik = state.cpml_a, state.cpml_b, state.inv_kappa
     ext = tuple(state.cpml_extents)
 
-    cb_E = c * state.inv_eps  # (1|3, N, N, N)
+    inv_eps, inv_mu = state.inv_eps, state.inv_mu
+    cb_E = _diag_cb(inv_eps, c)  # (1|3, N, N, N) — diagonal of a 9-tensor
     e_diag = cb_E.shape[0] == 3
-    inv_mu = state.inv_mu
     mu_scalar = float(c * inv_mu) if not isinstance(inv_mu, mx.array) else None
-    cb_H = None if mu_scalar is not None else c * inv_mu
+    cb_H = None if mu_scalar is not None else _diag_cb(inv_mu, c)
     h_diag = cb_H is not None and cb_H.shape[0] == 3
+
+    # Heterogeneous full-tensor inclusions (block hybrid): the kernel does the diagonal bulk; the
+    # off-diagonal inclusion bbox gets the validated MLX-op aniso update over a haloed slice, spliced
+    # back. box=None → diagonal everywhere (no correction). Lossless + uniform + interior (gated by
+    # kernel_eligible), so the slice carries no CPML and no metric.
+    box_E = _offdiag_box(inv_eps) if _is_full_tensor(inv_eps) else None
+    box_H = _offdiag_box(inv_mu) if _is_full_tensor(inv_mu) else None
 
     do_cpml = sb and len(_active_axes(ext)) > 0
     axes = _active_axes(ext)
@@ -353,12 +438,33 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
                 psi_new[i] = outs[1 + n]
         return outs[0], tuple(psi_new)
 
+    m = _BOX_MARGIN
+    uni_metric, no_pml, dummy_psi = (1.0, 1.0, 1.0), ((0, 0), (0, 0), (0, 0)), (None,) * 6
+
+    def _box_correct(F_kernel, E, H, box, inv_material, update_fn):
+        """Replace the inclusion bbox of the diagonal-kernel result with the full aniso update, run
+        on a haloed interior slice (no CPML/metric — gated interior + uniform). Diagonal cells in the
+        box get the equivalent diagonal result, so splicing the whole box is consistent with the bulk."""
+        (x0, x1), (y0, y1), (z0, z1) = box
+        sx, sy, sz = slice(x0 - m, x1 + m), slice(y0 - m, y1 + m), slice(z0 - m, z1 + m)
+        E_s, H_s, im_s = E[:, sx, sy, sz], H[:, sx, sy, sz], inv_material[:, sx, sy, sz]
+        F_box, _ = update_fn(
+            E_s, H_s, dummy_psi, im_s, None, a, b, ik, uni_metric, (False, False, False), no_pml, None, c, False
+        )
+        return _set_box(F_kernel, box, F_box[:, m:-m, m:-m, m:-m])
+
     def e_core(E, H, psi_E):
-        return _run(kE, [E, H, cb_E], metric_E, psi_E, coeff_E, E)
+        E_new, psi_new = _run(kE, [E, H, cb_E], metric_E, psi_E, coeff_E, E)
+        if box_E is not None:
+            E_new = _box_correct(E_new, E, H, box_E, inv_eps, _update_E)
+        return E_new, psi_new
 
     def h_core(E, H, psi_H):
         base = [E, H] if mu_scalar is not None else [E, H, cb_H]
-        return _run(kH, base, metric_H, psi_H, coeff_H, H)
+        H_new, psi_new = _run(kH, base, metric_H, psi_H, coeff_H, H)
+        if box_H is not None:
+            H_new = _box_correct(H_new, E, H, box_H, inv_mu, _update_H)
+        return H_new, psi_new
 
     if compile_step and sb:
         return mx.compile(e_core), mx.compile(h_core)
