@@ -302,8 +302,7 @@ fig_set
 # %%
 conv = {}
 for res in CONV_RES:
-    w, T, ring = transmission(res, 0.18e-6, BAND, SETTLE,
-                              xy_wls=list(np.linspace(1.30e-6, 1.32e-6, 16)) if res == PROD_RES else None)
+    w, T, ring = transmission(res, 0.18e-6, BAND, SETTLE)
     lam0, tmin, base, fwhm, Q, ER = resonance_metrics(w, T, LAMBDA0)
     conv[res] = {"w": w, "T": T, "lam0": lam0, "Q": Q, "ER": ER, "ring": ring}
     print(f"  res {res * 1e9:.0f} nm -> λ_res {lam0 * 1e9:.2f} nm,  Q {Q:.0f},  ER {ER:.1f} dB")
@@ -320,14 +319,14 @@ fig_cv.savefig(os.path.join(FIG, "convergence.png"), dpi=120, bbox_inches="tight
 fig_cv
 
 # %% [markdown]
-# # 3 — Cold run: spectrum, resonance, and trapped field
-# At the production grid: the through-port `T(λ)` with the fitted loaded Q and ER, then `|E|²` at the
-# core mid-plane on resonance (light **trapped circulating in the ring**) vs off resonance (light
-# **passing to the through port**).
+# # 3 — Cold run: spectrum, resonance, Q, and extinction ratio
+# At the production grid: the through-port `T(λ)` with the fitted loaded Q and extinction ratio. The
+# `|E|²` field maps that show the resonant field trapped circulating in the ring are rendered separately
+# at the operating gap — see "Operating-gap field maps" after the gap sweep (`field_maps_100nm.py`).
 
 # %%
 prod = conv[PROD_RES]
-wls, T_cold, ringdat = prod["w"], prod["T"], prod["ring"]
+wls, T_cold = prod["w"], prod["T"]
 lam0, tmin, base, fwhm, Q0, ER0 = resonance_metrics(wls, T_cold, LAMBDA0)
 cc = slice(3, -3)
 print(f"cold: λ_res {lam0 * 1e9:.2f} nm, Q {Q0:.0f}, ER {ER0:.1f} dB, FSR≈{LAMBDA0**2 / (n_g * L_ring) * 1e9:.1f} nm")
@@ -342,27 +341,13 @@ axc.set_title(f"Cold through-port spectrum ({PROD_RES * 1e9:.0f} nm, 180 nm gap)
 fig_cold.savefig(os.path.join(FIG, "cold_spectrum.png"), dpi=120, bbox_inches="tight")
 fig_cold
 
-# %%
-E2, eps_xy = ringdat["xy_E2"], ringdat["eps_xy"]
-xy_nm = np.linspace(1300, 1320, E2.shape[0])
-T_xy = np.interp(xy_nm, wls[cc] * 1e9, T_cold[cc])
-k_on = int(np.argmin(np.abs(xy_nm - lam0 * 1e9)))       # nearest bin to the fitted resonance
-k_off = int(np.argmax(T_xy))                            # highest-transmission (off-resonance) bin
-si_xy = eps_xy > 4.0
-fig_fm, axf = plt.subplots(1, 2, figsize=(12, 4.4))
-for ax, k, lab in zip(axf, (k_on, k_off), ("on-resonance", "off-resonance")):
-    mp = E2[k].T; p = np.percentile(mp, 99.5)
-    ax.imshow(np.clip(mp / (p + 1e-30), 0, 1) ** 0.5, origin="lower", aspect="equal", cmap="inferno")
-    ax.contour(si_xy.T.astype(float), levels=[0.5], colors="cyan", linewidths=0.4, alpha=0.5)
-    ax.set_title(f"|E|²  {lab}  ({xy_nm[k]:.1f} nm)"); ax.set_xticks([]); ax.set_yticks([])
-fig_fm.suptitle("Resonant field trapped circulating in the ring; off resonance it passes to the through port")
-fig_fm.savefig(os.path.join(FIG, "field_maps.png"), dpi=120, bbox_inches="tight")
-fig_fm
-
 # %% [markdown]
 # # 4 — Coupling: through-port spectra and ER vs bus–ring gap
-# Sweeping the gap traces the coupling regime — under-/critical-/over-coupling. The operating gap is the
-# one whose resonance (tracked near `λ_ref`) is deepest, i.e. nearest critical coupling.
+# Sweeping the gap traces the coupling regime. For an all-pass ring the on-resonance depth is
+# `T_min = (a−t)²/(1−a·t)²`: the gap sets the self-coupling `t` (smaller gap → smaller `t`), while the
+# round-trip amplitude `a` is fixed by the ring loss; extinction peaks at critical coupling `t = a`. This
+# lossy compact ring is **under-coupled across the whole sweep** (`t ≈ 0.78→0.97` vs `a ≈ 0.52`), so ER is
+# deepest at the **smallest** gap and falls as the gap widens. The operating gap is the deepest (max ER).
 
 # %%
 gap_T, gap_m = {}, {}
@@ -384,6 +369,21 @@ ag2.set_xlabel("bus–ring gap (nm)"); ag2.set_ylabel("extinction ratio (dB)")
 ag2.set_title("ER vs gap — coupling control"); ag2.legend(fontsize=8)
 fig_gap.savefig(os.path.join(FIG, "gap_sweep.png"), dpi=120, bbox_inches="tight")
 fig_gap
+
+# %% [markdown]
+# ## Operating-gap field maps
+# At the operating gap (100 nm — the deepest-extinction point of the sweep) the resonant field is
+# clearest: `|E|²` at the silicon-core mid-plane circulates **inside the ring** on resonance and **passes
+# straight through the bus** off resonance. Produced by a separate ~25 min Metal run,
+# [`field_maps_100nm.py`](field_maps_100nm.py): it records the through-port spectrum and the field at the
+# same wavelengths and reads on-resonance = the through-port dip (≈1307 nm, the resonance the gap sweep
+# shows) and off-resonance = the transmission peak (≈1298 nm). Shown here rather than re-run in the study.
+
+# %%
+from IPython.display import Image  # noqa: E402
+
+_fm = os.path.join(FIG, "field_maps_100nm.png")
+Image(filename=_fm) if os.path.exists(_fm) else print(f"run field_maps_100nm.py to generate {_fm}")
 
 # %% [markdown]
 # # 5 — Static electro-optic response (Soref–Bennett)

@@ -34,7 +34,7 @@ Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable**
 
 ## Performance & accuracy
 
-**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128** — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs at the memory-bandwidth floor.
+**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128** — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs at the memory-bandwidth floor — and *beating* that floor (interior temporal blocking, per-subdivision material compaction, monitor-traffic reduction) is the next engine focus alongside the agentic workflow, targeting a much larger speedup ([roadmap](dev-docs/roadmap.md)).
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](benchmarks/figures/forward_scaling.png)
 
@@ -143,15 +143,15 @@ print(arrays.detector_states["T"])   # transmitted flux vs time
 |---|---|
 | ![convergence](examples/ring_mrm_oband/figures/convergence.png) | ![cold spectrum](examples/ring_mrm_oband/figures/cold_spectrum.png) |
 
-**Trapped resonant field.** `|E|²` at the silicon-core mid-plane shows light **circulating inside the ring** on resonance versus **passing straight to the through port** off resonance:
-
-![field maps](examples/ring_mrm_oband/figures/field_maps.png)
-
-**Coupling control and electro-optic tuning.** Sweeping the bus–ring gap traces the coupling regime — the extinction ratio is deepest at the 100 nm operating gap, **ER ≈ 8.5 dB** (left); a Soref–Bennett free-carrier perturbation gives the static electro-optic resonance **red-shift, ≈ 62 pm/V** (right):
+**Coupling control and electro-optic tuning.** Sweeping the bus–ring gap traces the coupling regime. This lossy compact ring is **under-coupled across the whole sweep**, so the extinction ratio is deepest at the *smallest* (100 nm operating) gap, **ER ≈ 8.5 dB**, and falls as the gap widens (left) — the example README works through the all-pass `T_min = (a−t)²/(1−a·t)²` physics. A Soref–Bennett free-carrier perturbation gives the static electro-optic resonance **red-shift, ≈ 62 pm/V** (right):
 
 | Extinction ratio vs gap | Static EO tuning (Soref–Bennett) |
 |---|---|
 | ![gap sweep](examples/ring_mrm_oband/figures/gap_sweep.png) | ![EO response](examples/ring_mrm_oband/figures/eo_response.png) |
+
+**Trapped resonant field (operating gap).** At the 100 nm operating gap, `|E|²` at the silicon-core mid-plane shows light **circulating inside the ring** on resonance versus **passing straight to the through port** off resonance:
+
+![field maps at the 100 nm operating gap](examples/ring_mrm_oband/figures/field_maps_100nm.png)
 
 See the example [README](examples/ring_mrm_oband/README.md) to run it (≈5 h at 20 nm; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
 
