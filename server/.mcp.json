@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "fdtdmex": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "/Users/jinge/Projects/FDTDX-MLX/FDTDMEX",
+        "fdtdmex-mcp"
+      ]
+    }
+  }
+}

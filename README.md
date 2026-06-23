@@ -65,10 +65,36 @@ The injection point is the **whole forward loop** (you can't interleave JAX trac
 Use [`uv`](https://docs.astral.sh/uv/). On **Apple Silicon** you get the Metal backend; on other platforms it installs as plain fdtdx (JAX).
 
 ```bash
-uv sync                 # core (jax + the fdtdx stack; mlx is auto-installed on Apple Silicon)
-uv sync --extra dev     # + pytest / ruff / docs tooling
-uv sync --extra viz     # + plotly / pyvista / trame
+uv sync                      # core (jax + the fdtdx stack; mlx is auto-installed on Apple Silicon)
+uv sync --extra dev          # + pytest / ruff / docs tooling
+uv sync --extra viz          # + plotly / pyvista / trame
+uv sync --extra "io,mcp"     # + the HDF5 hand-off seam and the MCP discovery server
 ```
+
+## MCP discovery server
+
+`fdtdmex-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that lets an agentic
+workspace (the sibling **ag-fdtd** project) **discover** this solver's run API and a corpus of
+verified examples — discovery only; simulations run through `agentic_adapter/real_solver.py`, not
+this server. It exposes a small, fixed **4-tool** surface:
+
+- `list_solver_apis(domain?)` — the run-API catalog (`run_fdtd_fdtdmex`).
+- `get_api_schema(name)` — the run-API params, introspected **live** (the adapter's own ring knobs
+  + CLI contract + the `fdtdmex.io.SceneModel` payload), so it can't drift from the code.
+- `search_docs(query, limit?)` — BM25 search over a corpus **generated from real sources**
+  (`examples/`, `docs/`, the io schema, docstrings) → ranked refs + snippets.
+- `get_doc(ref)` — the full page (the verbatim on-disk example/guide text).
+
+```bash
+uv sync --extra "io,mcp"
+uv run fdtdmex-mcp                  # serve over stdio
+uv run python scripts/build_corpus.py --index   # (re)generate the docs/example corpus + BM25 cache
+```
+
+The corpus rebuilds itself lazily whenever a source file changes (cached under
+`~/.cache/fdtdmex_mcp/`); run `scripts/build_corpus.py` to force it and write a curated
+`llms.txt` index. See [docs/mcp-and-ui.md](docs/mcp-and-ui.md) and the
+[Agent F brief](docs/agent-f-mcp-brief.md).
 
 ## Quickstart
 
@@ -166,7 +192,7 @@ This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/m
 | **WS-A** | Forward MLX engine (curl, E/H update, boundaries, sources, detectors, time loop; Metal kernels at the bandwidth floor) | **Complete** — full forward surface + performance phases, validated element-wise vs JAX |
 | **WS-B** | Native full-vectorial mode solver + mode-expansion monitor | **Complete** — straight waveguides, isotropic + diagonal anisotropy; matches analytic slab dispersion |
 | **WS-C** | Subpixel smoothing (effective-tensor averaging) | Core complete — validated; auto-application during placement is pending |
-| **WS-D** | Front end + portable workspace — `Scene`, 3D viz, config schema, HDF5 hand-off, MCP server, web UI | **In progress** — `Scene` + `plot_setup_3d`, `SceneModel`, and the `sim_init`/`sim_run`/`sim_postproc` HDF5 contract are done; MCP server + web UI next |
+| **WS-D** | Front end + portable workspace — `Scene`, 3D viz, config schema, HDF5 hand-off, MCP server, web UI | **In progress** — `Scene` + `plot_setup_3d`, `SceneModel`, the `sim_init`/`sim_run`/`sim_postproc` HDF5 contract, and the `fdtdmex-mcp` discovery server are done; web UI next |
 
 Build order and the active plan: [ACTION_PLAN.md](dev-docs/ACTION_PLAN.md); longer arc: [docs/roadmap.md](dev-docs/roadmap.md).
 

@@ -63,6 +63,11 @@ dev = [
     "tidy3d>=2.8.0",
 ]
 
+[project.scripts]
+# MCP discovery server (stdio). Ships as the second wheel package below so
+# `import fdtdmex_mcp` works without a path hack.
+fdtdmex-mcp = "fdtdmex_mcp.__main__:main"
+
 [project.urls]
 Repository = "https://github.com/Jinge-Wang/FDTDMEX"
 Upstream = "https://github.com/ymahlau/fdtdx"
@@ -74,8 +79,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 # src/fdtdx is the engine (incl. the MLX backend under src/fdtdx/{backend,mlx});
-# src/fdtdmex is a thin brand alias re-exporting fdtdx.
-packages = ["src/fdtdx", "src/fdtdmex"]
+# src/fdtdmex is a thin brand alias re-exporting fdtdx; server/fdtdmex_mcp is the MCP
+# discovery server, shipped as a second top-level package (fdtdmex_mcp).
+packages = ["src/fdtdx", "src/fdtdmex", "server/fdtdmex_mcp"]
+
+[tool.hatch.build.targets.wheel.sources]
+"server/fdtdmex_mcp" = "fdtdmex_mcp"
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -84,7 +93,7 @@ allow-direct-references = true
 target-version = "py311"
 line-length = 120
 fix = true
-exclude = ["examples", "slurm", "checks", "docs", "reference", "web", "server", "benchmarks"]
+exclude = ["examples", "slurm", "checks", "docs", "reference", "web", "benchmarks"]
 
 [tool.ruff.lint]
 extend-select = ["I", "RUF"]
