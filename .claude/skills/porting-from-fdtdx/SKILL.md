@@ -14,7 +14,7 @@ Reference source: `../fdtdx` (MIT). Port the **forward numerical hot loop** only
 |---|---|---|
 | `core/physics/curl.py` | `fdtdmex/fdtd/` | finite-diff curl; make spacing-weighted (non-uniform) |
 | `fdtd/update.py` (E/H, incl. 9-tensor path) | `fdtdmex/fdtd/` | functional out-of-place; keep the iso/diag fast path + full-anisotropic path |
-| `fdtd/misc.py` (`compute_anisotropic_update_matrices`, `avg_anisotropic_*`) | `fdtdmex/fdtd/` | per-cell 3×3 solve + off-diagonal interpolation → spacing-weighted |
+| `fdtd/misc.py` (`compute_anisotropic_update_matrices`, `avg_anisotropic_*`) | `fdtdmex/fdtd/` | per-cell 3x3 solve + off-diagonal interpolation → spacing-weighted |
 | `objects/boundaries/perfectly_matched_layer.py` | `fdtdmex/fdtd/` (pml) | CPML ψ recurrences |
 | `objects/sources/*` (inject path) | `fdtdmex/sources/` | only the source types you need |
 | `objects/detectors/*` | `fdtdmex/detectors/` | phasor → complex; diffractive → `mx.fft` |
@@ -39,7 +39,7 @@ Reference source: `../fdtdx` (MIT). Port the **forward numerical hot loop** only
 | `arr.at[idx].set(v)` | `arr[idx] = v` (eager) or rebuild via concat/`mx.where` |
 | `jax.jit` | `mx.compile` |
 | `jnp.fft.*` | `mx.fft.*` (complex supported) |
-| `jnp.linalg.solve` (per-cell 3×3) | small/analytic inverse, or `mx.linalg.solve` if available; **complex `eig` is NOT on GPU → host numpy/scipy** |
+| `jnp.linalg.solve` (per-cell 3x3) | small/analytic inverse, or `mx.linalg.solve` if available; **complex `eig` is NOT on GPU → host numpy/scipy** |
 | `jax.lax.cond` (source/detector gating) | Python `if` on a host-known flag, or `mx.where` mask |
 | `jax.random` | `mx.random` |
 

@@ -40,7 +40,7 @@ A locally-hostable reactive editor consuming `SceneModel` + `to_plotly_json(plot
 
 - **`SceneModel` ↔ `ExtrudedPolygon` round-trip** — the JSON config exports GDS-derived polygons but reconstructing live `ExtrudedPolygon` objects hits their derived-shape guard; small follow-up.
 - **Subpixel-smoothing auto-integration** — apply [`subpixel.py`](../src/fdtdx/core/physics/subpixel.py) during placement (host-side supersampling), opt-in, default off to preserve parity.
-- **Tensorial mode solver** — off-diagonal 9-tensor cross-sections (the 4N×4N complex eigenproblem); routes to Tidy3D today if installed.
+- **Tensorial mode solver** — off-diagonal 9-tensor cross-sections (the 4Nx4N complex eigenproblem); routes to Tidy3D today if installed.
 - **Bends / leaky modes** in the native solver (route to Tidy3D meanwhile).
 - **Bloch / complex (nonzero-k) propagation** — promote the MLX forward path to complex64 end-to-end; parity vs the JAX complex oracle. Gradients stay out of scope.
 - **Production-resolution ring validation** — ✅ **done**: [`examples/ring_mrm_oband/`](../examples/ring_mrm_oband/) — O-band carrier-depletion MRM, a full design-verification run end to end on **Metal** at a 20 nm grid (build + mode → mesh convergence **40→20 nm** → cold `T(λ)`/Q/ER + field maps → gap sweep / coupling control → Soref–Bennett EO `Δλ(V)`). Uses a Gaussian source + phasor monitors and a **net-Poynting two-run** transmission (mode sources/detectors would force JAX/CPU here). Method, recipe, and acceptance notes live in the example's [README](../examples/ring_mrm_oband/README.md); ~5 h for the full suite at 20 nm.

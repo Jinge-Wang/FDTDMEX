@@ -166,7 +166,7 @@ fig_mode  # six components + energy + index cross-section
 # The PIC quantity of interest: of the light reaching the through port, **how much couples into each
 # guided mode** (TE₀, TE₁, TM₀, …)? We run the simulation once (input mode source on), then project the
 # recorded through-port field onto each mode via the overlap integral
-# `Tₘ = |∫ (Eₘ × H* + E* × Hₘ)·da / α_in|²`. `compute_mode_expansion` solves the reference modes on the
+# `Tₘ = |∫ (Eₘ x H* + E* x Hₘ)·da / α_in|²`. `compute_mode_expansion` solves the reference modes on the
 # fly — or loads them from a **cache file** (validated against the monitor's cross-section) so repeat
 # analyses skip the mode solve.
 #

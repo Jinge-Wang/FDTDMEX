@@ -15,6 +15,7 @@ from typing import Any
 import mlx.core as mx
 
 from fdtdx.mlx.detector_freeze import DetectorPlan
+from fdtdx.mlx.interpolate import interpolate_region_mlx
 from fdtdx.mlx.metrics import compute_energy_mlx, compute_poynting_flux_mlx
 
 
@@ -39,19 +40,14 @@ def _volume_weighted_spatial_mean(values: mx.array, weights: mx.array, leading_d
 
 
 def _record_energy(p: DetectorPlan, E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> mx.array:
-    sl = (slice(None), *p.grid_slice)
-    energy = compute_energy_mlx(
-        E[sl], H[sl], _slice_material(inv_eps, p.grid_slice), _slice_material(inv_mu, p.grid_slice)
-    )
+    energy = compute_energy_mlx(E, H, _slice_material(inv_eps, p.grid_slice), _slice_material(inv_mu, p.grid_slice))
     if p.reduce_volume:
         return mx.sum(energy * p.cell_volume_weights).reshape(1)
     return energy
 
 
 def _record_field(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
-    Esl = E[(slice(None), *p.grid_slice)]
-    Hsl = H[(slice(None), *p.grid_slice)]
-    parts = [(Esl[idx] if which == "E" else Hsl[idx]) for which, idx in p.component_picks]
+    parts = [(E[idx] if which == "E" else H[idx]) for which, idx in p.component_picks]
     EH = mx.stack(parts, axis=0)
     if p.reduce_volume:
         EH = _volume_weighted_spatial_mean(EH, p.cell_volume_weights, leading_dims=1)
@@ -59,9 +55,7 @@ def _record_field(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
 
 
 def _record_poynting(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
-    Esl = E[(slice(None), *p.grid_slice)]
-    Hsl = H[(slice(None), *p.grid_slice)]
-    pf = compute_poynting_flux_mlx(Esl, Hsl)
+    pf = compute_poynting_flux_mlx(E, H)
     if not p.keep_all_components:
         pf = pf[p.propagation_axis]
     pf = p.direction_sign * pf
@@ -75,9 +69,7 @@ def _record_poynting(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
 
 
 def _record_phasor(p: DetectorPlan, E: mx.array, H: mx.array, n: int) -> mx.array:
-    Esl = E[(slice(None), *p.grid_slice)]
-    Hsl = H[(slice(None), *p.grid_slice)]
-    parts = [(Esl[idx] if which == "E" else Hsl[idx]) for which, idx in p.component_picks]
+    parts = [(E[idx] if which == "E" else H[idx]) for which, idx in p.component_picks]
     EH = mx.stack(parts, axis=0)  # (C, *grid) real
 
     ph = p.phasors[n]  # (num_freqs,) complex
@@ -91,21 +83,30 @@ def _record_phasor(p: DetectorPlan, E: mx.array, H: mx.array, n: int) -> mx.arra
 def update_detectors(
     plans: list[DetectorPlan],
     buffers: dict[str, dict[str, mx.array]],
-    E_interp: mx.array,
-    H_interp: mx.array,
     E_raw: mx.array,
+    H_prev: mx.array,
     H_raw: mx.array,
     inv_eps: Any,
     inv_mu: Any,
     n: int,
+    periodic_axes: tuple,
+    interp_widths,
 ) -> None:
-    """Write step-``n`` measurements into ``buffers`` in place."""
+    """Write step-``n`` measurements into ``buffers`` in place.
+
+    Interpolation is done **per detector over its own region** (``grid_slice`` + a 1-cell halo),
+    not over the whole domain: for ``exact_interpolation`` detectors the region E and time-averaged
+    H are co-located via :func:`interpolate_region_mlx`; otherwise the raw region is sliced. The
+    ``_record_*`` helpers then operate on the already-cropped region (no re-slicing)."""
     for p in plans:
         if not bool(p.on_steps[n]):
             continue
         row = int(p.time_to_idx[n])
-        E = E_interp if p.exact_interp else E_raw
-        H = H_interp if p.exact_interp else H_raw
+        if p.exact_interp:
+            E, H = interpolate_region_mlx(E_raw, H_prev, H_raw, p.grid_slice, periodic_axes, interp_widths)
+        else:
+            sl = (slice(None), *p.grid_slice)
+            E, H = E_raw[sl], H_raw[sl]
 
         if p.kind == "phasor":
             buf = buffers[p.name]["phasor"]

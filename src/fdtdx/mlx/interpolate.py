@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import mlx.core as mx
 
+from fdtdx.mlx.curl import _sl
+
 
 def _bea(current: mx.array, previous: mx.array, axis: int, interp_widths) -> mx.array:
     """Backward center-to-edge average along ``axis`` (port of ``_backward_edge_average``)."""
@@ -59,3 +61,67 @@ def interpolate_fields_mlx(E_pad: mx.array, H_pad: mx.array, interp_widths=None)
     E_interp = mx.stack([E_x, E_y, E_z], axis=0)
     H_interp = mx.stack([H_x, H_y, H_z], axis=0)
     return E_interp, H_interp
+
+
+def _bounds(sl: slice, n: int) -> tuple[int, int]:
+    """``(start, stop)`` of a detector ``grid_slice`` entry, with ``None`` resolved against ``n``."""
+    s = 0 if sl.start is None else int(sl.start)
+    e = n if sl.stop is None else int(sl.stop)
+    return s, e
+
+
+def _region_padded_block(field: mx.array, grid_slice: tuple, periodic_axes: tuple) -> mx.array:
+    """Extract ``pad_fields_mlx(field)[:, x0:x1+2, y0:y1+2, z0:z1+2]`` *without* padding the whole
+    field. For each axis the window is the real crop ``field[s-1:e+1]`` (interior) plus, only when
+    the region touches a true domain edge, the single ghost cell with the **same** semantics as
+    ``pad_fields_mlx`` (zero on PML/PEC axes, the wrapped neighbour on periodic axes). The result
+    feeds ``interpolate_fields_mlx`` unchanged, which strips the halo back to exactly the region.
+    """
+    full = field.shape  # (3, Nx, Ny, Nz)
+    out = field
+    for a in range(3):
+        axis = a + 1
+        n = full[axis]
+        s, e = _bounds(grid_slice[a], n)
+        core = _sl(out, max(0, s - 1), min(n, e + 1), axis)
+        parts = [core]
+        if s == 0:  # low domain edge -> synthesize the pad ghost
+            ghost = _sl(out, n - 1, n, axis) if periodic_axes[a] else mx.zeros_like(_sl(out, 0, 1, axis))
+            parts = [ghost, *parts]
+        if e >= n:  # high domain edge
+            ghost = _sl(out, 0, 1, axis) if periodic_axes[a] else mx.zeros_like(_sl(out, 0, 1, axis))
+            parts = [*parts, ghost]
+        out = mx.concatenate(parts, axis=axis) if len(parts) > 1 else core
+    return out
+
+
+def _slice_interp_widths(interp_widths, grid_slice: tuple):
+    """Crop the per-axis ``(cur_half, prev_half)`` weight tables to the detector region so the
+    weighted backward-average lines up with the region output. ``None`` (uniform) passes through."""
+    if interp_widths is None:
+        return None
+    out = []
+    for a in range(3):
+        cur, prev = interp_widths[a]
+        s, e = _bounds(grid_slice[a], cur.shape[a])
+        out.append((_sl(cur, s, e, a), _sl(prev, s, e, a)))
+    return tuple(out)
+
+
+def interpolate_region_mlx(
+    E_raw: mx.array,
+    H_prev: mx.array,
+    H_cur: mx.array,
+    grid_slice: tuple,
+    periodic_axes: tuple,
+    interp_widths,
+) -> tuple[mx.array, mx.array]:
+    """Co-locate E and the time-averaged H onto the E_z point, but only over a detector's
+    ``grid_slice`` (+ the 1-cell halo the stencil reads). Element-wise identical to slicing the
+    full-domain ``interpolate_fields_mlx`` to the region: the H time-average commutes with the
+    windowed pad (``0.5*(pad(H_prev)+pad(H_cur)) == pad(0.5*(H_prev+H_cur))``)."""
+    E_sub = _region_padded_block(E_raw, grid_slice, periodic_axes)
+    H_sub = 0.5 * (
+        _region_padded_block(H_prev, grid_slice, periodic_axes) + _region_padded_block(H_cur, grid_slice, periodic_axes)
+    )
+    return interpolate_fields_mlx(E_sub, H_sub, _slice_interp_widths(interp_widths, grid_slice))

@@ -17,12 +17,11 @@ with periodic ``mx.eval``.
 from __future__ import annotations
 
 import mlx.core as mx
+import numpy as np
 
 from fdtdx.mlx.accumulate import update_detectors
-from fdtdx.mlx.curl import pad_fields_mlx
 from fdtdx.mlx.detector_freeze import DetectorPlan
 from fdtdx.mlx.inject import inject_sources_E, inject_sources_H
-from fdtdx.mlx.interpolate import interpolate_fields_mlx
 from fdtdx.mlx.kernels import build_kernel_cores, kernel_eligible
 from fdtdx.mlx.source_freeze import SourcePlan
 from fdtdx.mlx.state import MLXState
@@ -88,6 +87,14 @@ def run_forward_mlx(
     dispersive = state.dispersive_c1 is not None
     e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step, use_metal_kernel)
 
+    # Per-step "does any detector record this step?" mask. When false the whole interpolation +
+    # accumulation block is skipped (it interpolated only to be discarded). Detector DFT
+    # subsampling (detector_freeze) makes this sparse for phasor monitors.
+    if record:
+        any_active = np.zeros(num_steps, dtype=bool)
+        for p in detector_plans:
+            any_active |= np.asarray(p.on_steps)[:num_steps].astype(bool)
+
     for n in range(num_steps):
         H_prev = state.H
 
@@ -113,14 +120,18 @@ def run_forward_mlx(
         state.H = H
         state.psi_H = psi_H
 
-        if record:
-            E_interp, H_interp = interpolate_fields_mlx(
-                pad_fields_mlx(state.E, state.periodic_axes),
-                pad_fields_mlx((H_prev + state.H) / 2.0, state.periodic_axes),
-                state.interp_widths,
-            )
+        if record and any_active[n]:
             update_detectors(
-                detector_plans, detector_buffers, E_interp, H_interp, state.E, state.H, state.inv_eps, state.inv_mu, n
+                detector_plans,
+                detector_buffers,
+                state.E,
+                H_prev,
+                state.H,
+                state.inv_eps,
+                state.inv_mu,
+                n,
+                state.periodic_axes,
+                state.interp_widths,
             )
 
         if (n + 1) % eval_every == 0:

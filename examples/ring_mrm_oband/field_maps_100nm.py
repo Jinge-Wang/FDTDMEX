@@ -12,8 +12,8 @@ chapter that benefits from being shown at the operating gap rather than the 180 
 isolating it keeps the main notebook's runtime down. The geometry/scene helpers are copied verbatim
 from the main script so the device is byte-for-byte identical.
 
-Run (≈25 min at the 25 nm gap-sweep grid on the current Metal engine; set MRM_FMRES for a coarser/
-faster preview):
+Run (≈6 min at the 25 nm gap-sweep grid on the current Metal engine — was ~25 min before the
+monitor-recording optimization; set MRM_FMRES for a coarser/faster preview):
 
     cd examples/ring_mrm_oband
     uv run --extra viz python field_maps_100nm.py
@@ -34,6 +34,10 @@ from fdtdx.objects.static_material.polygon import extruded_polygon_from_gds_path
 
 FIG = os.path.join(os.path.dirname(__file__) if "__file__" in globals() else ".", "figures")
 os.makedirs(FIG, exist_ok=True)
+
+# Optional artifact-name suffix so an optimized re-run writes alongside (not over) the saved
+# reference baseline: set MRM_OUT_SUFFIX=_optimized to get field_maps_100nm_optimized.{png,_data.npz}.
+SUFFIX = os.environ.get("MRM_OUT_SUFFIX", "")
 
 # Materials + geometry — identical to ring_mrm_oband.py.
 N_SI, N_OX = 3.476, 1.444
@@ -145,7 +149,7 @@ def build_scene(res, gap, band, settle, with_ring=True, xy_wls=None):
 
 
 def net_power(state, prop_axis=0):
-    """Per-frequency net Poynting flux  ½·Re ∮ (E×H*)·n̂ dA  through the monitor plane (E/H phasors)."""
+    """Per-frequency net Poynting flux  ½·Re ∮ (ExH*)·n̂ dA  through the monitor plane (E/H phasors)."""
     ph = np.asarray(state["phasor"])[0]                 # (n_freq, 6, *plane)
     E, H = ph[:, :3], ph[:, 3:]
     ax, ay = [1, 2, 0][prop_axis], [2, 0, 1][prop_axis]
@@ -181,7 +185,7 @@ def make_figure(E2, eps_xy, on_idx=0, off_idx=1):
         ax.set_xticks([]); ax.set_yticks([])
     fig.suptitle(f"Operating gap ({GAP * 1e9:.0f} nm): light circulating in the ring on resonance; "
                  f"passing to the through port off resonance")
-    out = os.path.join(FIG, f"field_maps_{GAP * 1e9:.0f}nm.png")    # filename carries the gap size
+    out = os.path.join(FIG, f"field_maps_{GAP * 1e9:.0f}nm{SUFFIX}.png")    # filename carries the gap size
     fig.savefig(out, dpi=120, bbox_inches="tight")
     print(f"  wrote {out}")
 
@@ -195,7 +199,7 @@ def main():
     on_idx, off_idx = int(P_thru.argmin()), int(P_thru.argmax())
     print("  through-port P(λ): " + "  ".join(f"{nm[i]:.0f}:{P_thru[i] / P_thru.max():.2f}" for i in range(len(nm))))
     print(f"  resonance {nm[on_idx]:.1f} nm (through-port dip)   off {nm[off_idx]:.1f} nm (peak)")
-    np.savez(os.path.join(FIG, f"field_maps_{GAP * 1e9:.0f}nm_data.npz"),
+    np.savez(os.path.join(FIG, f"field_maps_{GAP * 1e9:.0f}nm{SUFFIX}_data.npz"),
              E2=E2, eps_xy=eps_xy, P_thru=P_thru, wls_nm=nm)    # so the on/off pick can be re-plotted
     make_figure(E2, eps_xy, on_idx, off_idx)
 

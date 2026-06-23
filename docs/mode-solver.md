@@ -16,7 +16,7 @@ Standard full-vectorial transverse-E finite-difference operator on a 2-D Yee mes
 ## Capability and limits
 
 - **Supported:** straight waveguide; uniform **and** rectilinear transverse grids; isotropic and diagonally-anisotropic permittivity/permeability; `te`/`tm` filter; `mode_index`; PEC/PMC symmetry.
-- **Deferred (auto-route to Tidy3D):** fully tensorial (off-diagonal) media — the 4N×4N complex tensorial solver, which even Tidy3D's base package defers to a paid extra — and bends / PML leaky modes.
+- **Deferred (auto-route to Tidy3D):** fully tensorial (off-diagonal) media — the 4Nx4N complex tensorial solver, which even Tidy3D's base package defers to a paid extra — and bends / PML leaky modes.
 
 ## Validation (physics, not byte-parity)
 
@@ -24,4 +24,4 @@ Standard full-vectorial transverse-E finite-difference operator on a 2-D Yee mes
 
 ## Subpixel smoothing
 
-The solver consumes pre-smoothed cross-section tensors when provided (the subpixel-smoothing seam, [subpixel-smoothing.md](subpixel-smoothing.md)); feeding a smoothed interface cuts the staircase n_eff error ~15×. Reference: [`reference/oe-10-17-853.pdf`](../../reference/oe-10-17-853.pdf).
+The solver consumes pre-smoothed cross-section tensors when provided (the subpixel-smoothing seam, [subpixel-smoothing.md](subpixel-smoothing.md)); feeding a smoothed interface cuts the staircase n_eff error ~15x. Reference: [`reference/oe-10-17-853.pdf`](../../reference/oe-10-17-853.pdf).

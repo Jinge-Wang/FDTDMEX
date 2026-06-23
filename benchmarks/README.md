@@ -33,7 +33,7 @@ Per `(backend, material, size)` cell: median wall-clock of `run_fdtd` over `--re
 
 These dissect *why* the MLX engine performs as it does (see [`docs/performance.md`](../docs/performance.md)):
 
-- **`profile_engine.py`** — times the *real* engine loop in a 2×2 of `mx.compile` × CPML (and, with `--kernel`, the M2 custom-Metal-kernel path), and reports the implied **DRAM round-trips per step** at the measured 240 GB/s roofline. This is the per-fix audit: each fix must drop RT/step by its predicted amount.
+- **`profile_engine.py`** — times the *real* engine loop in a 2x2 of `mx.compile` x CPML (and, with `--kernel`, the M2 custom-Metal-kernel path), and reports the implied **DRAM round-trips per step** at the measured 240 GB/s roofline. This is the per-fix audit: each fix must drop RT/step by its predicted amount.
 - **`profile_metal.py`** — measures achieved bandwidth from *known* traffic (coalesced copy vs strided roll; component-leading vs component-last layout) and an eager-vs-compiled / eval-frequency probe. Establishes the roofline denominator.
 - **`profile_memory.py`** — one `(backend, N)` per fresh subprocess for a clean peak-memory high-water mark (loop a driver over N to find where each backend hits the memory wall).
 

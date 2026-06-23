@@ -46,7 +46,7 @@ for t in range(num_steps):
 
 ## Material tensor consumption
 
-Full-anisotropic updates do a per-cell 3×3 solve `E_new = A·E_old + B·curl(H)` where off-diagonal terms couple components living at different Yee locations — so they need **spacing-weighted interpolation** of the other components to the target location (see `fdtd/misc.py` in `../fdtdx` for the structure; improve the averaging to be spacing-weighted). Subpixel smoothing (WS-C) emits exactly these per-cell tensors, including for nominally isotropic geometry at tilted interfaces.
+Full-anisotropic updates do a per-cell 3x3 solve `E_new = A·E_old + B·curl(H)` where off-diagonal terms couple components living at different Yee locations — so they need **spacing-weighted interpolation** of the other components to the target location (see `fdtd/misc.py` in `../fdtdx` for the structure; improve the averaging to be spacing-weighted). Subpixel smoothing (WS-C) emits exactly these per-cell tensors, including for nominally isotropic geometry at tilted interfaces.
 
 ## Common pitfalls
 

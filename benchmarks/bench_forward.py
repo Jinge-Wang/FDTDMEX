@@ -161,6 +161,26 @@ def build_case(material: str, n: int, args):
         det = fdtdx.EnergyDetector(name="energy", reduce_volume=True, plot=False)
         constraints.extend([det.same_size(vol, axes=(0, 1, 2)), det.place_at_center(vol, axes=(0, 1, 2))])
         objects.append(det)
+    elif args.detector == "phasor":
+        # A full in-plane (None, None, 1) phasor slice — the recording-overhead axis from the
+        # performance roadmap (§3.2.1): exercises the per-step region interpolation + DFT accumulate
+        # that dominate monitored runs, on the same grid as the bulk-kernel RT measurement.
+        det = fdtdx.PhasorDetector(
+            name="phasor",
+            wave_characters=(fdtdx.WaveCharacter(wavelength=args.wavelength),),
+            components=("Ex", "Ey", "Ez", "Hx", "Hy", "Hz"),
+            partial_grid_shape=(None, None, 1),
+            reduce_volume=False,
+            plot=False,
+        )
+        constraints.extend(
+            [
+                det.same_size(vol, axes=(0, 1)),
+                det.place_at_center(vol, axes=(0, 1)),
+                det.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(n // 2,)),
+            ]
+        )
+        objects.append(det)
 
     key = jax.random.PRNGKey(0)
     oc, arrays, params, config, _ = fdtdx.place_objects(

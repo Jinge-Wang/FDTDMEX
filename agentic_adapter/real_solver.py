@@ -194,7 +194,7 @@ def _build_scene(knobs: dict, band: tuple[float, float, int], settle: float):
 
 
 def _net_power(phasor: np.ndarray, prop_axis: int = 0) -> np.ndarray:
-    """Per-frequency net Poynting flux ½·Re ∮(E×H*)·n̂ through the monitor plane."""
+    """Per-frequency net Poynting flux ½·Re ∮(ExH*)·n̂ through the monitor plane."""
     ph = np.asarray(phasor)[0]            # (n_freq, 6, *plane)
     E, H = ph[:, :3], ph[:, 3:]
     ax, ay = [1, 2, 0][prop_axis], [2, 0, 1][prop_axis]

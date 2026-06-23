@@ -15,7 +15,7 @@ On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the 
 The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**, and a native mode solver, a notebook front end, and a portable HDF5 hand-off are in place. **The plan for the next phase lives in [ACTION_PLAN.md](dev-docs/ACTION_PLAN.md).**
 
 **What FDTDMEX adds over fdtdx**
-- **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution. Full anisotropy, lossy + 9-tensor conductivity, CPML / periodic / PEC-PMC boundaries, and Drude–Lorentz dispersion all run on Metal.
+- **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7x faster than JAX-CPU** and the lead grows (no plateau) with resolution. Full anisotropy, lossy + 9-tensor conductivity, CPML / periodic / PEC-PMC boundaries, and Drude–Lorentz dispersion all run on Metal.
 - **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous domains that saturate a discrete GPU's VRAM still fit.
 - **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, interpolation, and off-diagonal averaging; *more correct* than upstream, which leaves the off-diagonal average unweighted (1st-order).
 - **Native full-vectorial mode solver** (no Tidy3D dependency), a **mode-expansion monitor**, a `Scene` facade with interactive **3D visualization**, and a **portable HDF5 contract** (`sim_init` → `sim_run` → `sim_postproc`) for remote / agent-driven runs.
@@ -28,13 +28,13 @@ The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**,
 
 ## Why a Mac fork
 
-Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT) — so on a Mac, fdtdx runs on CPU. FDTDMEX closes that gap by running the forward time loop **natively on Metal via MLX**. The strongest case for Apple Silicon here is **memory, not just compute**: a fully-anisotropic simulation stores a 3×3 permittivity tensor *per voxel* (~9× the isotropic footprint), which saturates the VRAM of a single discrete GPU. Apple's **unified memory** (up to 512 GB) lets the GPU address the whole domain directly. FDTDMEX leans into that for large *forward* runs, while **inverse design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
+Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT) — so on a Mac, fdtdx runs on CPU. FDTDMEX closes that gap by running the forward time loop **natively on Metal via MLX**. The strongest case for Apple Silicon here is **memory, not just compute**: a fully-anisotropic simulation stores a 3x3 permittivity tensor *per voxel* (~9x the isotropic footprint), which saturates the VRAM of a single discrete GPU. Apple's **unified memory** (up to 512 GB) lets the GPU address the whole domain directly. FDTDMEX leans into that for large *forward* runs, while **inverse design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
 
 **What stays compatible.** The backend is purely additive — the same `import fdtdx`, the same front end, the same object/constraint API, the same `run_fdtd`. On a supported forward run the field/material arrays are bridged to MLX once, a pure-MLX time loop runs, and the results (fields + `detector_states`) bridge back **unchanged**, so all downstream code (detector reading, plotting, S-parameters) is identical. Every supported feature is checked element-wise against the JAX engine, and improvements can flow back upstream.
 
 ## Performance & accuracy
 
-**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128** — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs at the memory-bandwidth floor — and *beating* that floor (interior temporal blocking, per-subdivision material compaction, monitor-traffic reduction) is the next engine focus alongside the agentic workflow, targeting a much larger speedup ([roadmap](dev-docs/roadmap.md)).
+**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1x faster than JAX-CPU at N ≥ 128** — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs at the memory-bandwidth floor — and *beating* that floor (interior temporal blocking, per-subdivision material compaction, monitor-traffic reduction) is the next engine focus alongside the agentic workflow, targeting a much larger speedup ([roadmap](dev-docs/roadmap.md)).
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](benchmarks/figures/forward_scaling.png)
 
@@ -72,7 +72,7 @@ uv sync --extra viz     # + plotly / pyvista / trame
 
 ## Quickstart
 
-A plane wave transmitted through an isotropic dielectric slab, with absorbing (CPML) boundaries. This is a **high-resolution 3-D run** (≈240³ cells) — exactly the regime where the Metal engine is ~6.5–7× over JAX-CPU on a Mac (raise the resolution and the lead grows). Runs on Metal on Apple Silicon, on JAX elsewhere — no code change.
+A plane wave transmitted through an isotropic dielectric slab, with absorbing (CPML) boundaries. This is a **high-resolution 3-D run** (≈240³ cells) — exactly the regime where the Metal engine is ~6.5–7x over JAX-CPU on a Mac (raise the resolution and the lead grows). Runs on Metal on Apple Silicon, on JAX elsewhere — no code change.
 
 ```python
 import jax
@@ -153,7 +153,7 @@ print(arrays.detector_states["T"])   # transmitted flux vs time
 
 ![field maps at the 100 nm operating gap](examples/ring_mrm_oband/figures/field_maps_100nm.png)
 
-See the example [README](examples/ring_mrm_oband/README.md) to run it (≈5 h at 20 nm for entire sweep; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
+See the example [README](examples/ring_mrm_oband/README.md) to run it (~1–1.5 h at 20 nm for the entire sweep after the monitor-recording optimization; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
 
 ## Relationship to upstream
 

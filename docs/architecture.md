@@ -4,7 +4,7 @@
 
 FDTDMEX is a **forward** FDTD Maxwell solver that runs on **MLX/Metal** on a single Apple-Silicon machine. It is a fork of [fdtdx](https://github.com/ymahlau/fdtdx): the entire front end — geometry, GDS import, constraints, materials, sources, detectors, boundaries — is fdtdx's, and the MLX backend is purely additive. On a Mac, a supported forward `run_fdtd` runs the time loop natively on the GPU; everything else runs the unchanged JAX engine.
 
-The thesis is **memory, not just compute**: Apple unified memory (up to 512 GB) lets the GPU address a whole large, full-tensor anisotropic domain — whose per-voxel 3×3 ε tensors (~9× the isotropic footprint) overflow or thrash a single CUDA GPU's VRAM/PCIe.
+The thesis is **memory, not just compute**: Apple unified memory (up to 512 GB) lets the GPU address a whole large, full-tensor anisotropic domain — whose per-voxel 3x3 ε tensors (~9x the isotropic footprint) overflow or thrash a single CUDA GPU's VRAM/PCIe.
 
 **Out of scope:** gradient-based inverse design on Metal. That needs cluster-scale parallelism and stays on JAX/CUDA, so the MLX backend is forward-only — a large simplification (no reversible-gradient machinery to port).
 

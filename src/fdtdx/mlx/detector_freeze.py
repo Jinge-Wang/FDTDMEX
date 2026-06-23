@@ -12,6 +12,8 @@ are host-precomputed; the phasor accumulates into a single latent row.
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass, field
 
 import mlx.core as mx
@@ -21,6 +23,11 @@ from fdtdx.objects.detectors.energy import EnergyDetector
 from fdtdx.objects.detectors.field import FieldDetector
 from fdtdx.objects.detectors.phasor import PhasorDetector
 from fdtdx.objects.detectors.poynting_flux import PoyntingFluxDetector
+
+# Oversampling margin for phasor DFT auto-subsampling: keep ~k samples per period of the highest
+# recorded frequency. The FDTD dt is already ~10-20x below that Nyquist, so a stride > 1 still
+# leaves a comfortable margin while cutting per-step recording/interpolation by that factor.
+_DFT_OVERSAMPLE = 12
 
 _DTYPE_MAP = {
     "float32": mx.float32,
@@ -128,20 +135,46 @@ def _poynting_plan(d: PoyntingFluxDetector, config) -> DetectorPlan:
     return plan
 
 
+def _dft_stride(omega: np.ndarray, dt: float) -> int:
+    """Steps between phasor samples. ``FDTDMEX_DFT_STRIDE`` overrides (``=1`` forces every step,
+    the exact-parity mode the element-wise oracle tests use); otherwise auto from the highest
+    frequency: keep ~``_DFT_OVERSAMPLE`` samples per its period, ``floor(1/(k*f_max*dt))``."""
+    env = os.environ.get("FDTDMEX_DFT_STRIDE")
+    if env is not None:
+        return max(1, int(env))
+    f_max = float(np.max(np.abs(omega))) / (2.0 * np.pi)
+    if f_max <= 0.0 or dt <= 0.0:
+        return 1
+    return max(1, math.floor(1.0 / (_DFT_OVERSAMPLE * f_max * dt)))
+
+
 def _phasor_plan(d: PhasorDetector, config) -> DetectorPlan:
     dt = float(config.time_step_duration)
     num_steps = int(config.time_steps_total)
     omega = np.asarray(d._angular_frequencies)  # (num_freqs,)
     times = np.arange(num_steps, dtype=np.float64) * dt
     phasors = np.exp(1j * omega[None, :] * times[:, None]).astype(np.complex64)  # (T, num_freqs)
+
+    common = _common(d, "phasor", "phasor")
+    # Auto-subsample the running DFT: keep every ``stride``-th otherwise-active step. The phasor
+    # table is indexed by the global step, so it stays correct on the kept steps; only ``on_steps``
+    # is thinned. Each kept sample then stands in for ``stride`` steps, so the normalization gains a
+    # factor ``stride`` (the Riemann-sum weight) to match the every-step magnitude.
+    stride = _dft_stride(omega, dt)
+    if stride > 1:
+        on = common["on_steps"].astype(bool)
+        kept = np.zeros_like(on)
+        kept[np.nonzero(on)[0][::stride]] = True
+        common["on_steps"] = kept
+
     if d.scaling_mode == "continuous":
-        static_scale = 2.0 / int(d._num_time_steps_on)
+        static_scale = (2.0 / int(d._num_time_steps_on)) * stride
     elif d.scaling_mode == "pulse":
-        static_scale = 1.0
+        static_scale = 1.0 * stride
     else:
         raise NotImplementedError(f"PhasorDetector scaling_mode={d.scaling_mode!r} not supported on MLX yet")
     return DetectorPlan(
-        **_common(d, "phasor", "phasor"),
+        **common,
         cell_volume_weights=_to_mx(d._cached_cell_volume_weights),
         component_picks=[_COMPONENT_PICKS[c] for c in d.components],
         phasors=_to_mx(phasors),

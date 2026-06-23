@@ -8,7 +8,7 @@ Port the **forward numerical hot loop** (~1.5–3k lines of fdtdx's ~25k) and **
 
 ## The race-free advantage (why MLX makes this easy)
 
-fdtdx's updates are **functional / out-of-place**: each step computes a new `E` from the *old* `E`/`H` and returns it; the anisotropic averages read the *old* padded `E`. Nothing mutates in place, so there is **no read-after-write hazard** between neighbouring cells — the framework effectively double-buffers. MLX is the same functional model, so FDTDMEX inherits race-freedom **for free**: no ping-pong buffers, no atomics, no update-ordering constraints (the exact pain points of a hand-written CUDA kernel). The cost is a transient ~2× field memory + bandwidth, reclaimed by MLX's caching allocator / `mx.compile` buffer reuse — negligible on unified memory.
+fdtdx's updates are **functional / out-of-place**: each step computes a new `E` from the *old* `E`/`H` and returns it; the anisotropic averages read the *old* padded `E`. Nothing mutates in place, so there is **no read-after-write hazard** between neighbouring cells — the framework effectively double-buffers. MLX is the same functional model, so FDTDMEX inherits race-freedom **for free**: no ping-pong buffers, no atomics, no update-ordering constraints (the exact pain points of a hand-written CUDA kernel). The cost is a transient ~2x field memory + bandwidth, reclaimed by MLX's caching allocator / `mx.compile` buffer reuse — negligible on unified memory.
 
 ## What to port
 
@@ -16,7 +16,7 @@ fdtdx's updates are **functional / out-of-place**: each step computes a new `E` 
 |---|---|---|
 | `core/physics/curl.py` | `mlx/curl.py` | make spacing-weighted (non-uniform grids) |
 | `fdtd/update.py` (E/H, iso/diag + 9-tensor) | `mlx/update.py` | keep both the fast path and the full-anisotropic path |
-| `fdtd/misc.py` (`compute_anisotropic_update_matrices`, `avg_anisotropic_*`) | `mlx/aniso.py` | per-cell 3×3 solve; off-diagonal interp → spacing-weighted |
+| `fdtd/misc.py` (`compute_anisotropic_update_matrices`, `avg_anisotropic_*`) | `mlx/aniso.py` | per-cell 3x3 solve; off-diagonal interp → spacing-weighted |
 | `objects/boundaries/perfectly_matched_layer.py` | `mlx/pml.py` | CPML ψ recurrences |
 | `objects/sources/*` (inject path) | `mlx/source_freeze.py` + `inject.py` | only the needed source types |
 | `objects/detectors/*` | `mlx/detector_freeze.py` + `accumulate.py` | phasor→complex; diffractive→`mx.fft` |

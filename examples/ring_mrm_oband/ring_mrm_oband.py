@@ -156,7 +156,7 @@ def build_scene(res, gap, band, settle, with_ring=True, xy_wls=None):
 
 
 def net_power(state, prop_axis=0):
-    """Per-frequency net Poynting flux  ½·Re ∮ (E×H*)·n̂ dA  through the monitor plane."""
+    """Per-frequency net Poynting flux  ½·Re ∮ (ExH*)·n̂ dA  through the monitor plane."""
     ph = np.asarray(state["phasor"])[0]                 # (n_freq, 6, *plane)
     E, H = ph[:, :3], ph[:, 3:]
     ax, ay = [1, 2, 0][prop_axis], [2, 0, 1][prop_axis]
@@ -374,7 +374,7 @@ fig_gap
 # ## Operating-gap field maps
 # At the operating gap (100 nm — the deepest-extinction point of the sweep) the resonant field is
 # clearest: `|E|²` at the silicon-core mid-plane circulates **inside the ring** on resonance and **passes
-# straight through the bus** off resonance. Produced by a separate ~25 min Metal run,
+# straight through the bus** off resonance. Produced by a separate ~6 min Metal run,
 # [`field_maps_100nm.py`](field_maps_100nm.py): it records the through-port spectrum and the field at the
 # same wavelengths and reads on-resonance = the through-port dip (≈1307 nm, the resonance the gap sweep
 # shows) and off-resonance = the transmission peak (≈1298 nm). Shown here rather than re-run in the study.

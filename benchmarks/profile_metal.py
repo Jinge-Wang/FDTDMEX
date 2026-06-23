@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Metal GPU bottleneck profiler — *measure* why the MLX FDTD step misses the roofline.
 
-The perf-baseline §1a story ("~3% of 273 GB/s", "~4.3× headroom") is inferred from a
+The perf-baseline §1a story ("~3% of 273 GB/s", "~4.3x headroom") is inferred from a
 wall-clock decomposition; nobody measured the GPU. This script measures the things that
 were assumed:
 

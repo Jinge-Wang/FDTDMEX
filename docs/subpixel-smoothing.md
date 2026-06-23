@@ -17,7 +17,7 @@ References (public-domain): Farjadpour et al., *Opt. Lett.* 31, 2972 (2006); Kot
 ## API and validation
 
 - `smooth_inverse_permittivity(eps_fine, factor) → (9, Nx, Ny, Nz)` and the 2-D mode-solver wrapper `smooth_cross_section_2d(eps_fine_2d, factor) → (9, Nx, Ny)`. Both exported from `fdtdx`.
-- [`../tests/validation/test_subpixel.py`](../tests/validation/test_subpixel.py): a 50/50 cell matches the analytic effective medium exactly; uniform cells stay isotropic; a 45° interface gives the expected off-diagonal tensor; and feeding the smoothed tensor to the native mode solver cuts the off-grid-slab n_eff staircase error ~15×.
+- [`../tests/validation/test_subpixel.py`](../tests/validation/test_subpixel.py): a 50/50 cell matches the analytic effective medium exactly; uniform cells stay isotropic; a 45° interface gives the expected off-diagonal tensor; and feeding the smoothed tensor to the native mode solver cuts the off-grid-slab n_eff staircase error ~15x.
 
 ## Integration
 

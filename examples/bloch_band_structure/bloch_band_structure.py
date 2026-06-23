@@ -174,7 +174,7 @@ def run_bloch_k(k_norm: float, key: jax.Array) -> tuple[np.ndarray, np.ndarray]:
         object_list.append(_src)
 
     # ── Column field detector spanning the full z extent ───────────────────────
-    # A 1×1×Nz detector records Ex(z, t) at every cell along the propagation
+    # A 1x1xNz detector records Ex(z, t) at every cell along the propagation
     # axis.  After the simulation we FFT over time at each z cell and sum the
     # spectral power over z.  Because every mode has non-zero amplitude at some
     # z, the summed spectrum cannot miss a mode due to node placement — unlike a
