@@ -9,7 +9,7 @@ and therefore 2nd-order.
 
 This measures the interpolation error of both forms on a strongly graded (alternating-width)
 mesh under refinement, asserts the convergence orders (~2 weighted, ~1 unweighted), and saves a
-log-log convergence figure to the output dir (``$FDTDMEX_VIZ_DIR`` or ``<repo>/outputs``).
+log-log convergence figure to the output dir (``$FDTDMEX_VIZ_DIR`` or ``tests/visualization/figures/``).
 
 Runs on MLX (the average is an MLX kernel); skipped off Apple Silicon / without mlx.
 """
@@ -82,7 +82,7 @@ def _interp_error(n_pairs, weighted):
 
 
 def _output_dir() -> pathlib.Path:
-    default = pathlib.Path(__file__).resolve().parents[2] / "outputs"
+    default = pathlib.Path(__file__).resolve().parent / "figures"
     d = pathlib.Path(os.environ.get("FDTDMEX_VIZ_DIR", default))
     d.mkdir(parents=True, exist_ok=True)
     return d

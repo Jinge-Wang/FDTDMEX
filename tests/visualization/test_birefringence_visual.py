@@ -8,7 +8,7 @@ of birefringence.
 
 Runs on the MLX (Metal) backend, asserts the measured ordinary/extraordinary wavevectors in
 the slab match n_o / n_e, and saves a figure (Re(Ex), Re(Ey), |E|) to the output dir
-(``$FDTDMEX_VIZ_DIR`` or ``<repo>/outputs``).
+(``$FDTDMEX_VIZ_DIR`` or ``tests/visualization/figures/``).
 """
 
 import os
@@ -108,7 +108,7 @@ def _kz_in_slab(comp_phasor, cy):
 
 
 def _output_dir() -> pathlib.Path:
-    default = pathlib.Path(__file__).resolve().parents[2] / "outputs"
+    default = pathlib.Path(__file__).resolve().parent / "figures"
     d = pathlib.Path(os.environ.get("FDTDMEX_VIZ_DIR", default))
     d.mkdir(parents=True, exist_ok=True)
     return d

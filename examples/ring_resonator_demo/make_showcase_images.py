@@ -1,8 +1,8 @@
 """Generate the showcase images used in the README from the ring-resonator demo.
 
-Run once to (re)create ``docs/images/*.png``::
+Run once to (re)create the figures in ``examples/ring_resonator_demo/figures/``::
 
-    uv run python examples/make_showcase_images.py
+    uv run python examples/ring_resonator_demo/make_showcase_images.py
 
 Produces: the top-down layout, a 3D voxel view of the resolved permittivity, the injected bus mode,
 the modal-transmission (mode-expansion) bars, and the analytical-vs-FDTD ring response. The grid is the
@@ -30,7 +30,7 @@ from fdtdx.utils.sparams import PortSpec, determine_input_norm_detector_name, se
 
 warnings.filterwarnings("ignore")
 HERE = os.path.dirname(__file__)
-OUT = os.path.join(HERE, "..", "docs", "images")
+OUT = os.path.join(HERE, "figures")
 os.makedirs(OUT, exist_ok=True)
 
 WAVELENGTH, SLAB_T = 1.55e-6, 0.22e-6

@@ -9,7 +9,7 @@ Produces a 4-panel figure:
 
 Usage:
     uv run python benchmarks/plot_results.py benchmarks/results/<file>.jsonl
-    uv run python benchmarks/plot_results.py <file>.jsonl --out outputs/forward_scaling.png
+    uv run python benchmarks/plot_results.py <file>.jsonl --out benchmarks/figures/forward_scaling.png
 """
 
 from __future__ import annotations

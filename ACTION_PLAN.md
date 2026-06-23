@@ -33,7 +33,7 @@ Goal: fast, large *forward* simulations on a single Mac; inverse design stays on
   smoothing (validated; standalone utility, not yet auto-applied during placement).
 - **Notebook front end.** `Scene` facade ([`scene.py`](src/fdtdx/scene.py)), interactive 3D
   ([`utils/plot_setup_3d.py`](src/fdtdx/utils/plot_setup_3d.py)), and the matplotlib utilities
-  (`plot_setup`, `plot_material`, `plot_mode`). Tour: [`examples/ring_resonator_demo.ipynb`](examples/ring_resonator_demo.ipynb).
+  (`plot_setup`, `plot_material`, `plot_mode`). Tour: [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
 - **Portable HDF5 hand-off.** [`src/fdtdmex/io/`](src/fdtdmex/io/) — `SceneModel` (pydantic facade over
   fdtdx's JSON), and the `sim_init` → `sim_run` → `sim_postproc` trio, with a GPU-free `mock` backend.
   `sim_init → sim_run(mlx)` reproduces a direct `run_fdtd` bit-for-bit.
@@ -81,6 +81,11 @@ open-ended piece.
   parity vs the JAX complex oracle. Gradients stay out of scope.
 - **Production-resolution ring validation** — a converged (≤25 nm) ring run confirming resonance
   positions / FSR quantitatively, as a benchmark.
+  - *In progress:* [`examples/ring_mrm_oband/`](examples/ring_mrm_oband/) — O-band carrier-depletion MRM
+    (build+mode → mesh convergence **40→20 nm** → cold `T(λ)`/Q/ER + field maps → gap sweep / coupling
+    control → Soref–Bennett EO `Δλ(V)`). Runs forward on **Metal** via a Gaussian source + phasor monitors
+    and a **net-Poynting two-run** transmission (mode sources/detectors would force JAX/CPU here). The
+    convergence test establishes the production grid (20 nm); ~1–1.5 h per 20 nm run on the eager MLX loop.
 
 ## Engine map (`src/fdtdx/mlx/` + mode backend + front end)
 

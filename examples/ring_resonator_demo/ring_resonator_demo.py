@@ -30,7 +30,7 @@ import numpy as np
 
 import fdtdx
 from fdtdx.objects.static_material.polygon import extruded_polygon_from_gds_path
-from fdtdx.utils.plot_setup_3d import plot_setup_3d, to_plotly_json
+from fdtdx.utils.plot_setup_3d import plot_setup_3d
 from fdtdx.utils.sparams import PortSpec, setup_sparams_simulation
 
 # Render matplotlib figures inline (no-op when this file is run as a plain script).
@@ -255,6 +255,7 @@ print("\nS-matrix entries (mode-resolved):", {f"{o}←{i}": round(abs(v[0]), 3) 
 from fdtdx.core.physics.mode_backend.operator import build_derivative_matrices
 from fdtdx.core.physics.mode_backend.solve import solve_modes_diagonal
 
+
 def analytic_slab_te0(n_core, n_clad, width, k0):
     """Fundamental even-TE n_eff of a symmetric slab (largest root of κ·tan(κw/2)=γ)."""
     def disp(ne):
@@ -374,6 +375,7 @@ fig_ring
 
 # %%
 from fdtdx.objects.boundaries.initialization import BoundaryConfig, boundary_objects_from_config
+
 
 def build_ring_scene():
     """Background + PML + ring polygons + a Gaussian plane source into the bus + an energy detector."""

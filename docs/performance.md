@@ -4,11 +4,11 @@ Measured reference for the MLX/Metal forward engine on Apple Silicon. fp32 throu
 
 ## Current scaling (M4 Pro)
 
-![Forward scaling — MLX/Metal vs JAX-CPU](images/forward_scaling.png)
+![Forward scaling — MLX/Metal vs JAX-CPU](../benchmarks/figures/forward_scaling.png)
 
 Full `run_fdtd` wall-clock (warmup excluded), 500 steps, **kernel path default-on** (M3). Regenerate:
 `bench_forward.py --backends mlx,jax --materials isotropic,diagonal,full_aniso --sizes 64,96,128,192,256
---steps 500 --repeats 2 --isolate` then `plot_results.py <file>.jsonl --out docs/images/forward_scaling.png`.
+--steps 500 --repeats 2 --isolate` then `plot_results.py <file>.jsonl --out benchmarks/figures/forward_scaling.png`.
 **MLX/Metal leads JAX-CPU for every N ≥ 64 across all three materials, with no plateau:**
 
 | material | MLX Mcs/s (N=192 / 256) | JAX-CPU | speedup | path |

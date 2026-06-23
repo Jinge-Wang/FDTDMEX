@@ -55,12 +55,12 @@ diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster
 — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs
 at the memory-bandwidth floor.
 
-![Forward scaling — MLX/Metal vs JAX-CPU](docs/images/forward_scaling.png)
+![Forward scaling — MLX/Metal vs JAX-CPU](benchmarks/figures/forward_scaling.png)
 
 **Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at
 2nd order on graded meshes (measured slope ≈ 2.0), versus 1st order for an unweighted average.
 
-![Non-uniform grid convergence](docs/images/nonuniform_convergence_mlx.png)
+![Non-uniform grid convergence](tests/visualization/figures/nonuniform_convergence_mlx.png)
 
 See [docs/performance.md](docs/performance.md) and [docs/nonuniform-grid.md](docs/nonuniform-grid.md) for
 the methodology and numbers.
@@ -162,13 +162,13 @@ print(arrays.detector_states["T"])   # transmitted flux vs time
 
 ## Showcase — a silicon ring resonator
 
-The notebook [`examples/ring_resonator_demo.ipynb`](examples/ring_resonator_demo.ipynb) walks a complete
+The notebook [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/) walks a complete
 photonic-IC workflow end to end. It runs on a deliberately **coarse 90 nm grid** so every cell finishes in
 seconds — the figures below are illustrative, not converged.
 
 | Layout (objects + ports) | Resolved geometry (90 nm voxels) |
 |---|---|
-| ![layout](docs/images/ring_layout.png) | ![3D](docs/images/ring_3d.png) |
+| ![layout](examples/ring_resonator_demo/figures/ring_layout.png) | ![3D](examples/ring_resonator_demo/figures/ring_3d.png) |
 
 **Author → see → run → inspect.** Draw the device in **gdstk** (GDS) → convert to fdtdx geometry → view it
 in 2D and interactive **3D** (`plot_setup_3d`) → solve and inject the bus **mode** → recover the
@@ -176,17 +176,28 @@ through-port response as a **mode expansion** (transmission per waveguide mode =
 
 | Injected bus mode | Mode-expansion transmission |
 |---|---|
-| ![mode](docs/images/bus_mode.png) | ![mode expansion](docs/images/mode_expansion.png) |
+| ![mode](examples/ring_resonator_demo/figures/bus_mode.png) | ![mode expansion](examples/ring_resonator_demo/figures/mode_expansion.png) |
 
 **Analytical verification.** The mode solver matches the exact symmetric-slab dispersion to ~2×10⁻⁴, and
 the ring's resonance spacing is checked against the analytical free spectral range `FSR = λ²/(n_g·L)`:
 
-![ring response](docs/images/ring_response.png)
+![ring response](examples/ring_resonator_demo/figures/ring_response.png)
 
 **Portable hand-off.** `sim_init(scene) → config.hdf5` packs the resolved arrays; `sim_run(config.hdf5) →
 results.hdf5` runs them on the Metal engine (or a GPU-free mock); `sim_postproc` reduces them to the small
 quantities an agent or remote client reads. Regenerate the figures with
-[`examples/make_showcase_images.py`](examples/make_showcase_images.py).
+[`examples/ring_resonator_demo/make_showcase_images.py`](examples/ring_resonator_demo/make_showcase_images.py).
+
+## Showcase — O-band carrier-depletion microring modulator
+
+[`examples/ring_mrm_oband/`](examples/ring_mrm_oband/) is a self-contained design-verification of an
+**O-band (1310 nm) carrier-depletion microring modulator**, forward-simulated on the **Metal** engine. It
+authors a racetrack ring + bus, solves the bus TE₀ mode, **converges the mesh from 40 nm to 20 nm**, then
+reports the cold through-port `T(λ)` (resonance, loaded Q, extinction ratio) with `|E|²` field maps showing
+light trapped in the ring on resonance, the coupling control (ER vs bus–ring gap), and a Soref–Bennett
+static electro-optic resonance shift vs reverse bias. To stay on Metal it uses a broadband **Gaussian**
+source + **phasor monitors** with a standing-wave-immune **net-Poynting two-run** transmission. Script and
+figures live together in the folder; see its [README](examples/ring_mrm_oband/README.md) to run it.
 
 ## Relationship to upstream
 

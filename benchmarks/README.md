@@ -20,7 +20,7 @@ uv run python benchmarks/plot_results.py benchmarks/results/forward.jsonl
 
 Results land in `benchmarks/results/<file>.jsonl` (one JSON record per cell, flushed after
 each cell; first line is a metadata record with chip / RAM / mlx & jax versions / device
-split / git commit). Figures land in `outputs/`.
+split / git commit). Figures land where `--out` points (committed copies live in `benchmarks/figures/`).
 
 ### Useful flags
 
