@@ -1,10 +1,6 @@
 # reference/
 
-> **Update (fork pivot):** This repo is now a **fork of fdtdx** — fdtdx's source lives in-tree at
-> `src/fdtdx/` (with the MLX backend added under `src/fdtdx/{backend,mlx}`) and upstream is the
-> `upstream` git remote. So fdtdx is no longer "external"; the sibling `../fdtdx` below is just a
-> pristine read-only reference. MEEP remains an external algorithmic reference. See
-> [docs/decisions/0001-mlx-forward-first.md](../docs/decisions/0001-mlx-forward-first.md).
+> **Update (fork pivot):** This repo is now a **fork of fdtdx** — fdtdx's source lives in-tree at `src/fdtdx/` (with the MLX backend added under `src/fdtdx/{backend,mlx}`) and upstream is the `upstream` git remote. So fdtdx is no longer "external"; the sibling `../fdtdx` below is just a pristine read-only reference. MEEP remains an external algorithmic reference. See [dev-docs/decisions/0001-mlx-forward-first.md](../dev-docs/decisions/0001-mlx-forward-first.md).
 
 The reference projects below live as sibling directories in the development workspace:
 

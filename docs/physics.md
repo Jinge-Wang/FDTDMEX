@@ -1,6 +1,6 @@
 # Physics & Conventions
 
-These conventions mirror FDTDX (the porting source) so cross-checks are exact. Confirm against `../fdtdx` and its skill (`../fdtdx/.claude/skills/fdtdx/SKILL.md`) before changing anything.
+These are the Yee-grid and update conventions the forward engine uses; they match the JAX reference exactly, so the two cross-check element-wise.
 
 ## Yee grid
 
@@ -42,7 +42,7 @@ Material arrays store **inverse** tensors. For the 9-component case the update i
 E^(n+1) = A · E^n + B · curl(H) ,   A = solve(M1, M2), B = c·solve(M1, inv_eps)
 M1 = I + (c·η0/2)·(inv_eps·σ_E),  M2 = I − (c·η0/2)·(inv_eps·σ_E)
 ```
-Because Ex/Ey/Ez live at different Yee locations, off-diagonal terms (e.g. ε⁻¹_xy·E_y at E_x's location) require interpolating the other components to the target location. **In FDTDMEX this interpolation is spacing-weighted** (see [nonuniform-grid.md](nonuniform-grid.md)), unlike FDTDX's unweighted 4-point average. Reference structure: `../fdtdx/src/fdtdx/fdtd/misc.py` and `fdtd/update.py` (lines ~201+ for the 9-tensor path).
+Because Ex/Ey/Ez live at different Yee locations, off-diagonal terms (e.g. ε⁻¹_xy·E_y at E_x's location) require interpolating the other components to the target location. The interpolation is spacing-weighted (see [nonuniform-grid.md](nonuniform-grid.md)), which keeps it 2nd-order accurate on graded meshes.
 
 ## Material representation
 
@@ -56,4 +56,4 @@ CPML (graded σ/κ/α with ψ auxiliary fields), PEC (zero tangential E), PMC (z
 
 ## Stability
 
-CFL: `c·dt·sqrt(Σ 1/Δ_i²) ≤ 1`. On non-uniform grids use the **minimum** spacing. Validate Courant behavior explicitly; if a physics test fails marginally, raise resolution rather than loosen tolerances.
+CFL: `c·dt·sqrt(Σ 1/Δ_i²) ≤ 1`. On non-uniform grids the **minimum** spacing sets the stable time step.

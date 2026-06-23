@@ -39,7 +39,7 @@ def _grid_metrics(config, periodic_axes):
 
     Returns ``(metric_fwd, metric_bwd, interp_widths, aniso_widths)``. On a uniform grid the
     metric tuples are scalar ``1.0`` (the curl fast path) and the weight tables are ``None``
-    (plain means), so the uniform code path is byte-for-byte the M3 path.
+    (plain means), so the uniform code path is byte-for-byte unchanged.
 
     Ports ``fdtdx.core.physics.curl._metric_scale`` (forward stencil for ``curl_E``, backward /
     dual-width stencil for ``curl_H``) and ``_backward_edge_average``'s half-width weights, and

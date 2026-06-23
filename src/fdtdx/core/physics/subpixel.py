@@ -1,4 +1,4 @@
-"""Kottke / Farjadpour subpixel smoothing of a permittivity grid (Phase 4 Track A, WS-C).
+"""Kottke / Farjadpour subpixel smoothing of a permittivity grid.
 
 Smoothing an isotropic material across a tilted interface produces an *anisotropic* effective tensor:
 the inverse permittivity continuous across the interface is the harmonic mean (normal direction), the

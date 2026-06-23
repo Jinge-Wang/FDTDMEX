@@ -2,7 +2,7 @@
 
 Translation of ``fdtdx.core.physics.metrics.compute_energy`` for the non-9-tensor case:
 ``0.5 * sum_i (eps_i |E_i|^2 + mu_i |H_i|^2)`` where eps_i = 1/inv_eps_i. The full-tensor
-energy lands in M3.
+energy.
 """
 
 from __future__ import annotations

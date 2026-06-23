@@ -1,4 +1,4 @@
-"""Tidy3D-free full-vectorial waveguide mode solver (Phase 4 Track A, WS-B).
+"""Tidy3D-free full-vectorial waveguide mode solver.
 
 A drop-in replacement for the Tidy3D mode-solver call used in
 :mod:`fdtdx.core.physics.modes`. :func:`fdtdmex_mode_computation_wrapper` mirrors the signature and

@@ -5,7 +5,7 @@ averaged onto the E_z grid point (i, j, k+1/2) via half-step averages. The backw
 center-to-edge steps (along x and y) use ``_backward_edge_average``, which on a non-uniform
 grid weights the two cell-center samples by the *opposite* half cell widths; the forward
 edge-to-center z step lands on the exact geometric midpoint and stays a plain mean. On a
-uniform grid (``interp_widths is None``) every step is a plain mean, matching M1-M3 exactly.
+uniform grid (``interp_widths is None``) every step is a plain mean, matching the uniform path exactly.
 Inputs are pre-padded (3, Nx+2, Ny+2, Nz+2).
 """
 

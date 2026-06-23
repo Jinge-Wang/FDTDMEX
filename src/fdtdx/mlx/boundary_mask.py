@@ -1,4 +1,4 @@
-"""Phase 3: PEC/PMC boundary keep-masks for the MLX forward loop.
+"""PEC/PMC boundary keep-masks for the MLX forward loop.
 
 PEC zeros tangential E after each E-update; PMC zeros tangential H after each H-update (fdtdx
 ``PerfectElectricConductor.apply_post_E_update`` / ``PerfectMagneticConductor.apply_post_H_update``).

@@ -10,12 +10,11 @@ Routing:
   back. The override is what lets validation run the same case through both backends on one
   Mac (the JAX oracle on CPU).
 - AUTO: MLX iff Apple-Silicon + mlx importable + forward-only + the case uses only
-  features the current milestone supports; otherwise JAX (warn-once on the first decline).
+  features the MLX engine supports; otherwise JAX (warn-once on the first decline).
 
-Milestone gating lives in ``_unsupported_reason`` / ``_unsupported_reason_arrays``; widen it as
-kernels land. The MLX path covers iso/diag/full-tensor anisotropy (incl. lossy + 9-tensor
+Feature gating lives in ``_unsupported_reason`` / ``_unsupported_reason_arrays``. The MLX path covers iso/diag/full-tensor anisotropy (incl. lossy + 9-tensor
 conductivity), CPML + periodic + PEC/PMC boundaries, dipole + (tilted) TFSF plane sources, the four
-detector types, non-uniform (rectilinear) grids, and Drude-Lorentz (ADE) dispersion (Phase 3).
+detector types, non-uniform (rectilinear) grids, and Drude-Lorentz (ADE) dispersion.
 Still gated to JAX: gradients, dispersive/randomized plane sources, Bloch/complex propagation, and
 mode sources/detectors.
 """
@@ -36,7 +35,7 @@ class Backend(str, Enum):
     JAX = "jax"
 
 
-# Source/detector types the MLX engine currently handles. Widened per milestone.
+# Source/detector types the MLX engine currently handles.
 def _supported_source_types() -> tuple:
     from fdtdx.objects.sources.dipole import PointDipoleSource
     from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
@@ -59,8 +58,8 @@ _warned_reasons: set[str] = set()
 def _metal_kernel_enabled() -> bool:
     """Whether the custom-Metal-kernel forward path is enabled (env ``FDTDMEX_METAL_KERNEL``).
 
-    Default **on** (Phase 2 M3: CPML folded into the kernel, non-uniform metric + heterogeneous
-    full-tensor inclusions covered, parity-clean across the eligible surface). The loop still falls
+    Default **on**: CPML is folded into the kernel, with the non-uniform metric and heterogeneous
+    full-tensor inclusions covered across the eligible surface. The loop still falls
     back to the compiled MLX-op cores for any case the kernel can't handle (``kernel_eligible``).
     Set ``FDTDMEX_METAL_KERNEL=0`` (or ``false``/``no``/``off``) to force the MLX-op path.
     """
@@ -78,7 +77,7 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     for b in objects.bloch_objects:
         if b.needs_complex_fields:
             return "Bloch (nonzero-k, complex) boundaries not supported by the MLX backend yet"
-    # PEC/PMC are supported (Phase 3): frozen keep-masks applied post-injection in the loop
+    # PEC/PMC are supported: frozen keep-masks applied post-injection in the loop
     # (fdtdx.mlx.boundary_mask + loop.py), composing with both the Metal kernel and MLX-op cores.
 
     from fdtdx.objects.sources.linear_polarization import LinearlyPolarizedPlaneSource
@@ -112,12 +111,12 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
 
 def _unsupported_reason_arrays(arrays) -> str | None:
     """Material/array-level support checks (need the ArrayContainer)."""
-    # Phase 3: lossy full-tensor (9-component) anisotropy and 9-tensor (full-rank) electric/magnetic
+    # lossy full-tensor (9-component) anisotropy and 9-tensor (full-rank) electric/magnetic
     # conductivity are supported -- the aniso A/B update (``_update_aniso``) consumes ``sigma``
     # directly (``compute_anisotropic_update_matrices_mlx``), so these run on the MLX-op cores (the
     # lossless block-hybrid Metal kernel stays as-is; ``kernel_eligible`` falls these back).
     #
-    # Phase 3 item 3: Drude-Lorentz (ADE) dispersion is supported -- polarization P is threaded
+    # Drude-Lorentz (ADE) dispersion is supported -- polarization P is threaded
     # through the E-side of the loop (``mlx.update._update_E`` / the Metal E-kernel ADE fold), with
     # coefficients carried in ``MLXState``. fdtdx forbids dispersion + off-diagonal tensors, so it is
     # always iso/diagonal: lossless rides the Metal kernel, lossy+dispersive uses the MLX-op cores.
@@ -126,7 +125,7 @@ def _unsupported_reason_arrays(arrays) -> str | None:
 
 
 def select_backend(arrays, objects, config, stopping_condition) -> Backend:
-    """Return the backend to use, honoring forced overrides and milestone gating."""
+    """Return the backend to use, honoring forced overrides and feature gating."""
     override = get_backend_override() or (os.environ.get("FDTDMEX_BACKEND", "").lower() or None)
 
     if override == "jax":

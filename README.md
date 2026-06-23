@@ -2,23 +2,17 @@
 
 **A macOS-native (MLX / Metal) fork of [fdtdx](https://github.com/ymahlau/fdtdx) — forward FDTD on Apple Silicon.**
 
-FDTDMEX is a **fork of fdtdx** (the JAX FDTD Maxwell solver) that adds a native **MLX** backend so the
-*forward* time loop runs on the **Metal GPU with unified memory**. You keep fdtdx's entire mature front
-end — geometry, GDS, constraints, materials, sources, detectors, boundaries — and import it the same way:
+FDTDMEX is a **fork of fdtdx** (the JAX FDTD Maxwell solver) that adds a native **MLX** backend so the *forward* time loop runs on the **Metal GPU with unified memory**. You keep fdtdx's entire mature front end — geometry, GDS, constraints, materials, sources, detectors, boundaries — and import it the same way:
 
 ```python
 import fdtdx   # this fork; the MLX backend is built in
 ```
 
-On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the Metal engine; everywhere
-else (and for gradients / inverse design) it runs the unchanged JAX engine, so results cross-check
-element-wise against the JAX reference.
+On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the Metal engine; everywhere else (and for gradients / inverse design) it runs the unchanged JAX engine, so results cross-check element-wise against the JAX reference.
 
 ## Status
 
-The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**, and a native mode solver,
-a notebook front end, and a portable HDF5 hand-off are in place. **The plan for the next phase lives in
-[ACTION_PLAN.md](ACTION_PLAN.md).**
+The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**, and a native mode solver, a notebook front end, and a portable HDF5 hand-off are in place. **The plan for the next phase lives in [ACTION_PLAN.md](dev-docs/ACTION_PLAN.md).**
 
 **What FDTDMEX adds over fdtdx**
 - **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7× faster than JAX-CPU** and the lead grows (no plateau) with resolution. Full anisotropy, lossy + 9-tensor conductivity, CPML / periodic / PEC-PMC boundaries, and Drude–Lorentz dispersion all run on Metal.
@@ -34,45 +28,27 @@ a notebook front end, and a portable HDF5 hand-off are in place. **The plan for 
 
 ## Why a Mac fork
 
-Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT) — so
-on a Mac, fdtdx runs on CPU. FDTDMEX closes that gap by running the forward time loop **natively on
-Metal via MLX**. The strongest case for Apple Silicon here is **memory, not just compute**: a
-fully-anisotropic simulation stores a 3×3 permittivity tensor *per voxel* (~9× the isotropic footprint),
-which saturates the VRAM of a single discrete GPU. Apple's **unified memory** (up to 512 GB) lets the GPU
-address the whole domain directly. FDTDMEX leans into that for large *forward* runs, while **inverse
-design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
+Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable** on macOS (no JIT) — so on a Mac, fdtdx runs on CPU. FDTDMEX closes that gap by running the forward time loop **natively on Metal via MLX**. The strongest case for Apple Silicon here is **memory, not just compute**: a fully-anisotropic simulation stores a 3×3 permittivity tensor *per voxel* (~9× the isotropic footprint), which saturates the VRAM of a single discrete GPU. Apple's **unified memory** (up to 512 GB) lets the GPU address the whole domain directly. FDTDMEX leans into that for large *forward* runs, while **inverse design stays on CUDA/JAX clusters** (it needs cluster-scale parallelism).
 
-**What stays compatible.** The backend is purely additive — the same `import fdtdx`, the same front end,
-the same object/constraint API, the same `run_fdtd`. On a supported forward run the field/material arrays
-are bridged to MLX once, a pure-MLX time loop runs, and the results (fields + `detector_states`) bridge
-back **unchanged**, so all downstream code (detector reading, plotting, S-parameters) is identical. Every
-supported feature is checked element-wise against the JAX engine, and improvements can flow back upstream.
+**What stays compatible.** The backend is purely additive — the same `import fdtdx`, the same front end, the same object/constraint API, the same `run_fdtd`. On a supported forward run the field/material arrays are bridged to MLX once, a pure-MLX time loop runs, and the results (fields + `detector_states`) bridge back **unchanged**, so all downstream code (detector reading, plotting, S-parameters) is identical. Every supported feature is checked element-wise against the JAX engine, and improvements can flow back upstream.
 
 ## Performance & accuracy
 
-**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and
-diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128**
-— e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs
-at the memory-bandwidth floor.
+**Scaling — MLX/Metal vs JAX-CPU** (M4 Pro, 500 steps). MLX leads for every N ≥ 64 across isotropic and diagonal materials, with **no plateau** as the grid grows: **~6.5–7.1× faster than JAX-CPU at N ≥ 128** — e.g. isotropic at N=192 reaches **≈1.39 GCell·steps/s** vs ≈0.20 on JAX-CPU. The forward update runs at the memory-bandwidth floor.
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](benchmarks/figures/forward_scaling.png)
 
-**Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at
-2nd order on graded meshes (measured slope ≈ 2.0), versus 1st order for an unweighted average.
+**Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at 2nd order on graded meshes (measured slope ≈ 2.0), versus 1st order for an unweighted average.
 
 ![Non-uniform grid convergence](tests/visualization/figures/nonuniform_convergence_mlx.png)
 
-See [docs/performance.md](docs/performance.md) and [docs/nonuniform-grid.md](docs/nonuniform-grid.md) for
-the methodology and numbers.
+See [docs/performance.md](docs/performance.md) and [docs/nonuniform-grid.md](docs/nonuniform-grid.md) for the methodology and numbers.
 
 ## How the backend routing works
 
-The injection point is the **whole forward loop** (you can't interleave JAX tracing and MLX eager
-execution), via a small guarded hook in `run_fdtd`.
+The injection point is the **whole forward loop** (you can't interleave JAX tracing and MLX eager execution), via a small guarded hook in `run_fdtd`.
 
-- **Auto (default):** on Apple Silicon, a forward-only `run_fdtd` whose features are all supported runs on
-  MLX; anything unsupported (see Status) falls back to JAX, warned once. On other platforms `mlx` isn't
-  installed and everything runs on JAX.
+- **Auto (default):** on Apple Silicon, a forward-only `run_fdtd` whose features are all supported runs on MLX; anything unsupported (see Status) falls back to JAX, warned once. On other platforms `mlx` isn't installed and everything runs on JAX.
 - **Force / disable a backend:**
   ```python
   with fdtdx.use_backend("jax"):   # disable MLX — force the JAX engine (also the CPU reference oracle)
@@ -82,17 +58,11 @@ execution), via a small guarded hook in `run_fdtd`.
   ```
   or set `FDTDMEX_BACKEND=mlx|jax` in the environment.
 
-**For fdtdx developers — what gets routed *out* of the JAX engine:** only a supported **forward** run on
-Apple Silicon is handled by the MLX engine ([`src/fdtdx/mlx/`](src/fdtdx/mlx)); the routing decision lives
-in [`src/fdtdx/backend/`](src/fdtdx/backend). Everything else — gradients/inverse design, the unsupported
-forward features listed in Status, and all non-Apple platforms — stays on the **unchanged JAX engine**.
-The only edit to upstream's forward path is a ~4-line guarded hook in `run_fdtd`; the rest of the tree
-tracks fdtdx.
+**For fdtdx developers — what gets routed *out* of the JAX engine:** only a supported **forward** run on Apple Silicon is handled by the MLX engine ([`src/fdtdx/mlx/`](src/fdtdx/mlx)); the routing decision lives in [`src/fdtdx/backend/`](src/fdtdx/backend). Everything else — gradients/inverse design, the unsupported forward features listed in Status, and all non-Apple platforms — stays on the **unchanged JAX engine**. The only edit to upstream's forward path is a ~4-line guarded hook in `run_fdtd`; the rest of the tree tracks fdtdx.
 
 ## Install
 
-Use [`uv`](https://docs.astral.sh/uv/). On **Apple Silicon** you get the Metal backend; on other platforms
-it installs as plain fdtdx (JAX).
+Use [`uv`](https://docs.astral.sh/uv/). On **Apple Silicon** you get the Metal backend; on other platforms it installs as plain fdtdx (JAX).
 
 ```bash
 uv sync                 # core (jax + the fdtdx stack; mlx is auto-installed on Apple Silicon)
@@ -102,10 +72,7 @@ uv sync --extra viz     # + plotly / pyvista / trame
 
 ## Quickstart
 
-A plane wave transmitted through an isotropic dielectric slab, with absorbing (CPML) boundaries. This is
-a **high-resolution 3-D run** (≈240³ cells) — exactly the regime where the Metal engine is ~6.5–7× over
-JAX-CPU on a Mac (raise the resolution and the lead grows). Runs on Metal on Apple Silicon, on JAX
-elsewhere — no code change.
+A plane wave transmitted through an isotropic dielectric slab, with absorbing (CPML) boundaries. This is a **high-resolution 3-D run** (≈240³ cells) — exactly the regime where the Metal engine is ~6.5–7× over JAX-CPU on a Mac (raise the resolution and the lead grows). Runs on Metal on Apple Silicon, on JAX elsewhere — no code change.
 
 ```python
 import jax
@@ -160,51 +127,37 @@ _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=oc, config=config, key=key)  #
 print(arrays.detector_states["T"])   # transmitted flux vs time
 ```
 
-## Showcase — a silicon ring resonator
+## Showcase — an O-band silicon microring modulator
 
-The notebook [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/) walks a complete
-photonic-IC workflow end to end. It runs on a deliberately **coarse 90 nm grid** so every cell finishes in
-seconds — the figures below are illustrative, not converged.
+[`examples/ring_mrm_oband/`](examples/ring_mrm_oband/) is a self-contained, **production-resolution** design-verification of an **O-band (1310 nm) carrier-depletion silicon microring modulator (MRM)**, forward-simulated end to end on the **Metal** engine at a **20 nm** grid. It authors a racetrack ring side-coupled to a bus waveguide in **gdstk**, solves the bus mode, and runs the full modulator characterization — every figure below is regenerated by the notebook [`ring_mrm_oband.ipynb`](examples/ring_mrm_oband/ring_mrm_oband.ipynb).
 
-| Layout (objects + ports) | Resolved geometry (90 nm voxels) |
+**Geometry and waveguide mode.** The strip racetrack + bus resolved on the 20 nm grid (left), and the bus fundamental **TE₀** mode whose `n_eff = 2.69`, `n_g = 3.94`, and core confinement `Γ = 0.95` set the ring's free spectral range and tuning efficiency (right):
+
+| Resolved geometry (20 nm) | Bus TE₀ mode |
 |---|---|
-| ![layout](examples/ring_resonator_demo/figures/ring_layout.png) | ![3D](examples/ring_resonator_demo/figures/ring_3d.png) |
+| ![setup](examples/ring_mrm_oband/figures/setup.png) | ![mode](examples/ring_mrm_oband/figures/mode.png) |
 
-**Author → see → run → inspect.** Draw the device in **gdstk** (GDS) → convert to fdtdx geometry → view it
-in 2D and interactive **3D** (`plot_setup_3d`) → solve and inject the bus **mode** → recover the
-through-port response as a **mode expansion** (transmission per waveguide mode = S-parameters):
+**Mesh convergence and cold resonance.** The through-port `T(λ)` is read as a standing-wave-immune **net-Poynting two-run** ratio — a broadband **Gaussian** source + **phasor monitors**, which keeps the run on Metal. Refining the mesh 40 → 20 nm tracks the resonance and loaded Q (left); the 20 nm cold spectrum (right) gives `λ_res ≈ 1305 nm`, loaded `Q ≈ 125`, `FSR ≈ 23 nm`:
 
-| Injected bus mode | Mode-expansion transmission |
+| Mesh convergence 40 → 20 nm | Cold through-port spectrum (20 nm) |
 |---|---|
-| ![mode](examples/ring_resonator_demo/figures/bus_mode.png) | ![mode expansion](examples/ring_resonator_demo/figures/mode_expansion.png) |
+| ![convergence](examples/ring_mrm_oband/figures/convergence.png) | ![cold spectrum](examples/ring_mrm_oband/figures/cold_spectrum.png) |
 
-**Analytical verification.** The mode solver matches the exact symmetric-slab dispersion to ~2×10⁻⁴, and
-the ring's resonance spacing is checked against the analytical free spectral range `FSR = λ²/(n_g·L)`:
+**Trapped resonant field.** `|E|²` at the silicon-core mid-plane shows light **circulating inside the ring** on resonance versus **passing straight to the through port** off resonance:
 
-![ring response](examples/ring_resonator_demo/figures/ring_response.png)
+![field maps](examples/ring_mrm_oband/figures/field_maps.png)
 
-**Portable hand-off.** `sim_init(scene) → config.hdf5` packs the resolved arrays; `sim_run(config.hdf5) →
-results.hdf5` runs them on the Metal engine (or a GPU-free mock); `sim_postproc` reduces them to the small
-quantities an agent or remote client reads. Regenerate the figures with
-[`examples/ring_resonator_demo/make_showcase_images.py`](examples/ring_resonator_demo/make_showcase_images.py).
+**Coupling control and electro-optic tuning.** Sweeping the bus–ring gap traces the coupling regime — the extinction ratio is deepest at the 100 nm operating gap, **ER ≈ 8.5 dB** (left); a Soref–Bennett free-carrier perturbation gives the static electro-optic resonance **red-shift, ≈ 62 pm/V** (right):
 
-## Showcase — O-band carrier-depletion microring modulator
+| Extinction ratio vs gap | Static EO tuning (Soref–Bennett) |
+|---|---|
+| ![gap sweep](examples/ring_mrm_oband/figures/gap_sweep.png) | ![EO response](examples/ring_mrm_oband/figures/eo_response.png) |
 
-[`examples/ring_mrm_oband/`](examples/ring_mrm_oband/) is a self-contained design-verification of an
-**O-band (1310 nm) carrier-depletion microring modulator**, forward-simulated on the **Metal** engine. It
-authors a racetrack ring + bus, solves the bus TE₀ mode, **converges the mesh from 40 nm to 20 nm**, then
-reports the cold through-port `T(λ)` (resonance, loaded Q, extinction ratio) with `|E|²` field maps showing
-light trapped in the ring on resonance, the coupling control (ER vs bus–ring gap), and a Soref–Bennett
-static electro-optic resonance shift vs reverse bias. To stay on Metal it uses a broadband **Gaussian**
-source + **phasor monitors** with a standing-wave-immune **net-Poynting two-run** transmission. Script and
-figures live together in the folder; see its [README](examples/ring_mrm_oband/README.md) to run it.
+See the example [README](examples/ring_mrm_oband/README.md) to run it (≈5 h at 20 nm; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
 
 ## Relationship to upstream
 
-This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/main` stays clean and MLX
-features can be PR'd back. The MLX backend is additive (new `src/fdtdx/{backend,mlx}` packages plus the
-tiny `run_fdtd` hook); the rest of the tree tracks fdtdx. `src/fdtdmex` is a thin brand alias that
-re-exports `fdtdx`.
+This repo is a git fork: `upstream` is `ymahlau/fdtdx`, so `git merge upstream/main` stays clean and MLX features can be PR'd back. The MLX backend is additive (new `src/fdtdx/{backend,mlx}` packages plus the tiny `run_fdtd` hook); the rest of the tree tracks fdtdx. `src/fdtdmex` is a thin brand alias that re-exports `fdtdx`.
 
 ## Workstreams
 
@@ -215,11 +168,8 @@ re-exports `fdtdx`.
 | **WS-C** | Subpixel smoothing (effective-tensor averaging) | Core complete — validated; auto-application during placement is pending |
 | **WS-D** | Front end + portable workspace — `Scene`, 3D viz, config schema, HDF5 hand-off, MCP server, web UI | **In progress** — `Scene` + `plot_setup_3d`, `SceneModel`, and the `sim_init`/`sim_run`/`sim_postproc` HDF5 contract are done; MCP server + web UI next |
 
-Build order and the active plan: [ACTION_PLAN.md](ACTION_PLAN.md); longer arc: [docs/roadmap.md](docs/roadmap.md).
+Build order and the active plan: [ACTION_PLAN.md](dev-docs/ACTION_PLAN.md); longer arc: [docs/roadmap.md](dev-docs/roadmap.md).
 
 ## License & attribution
 
-This fork inherits fdtdx's **MIT** lineage; the project's own additions are provisionally **Apache-2.0**
-(see [LICENSE](LICENSE), [NOTICE](NOTICE), [docs/licensing.md](docs/licensing.md) — final licensing is
-owner-managed). It also consults **MEEP** (GPL) for subpixel-smoothing and near-to-far-field math
-(referenced, not copied without provenance).
+This fork inherits fdtdx's **MIT** lineage; the project's own additions are provisionally **Apache-2.0** (see [LICENSE](LICENSE), [NOTICE](NOTICE), [docs/licensing.md](docs/licensing.md) — final licensing is owner-managed). It also consults **MEEP** (GPL) for subpixel-smoothing and near-to-far-field math (referenced, not copied without provenance).

@@ -1,14 +1,12 @@
-"""Custom Metal E/H update kernels for the isotropic/diagonal forward path (Phase 2 M2 + M3).
+"""Custom Metal E/H update kernels for the isotropic/diagonal forward path.
 
 The bulk update (``E + c·inv_eps·curl_H(H)`` / ``H - c·inv_mu·curl_E(E)``) runs as one
-``mx.fast.metal_kernel`` per field — thread-per-cell, the curl read from global with neighbour
-reuse via cache (the M1 design, which already reaches the ~3 RT bandwidth floor). This generalises
-the scalar-``Cb`` M1 microbench ([`benchmarks/m1_kernel.py`](../../../benchmarks/m1_kernel.py)) to a
-per-cell material read: ``cb = c·inv_eps`` (isotropic 1-component, or diagonal 3-component) passed
-as a buffer, with the low/high-edge ghost wrapping on periodic axes (matching ``curl._bwd_diff`` /
+``mx.fast.metal_kernel`` per field — thread-per-cell, the curl read from global memory
+with neighbour reuse via cache, which reaches the ~3 RT memory-bandwidth floor. The per-cell material
+coefficient ``cb = c·inv_eps`` (isotropic 1-component, or diagonal 3-component) is passed as a buffer, with the low/high-edge ghost wrapping on periodic axes (matching ``curl._bwd_diff`` /
 ``_fwd_diff``).
 
-**CPML is folded into the kernel (M3).** Each thread computes the six metric-scaled differences
+**CPML is folded into the kernel.** Each thread computes the six metric-scaled differences
 ``d[i]`` of the plain curl; a thread that lies in a PML boundary slab additionally advances that
 slab cell's ψ recurrence and adds the κ-stretch + ψ correction directly into the curl before the
 ``cb`` multiply, so the kernel writes the *final* E/H — no post-kernel full-array rebuild. ψ is
@@ -16,15 +14,14 @@ carried (and returned) as the compact per-component boundary-slab buffers alread
 the CPML coefficients ``a``/``b``/``1/κ`` are sliced to those same slabs once at build time and
 captured. The two ψ-components that share a PML axis share its slab geometry and its ``a``/``b``/
 ``1/κ`` (per-cell, depth-only along the boundary normal), so each axis contributes one coefficient
-triple. (M2 computed the slab correction with MLX ops via ``concatenate`` — ~22 RT on top of the
-5 RT bulk; folding it in drops CPML-on toward the bulk floor.)
+triple.
 
-**Non-uniform grids are handled in-kernel (M3).** Each difference is scaled by its per-axis
+**Non-uniform grids are handled in-kernel.** Each difference is scaled by its per-axis
 ``reference_spacing/cell_width`` buffer (``m{k}``, 1-D) before the curl combine and the CPML
 recurrence — mirroring ``curl._mul_metric``. Uniform axes carry a scalar ``1.0`` and emit no
 multiply, so the uniform path is byte-for-byte unchanged.
 
-**Heterogeneous full-tensor materials use a block hybrid (M3).** The kernel runs the diagonal bulk
+**Heterogeneous full-tensor materials use a block hybrid.** The kernel runs the diagonal bulk
 (``cb`` = the tensor's diagonal); the off-diagonal inclusion's bounding box (``_offdiag_box``) gets
 the validated MLX-op aniso update (``update._update_E``/``_update_H``) over a haloed interior slice,
 spliced back with ``_set_box``. Box cells are bit-identical to the whole-domain ops path (same local
@@ -138,9 +135,9 @@ def _set_box(full, box, core):
 def kernel_eligible(state) -> bool:
     """Whether the custom Metal kernels can run this case (else fall back to the MLX-op cores).
 
-    Non-uniform metric is handled in-kernel (M3: each difference is scaled by its per-axis
+    Non-uniform metric is handled in-kernel (each difference is scaled by its per-axis
     ``reference_spacing/cell_width`` buffer). Heterogeneous full-tensor materials are handled by the
-    block hybrid (M3: kernel for the iso/diag bulk, MLX-op aniso over a compact interior inclusion
+    block hybrid (kernel for the iso/diag bulk, MLX-op aniso over a compact interior inclusion
     bbox) — eligible only lossless, uniform-grid, with that bbox compact + PML-disjoint.
     """
     if state.sigma_E is not None or state.sigma_H is not None:
@@ -418,7 +415,7 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     """Build ``(e_core, h_core)`` Metal-kernel closures with the standard core signature
     ``core(F, G, psi) -> (F_new, psi_new)`` (drop-in for the compiled MLX-op cores in ``loop``).
 
-    CPML is folded into the kernel (M3): with ``sb`` the kernel takes the per-axis slab coefficient
+    CPML is folded into the kernel: with ``sb`` the kernel takes the per-axis slab coefficient
     buffers + the compact ψ slabs as extra inputs and returns the advanced ψ slabs as extra outputs,
     so the whole CPML-on step is one Metal node per field (no slab MLX-op rebuild).
     """

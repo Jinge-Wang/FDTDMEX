@@ -39,9 +39,9 @@ class MLXState:
     #: Precomputed 1 / kappa, shape (6, Nx, Ny, Nz).
     inv_kappa: mx.array
 
-    #: Optional electric conductivity, shape (1|3|9, Nx, Ny, Nz) (M2+).
+    #: Optional electric conductivity, shape (1|3|9, Nx, Ny, Nz).
     sigma_E: Any = None
-    #: Optional magnetic conductivity, shape (1|3|9, Nx, Ny, Nz) (M2+).
+    #: Optional magnetic conductivity, shape (1|3|9, Nx, Ny, Nz).
     sigma_H: Any = None
 
     #: Per-axis periodic (wrap-padding) flags; True where a periodic/Bloch-k0 boundary sits.
@@ -50,7 +50,7 @@ class MLXState:
     #: Per-axis PML slab extents ``((lo, hi), …)`` for slab-CPML; ``(0, 0)`` = no PML on that axis.
     cpml_extents: tuple = ((0, 0), (0, 0), (0, 0))
 
-    #: Per-axis derivative metric scale for the curl (M4, non-uniform grids). Each entry is the
+    #: Per-axis derivative metric scale for the curl on non-uniform grids. Each entry is the
     #: scalar ``1.0`` on uniform grids, or an ``mx.array`` broadcasting along that axis equal to
     #: ``reference_spacing / cell_width``. ``metric_fwd`` uses the forward stencil (``curl_E``);
     #: ``metric_bwd`` the backward stencil / dual widths (``curl_H``).
@@ -65,14 +65,14 @@ class MLXState:
     #: spacing-weighted anisotropic off-diagonal averaging. ``None`` on uniform grids.
     aniso_widths: Any = None
 
-    #: Phase 3 PEC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PEC face zeros tangential E,
+    #: PEC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PEC face zeros tangential E,
     #: ``1.0`` elsewhere. ``None`` when no PEC boundaries. Applied after E source injection.
     pec_keep: Any = None
-    #: Phase 3 PMC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PMC face zeros tangential H,
+    #: PMC keep-mask, shape (3, Nx, Ny, Nz): ``0.0`` where a PMC face zeros tangential H,
     #: ``1.0`` elsewhere. ``None`` when no PMC boundaries. Applied after H source injection.
     pmc_keep: Any = None
 
-    #: Phase 3 Drude-Lorentz (ADE) dispersion. Per-cell recurrence coefficients, each shape
+    #: Drude-Lorentz (ADE) dispersion. Per-cell recurrence coefficients, each shape
     #: ``(num_poles, 1, Nx, Ny, Nz)`` (the singleton component axis broadcasts over the 3 E
     #: components). Time-invariant — precomputed on the JAX side and captured as constants.
     #: ``None`` for non-dispersive simulations (then the whole ADE path is inert).

@@ -1,15 +1,13 @@
 # Getting Started
 
-This guide is written for someone **new to MLX and JAX**. It covers what the dependencies are, how to set up the environment, how to confirm you're actually running on the Metal GPU, and a
-mental-model mapping so the codebase reads clearly.
+This guide is written for someone **new to MLX and JAX**. It covers what the dependencies are, how to set up the environment, how to confirm you're actually running on the Metal GPU, and a mental-model mapping so the codebase reads clearly.
 
 ## Requirements
 
 - **Apple Silicon Mac** (M1/M2/M3/M4…). MLX's GPU backend is Metal-only; there is no CUDA path.
 - **Recent macOS** (Metal-capable; macOS 13.5+ recommended).
 - **Python 3.11–3.13**.
-- **[uv](https://docs.astral.sh/uv/)** — a fast Python package/environment manager (replaces
-  `pip` + `venv` + `pip-tools`). Install: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+- **[uv](https://docs.astral.sh/uv/)** — a fast Python package/environment manager (replaces `pip` + `venv` + `pip-tools`). Install: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## What each dependency is and why
 
@@ -17,14 +15,14 @@ mental-model mapping so the codebase reads clearly.
 |---|---|
 | **mlx** | Apple's array framework. Think "NumPy + JAX-style transforms" with a **Metal GPU backend** and **unified memory** (CPU and GPU share one address space — no host↔device copies). This is the compute engine. |
 | **numpy** | Host-side arrays and the interop bridge to/from MLX (`mx.array(np_array)` / `np.array(mx_array)`). |
-| **scipy** | Sparse eigensolver for the mode solver (WS-B), plus FFTs/special functions on the host. |
+| **scipy** | Sparse eigensolver for the mode solver, plus FFTs/special functions on the host. |
 | **gdstk** | Read GDSII layouts (planar photonics geometry). |
 | **trimesh** | STL / triangle-mesh geometry I/O. |
-| **pydantic** | Declarative, validated config schema — the Tidy3D-like front end (WS-D). |
+| **pydantic** | Declarative, validated config schema — the Tidy3D-like front end. |
 | **h5py** | HDF5 for large field-result files. |
 | **rich / loguru** | Console output, progress, logging. |
 | *extras* `viz` | matplotlib, plotly, pyvista, trame — 2D/3D and web visualization. |
-| *extras* `mcp` | the MCP server for LLM orchestration (WS-D). |
+| *extras* `mcp` | the MCP server for LLM orchestration. |
 | *extras* `validation` | **jax** — used only as a CPU cross-check oracle (run the same case through FDTDX). |
 | *extras* `dev` | pytest, ruff, pre-commit. |
 
@@ -37,7 +35,7 @@ uv sync --extra dev           # + test/lint tooling
 uv sync --extra viz           # + visualization
 uv sync --all-extras          # everything
 
-uv run python -c "import fdtdmex; print('ok')"   # import sanity check
+uv run python -c "import fdtdx; print('ok')"   # import sanity check
 uv run pytest                 # run the test suite
 ```
 
@@ -78,5 +76,6 @@ MLX deliberately resembles JAX's functional style:
 FDTDMEX does **not** use MLX's autodiff (forward-only on Metal). Differentiable inverse design stays on JAX/CUDA clusters — see [architecture.md](architecture.md).
 
 ## Next
-- Skim [physics.md](physics.md) and [porting-notes.md](porting-notes.md) before touching engine code.
-- Build order and current status: [roadmap.md](roadmap.md).
+- Read [physics.md](physics.md) for the Yee-grid and update conventions.
+- Solve a waveguide mode with the native [mode solver](mode-solver.md).
+- Work through the runnable [`examples/`](../examples/) — start with the O-band microring showcase.
