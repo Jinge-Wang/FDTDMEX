@@ -17,6 +17,7 @@ Layout of ``results.hdf5``::
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -49,6 +50,7 @@ def sim_run(
     results_path: str | Path,
     *,
     backend: Literal["mlx", "mock"] = "mlx",
+    progress: Callable[[int, int], None] | None = None,
 ) -> Path:
     """Run a config HDF5 and write the results HDF5.
 
@@ -56,6 +58,9 @@ def sim_run(
         config_path: Path to a ``config.hdf5`` produced by :func:`fdtdmex.io.sim_init`.
         results_path: Destination ``results.hdf5`` path.
         backend: ``"mlx"`` (the real engine) or ``"mock"`` (schema-valid synthetic results, no GPU).
+        progress: Optional ``progress(step, num_steps)`` callback for streamed run telemetry, called
+            with ``step`` monotonic ``1 → num_steps`` and throttled to ~200 calls (the ``mock``
+            backend emits a few synthetic ticks). ``None`` (default) streams nothing — no API break.
 
     Returns:
         The written results path.
@@ -68,7 +73,7 @@ def sim_run(
     if backend == "mock":
         from .mock import mock_run
 
-        return mock_run(config_path, results_path)
+        return mock_run(config_path, results_path, progress=progress)
 
     from fdtdx.backend.dispatch import run_forward_from_plans
     from fdtdx.mlx.serialize import deserialize
@@ -82,7 +87,7 @@ def sim_run(
 
     payload = deserialize(skeleton, array_store)
     _, detector_states = run_forward_from_plans(
-        payload["state"], payload["source_plans"], payload["detector_plans"], num_steps, courant
+        payload["state"], payload["source_plans"], payload["detector_plans"], num_steps, courant, progress=progress
     )
     detector_states = {
         name: {k: np.asarray(v) for k, v in bufs.items()} for name, bufs in (detector_states or {}).items()

@@ -156,7 +156,9 @@ def maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition):
     return _run_mlx_forward(arrays, objects, config)
 
 
-def run_forward_from_plans(state, source_plans, detector_plans, num_steps, courant, *, simulate_boundaries=True):
+def run_forward_from_plans(
+    state, source_plans, detector_plans, num_steps, courant, *, simulate_boundaries=True, progress=None
+):
     """Run the MLX forward time loop from an already-resolved ``MLXState`` + frozen plans.
 
     This is the post-freeze tail of :func:`_run_mlx_forward`, factored out so the HDF5 IO layer
@@ -164,6 +166,9 @@ def run_forward_from_plans(state, source_plans, detector_plans, num_steps, coura
     ``ObjectContainer`` and no re-resolution needed. Returns ``(final_state, detector_states)``
     where ``detector_states`` is the host (jnp) ``{name: {key: array}}`` mapping, or ``None`` when
     there are no detectors.
+
+    ``progress``, when given, is forwarded to the time loop and called ``progress(step, num_steps)``
+    for streamed run telemetry (default ``None`` = no telemetry, no overhead).
     """
     from fdtdx.mlx.bridge import buffers_to_detector_states
     from fdtdx.mlx.detector_freeze import allocate_buffers
@@ -179,6 +184,7 @@ def run_forward_from_plans(state, source_plans, detector_plans, num_steps, coura
         float(courant),
         simulate_boundaries=simulate_boundaries,
         use_metal_kernel=_metal_kernel_enabled(),
+        progress=progress,
     )
     detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
     return state, detector_states

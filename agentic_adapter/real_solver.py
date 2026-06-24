@@ -28,7 +28,6 @@ import math
 import os
 import sys
 import tempfile
-import time
 
 import h5py
 import numpy as np
@@ -205,8 +204,11 @@ def _net_power(phasor: np.ndarray, prop_axis: int = 0) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # Run + reduce
 # --------------------------------------------------------------------------- #
-def _run(knobs: dict, backend: str, out_dir: str, run_id: str, n_points: int):
-    """sim_init → sim_run → read in/through phasors → T(λ). Returns (wls, T)."""
+def _run(knobs: dict, backend: str, out_dir: str, run_id: str, n_points: int, progress=None):
+    """sim_init → sim_run → read in/through phasors → T(λ). Returns (wls, T).
+
+    ``progress`` is forwarded to ``sim_run`` so the Metal time loop streams fine-grained
+    ``PROGRESS step/num_steps`` lines during the solve (the long, otherwise-silent phase)."""
     from fdtdmex.io import sim_init, sim_run
 
     wl = knobs["wl"]
@@ -232,7 +234,7 @@ def _run(knobs: dict, backend: str, out_dir: str, run_id: str, n_points: int):
     if last is not None:
         raise last
 
-    sim_run(config_path, results_path, backend=backend)
+    sim_run(config_path, results_path, backend=backend, progress=progress)
 
     with h5py.File(results_path, "r") as f:
         det = f["detector_states"]
@@ -279,8 +281,6 @@ def main() -> int:
 
     os.makedirs(args.out_dir, exist_ok=True)
     rid = args.run_id
-    total = 4
-    _progress(1, total)  # parsing / scene build begins
 
     cfg = _read_config(args.bundle)
     knobs = _ring_knobs(cfg)
@@ -289,18 +289,20 @@ def main() -> int:
     diverged = args.fail_mode == "diverge"
     mesh_fail = args.fail_mode == "mesh_fail"
 
+    # Progress is now streamed fine-grained from inside the solve (sim_run → the Metal time loop
+    # emits PROGRESS step/num_steps, throttled to ~200 lines): one monotonic 1→N sequence with
+    # N=num_steps, instead of the old 4 coarse milestones that left the bar frozen through the
+    # 6–7 min solve. ag-fdtd adopts the streamed N as the bar denominator.
     if diverged or mesh_fail:
-        # Honour the demo fail toggle without burning a run (parity with the mock).
+        # Honour the demo fail toggle without burning a run (parity with the mock). No solve to
+        # stream, so just complete the bar.
         exit_state = _EXIT_DIVERGED if diverged else _EXIT_MESH
         smatrix, wls, T = {}, np.array([]), np.array([])
-        _progress(total, total)
+        _progress(1, 1)
     else:
-        _progress(2, total)
-        wls, T, results_path = _run(knobs, args.backend, args.out_dir, rid, n_points)
-        _progress(3, total)
+        wls, T, results_path = _run(knobs, args.backend, args.out_dir, rid, n_points, progress=_progress)
         smatrix = _s_matrix(cfg, wls, T)
         exit_state = _EXIT_OK
-        _progress(total, total)
 
     vv = {"diverged": diverged, "mesh_fail": mesh_fail}
 

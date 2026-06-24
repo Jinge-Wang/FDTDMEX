@@ -16,6 +16,8 @@ with periodic ``mx.eval``.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import mlx.core as mx
 import numpy as np
 
@@ -81,11 +83,19 @@ def run_forward_mlx(
     eval_every: int = 8,
     compile_step: bool = True,
     use_metal_kernel: bool = False,
+    progress: Callable[[int, int], None] | None = None,
 ) -> tuple[MLXState, dict[str, dict[str, mx.array]]]:
-    """Advance ``state`` ``num_steps`` steps, recording detectors; return state + buffers."""
+    """Advance ``state`` ``num_steps`` steps, recording detectors; return state + buffers.
+
+    ``progress``, when given, is called ``progress(step, num_steps)`` with ``step`` monotonic
+    ``1 → num_steps``, throttled to ~200 calls total. It only reads the Python loop counter (no
+    ``mx.eval`` / GPU sync), so streaming progress costs nothing on the hot path; ``None`` (the
+    default for ``run_fdtd`` and tests) short-circuits before any per-step work.
+    """
     record = bool(detector_plans)
     dispersive = state.dispersive_c1 is not None
     e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step, use_metal_kernel)
+    progress_stride = max(1, num_steps // 200) if progress else 0
 
     # Per-step "does any detector record this step?" mask. When false the whole interpolation +
     # accumulation block is skipped (it interpolated only to be discarded). Detector DFT
@@ -141,6 +151,12 @@ def run_forward_mlx(
             for bufs in detector_buffers.values():
                 leaves.extend(bufs.values())
             mx.eval(*leaves)
+
+        # Cheap progress tick: a Python print on the host (no array touch, no sync). The
+        # eval_every cadence above keeps the loop counter within `eval_every` steps of the GPU,
+        # so the reported step closely tracks real compute.
+        if progress and ((n + 1) % progress_stride == 0 or n + 1 == num_steps):
+            progress(n + 1, num_steps)
 
     leaves = [state.E, state.H, state.psi_E, state.psi_H]
     if dispersive:

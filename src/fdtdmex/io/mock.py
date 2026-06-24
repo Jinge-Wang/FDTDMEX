@@ -8,6 +8,7 @@ whole ``sim_init → sim_run → sim_postproc`` contract with no Mac/GPU. It rea
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -32,8 +33,19 @@ def _fabricate(shape, dtype_name: str, rng: np.random.Generator) -> np.ndarray:
     return rng.standard_normal(shape).astype(dt)
 
 
-def mock_run(config_path: str | Path, results_path: str | Path, *, seed: int = 0) -> Path:
-    """Write a synthetic ``results.hdf5`` matching the detector spec in ``config_path``."""
+def mock_run(
+    config_path: str | Path,
+    results_path: str | Path,
+    *,
+    seed: int = 0,
+    progress: Callable[[int, int], None] | None = None,
+) -> Path:
+    """Write a synthetic ``results.hdf5`` matching the detector spec in ``config_path``.
+
+    ``progress``, when given, emits a handful of synthetic ``progress(step, num_steps)`` ticks
+    (monotonic ``1 → num_steps``) so the streamed-telemetry path is exercised end-to-end without a
+    GPU — the mock fabricates results instantly, so the ticks are evenly spaced markers, not timing.
+    """
     import h5py
 
     config_path = Path(config_path)
@@ -44,6 +56,11 @@ def mock_run(config_path: str | Path, results_path: str | Path, *, seed: int = 0
         num_steps = int(f.attrs["num_steps"])
         spec = read_json(f["meta"], "results_spec")
         config_json_bytes = np.asarray(f["config"]["json"]) if "config" in f else None
+
+    if progress:
+        ticks = min(num_steps, 20)  # a few evenly spaced markers ending exactly at num_steps
+        for i in range(1, ticks + 1):
+            progress(round(i * num_steps / ticks), num_steps)
 
     with h5py.File(results_path, "w") as f:
         f.attrs["schema_version"] = SCHEMA_VERSION
