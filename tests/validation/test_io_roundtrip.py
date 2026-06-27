@@ -6,6 +6,8 @@ Contract:
 * ``sim_init → sim_run(backend="mlx") → sim_postproc`` reproduces a direct ``run_fdtd`` *bit-for-bit*
   (the packed payload is the serialized form of the exact same resolved arrays, fed to the same loop).
 * ``sim_run(backend="mock")`` writes a schema-valid ``results.hdf5`` without touching the engine.
+* ``pack → run_simulation_from_hdf5(backend="mock")`` returns immediately, stages a job folder, and
+  the detached child advances ``status.json`` ``queued → completed`` + writes ``outputs/result.hdf5``.
 """
 
 from __future__ import annotations
@@ -146,3 +148,63 @@ def test_hdf5_trio_bit_identical(tmp_path):
     reduced_mock = sim_postproc(mock_h5)
     assert reduced_mock["backend"] == "mock"
     assert reduced_mock["detectors"]["energy"]["energy"]["shape"] == list(direct.shape)
+
+
+def _wait_status(status_path, want=("completed", "failed"), timeout=30.0):
+    """Poll a job's status.json until it reaches a terminal state (or timeout)."""
+    import json
+    import time
+
+    deadline = time.time() + timeout
+    status = {}
+    while time.time() < deadline:
+        if status_path.exists():
+            try:
+                status = json.loads(status_path.read_text())
+            except json.JSONDecodeError:
+                status = {}  # mid-write; the next atomic replace will land
+            if status.get("status") in want:
+                return status
+        time.sleep(0.05)
+    return status
+
+
+def test_pack_and_launch_mock(tmp_path):
+    """pack → run_simulation_from_hdf5(mock): non-blocking, stages job folder, advances status.json."""
+    import time
+
+    from fdtdmex.io import pack, run_simulation_from_hdf5, sim_postproc
+
+    config, object_list, constraints = _build_objects()
+    scene = fdtdx.Scene(config).add(*object_list).constrain(constraints)
+
+    project = tmp_path / "project"
+    bundle = pack(scene, project)
+    assert bundle.hdf5_path.exists() and bundle.hdf5_path.parent == project
+    assert bundle.config_path is not None and bundle.config_path.exists()
+    # Content-addressed + idempotent: re-packing the same scene reuses the name.
+    assert pack(scene, project).hdf5_path == bundle.hdf5_path
+
+    jobs = tmp_path / "jobs"
+    t0 = time.time()
+    handle = run_simulation_from_hdf5(bundle, jobs, backend="mock", name="cold")
+    assert time.time() - t0 < 5.0  # returns ~immediately (generous bound for CI)
+
+    # Job folder contract: status.json present at once; bundle + config snapshot staged.
+    assert handle.status_path.exists()  # initial "queued" written synchronously
+    assert handle.job_dir.parent == jobs
+    assert handle.bundle_hdf5.exists()
+    assert (handle.job_dir / "config.json").exists()
+    assert (handle.job_dir / "outputs").is_dir()
+
+    status = _wait_status(handle.status_path)
+    assert status["status"] == "completed", status
+    assert status["run_id"] == handle.run_id and status["solver"] == "fdtdmex"
+    assert handle.results_path.exists()
+
+    reduced = sim_postproc(handle.results_path)
+    assert reduced["backend"] == "mock" and "energy" in reduced["detectors"]
+
+    # A second launch on the same bundle ⇒ a distinct job folder + run id.
+    handle2 = run_simulation_from_hdf5(bundle, jobs, backend="mock")
+    assert handle2.job_dir != handle.job_dir and handle2.run_id != handle.run_id

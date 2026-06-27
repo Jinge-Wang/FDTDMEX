@@ -11,9 +11,8 @@
 #   5. Prints the registration commands for the common MCP hosts.
 #
 # Discovery only — it never runs a simulation and never touches the engine. Re-runnable.
-# NOTE: inside the sibling ag-fdtd workspace you do NOT need this — ag-fdtd's
-# ./scripts/wire-fdtdmex.sh points the agent at this server for you. This installer is for
-# using the server on its OWN, in any MCP client.
+# NOTE: inside the sibling ag-fdtd workspace you do NOT need this — ag-fdtd's UI launches the
+# server for you. This installer is for using the server on its OWN, in any MCP client.
 
 set -euo pipefail
 

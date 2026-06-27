@@ -13,20 +13,22 @@ FDTDMEX is a fork of [fdtdx](https://github.com/ymahlau/fdtdx) (a JAX FDTD Maxwe
 - **Mode-expansion monitor.** [`utils/mode_expansion.py`](../src/fdtdx/utils/mode_expansion.py) (`compute_mode_expansion`) projects a recorded field onto a user-specified mode set → per-mode transmission + complex S-parameters, with a validated mode cache.
 - **Subpixel smoothing.** [`core/physics/subpixel.py`](../src/fdtdx/core/physics/subpixel.py) Kottke tensor smoothing (validated; standalone utility, not yet auto-applied during placement).
 - **Notebook front end.** `Scene` facade ([`scene.py`](../src/fdtdx/scene.py)), interactive 3D ([`utils/plot_setup_3d.py`](../src/fdtdx/utils/plot_setup_3d.py)), and the matplotlib utilities (`plot_setup`, `plot_material`, `plot_mode`). Tour: [`examples/ring_resonator_demo/`](../examples/ring_resonator_demo/).
-- **Portable HDF5 hand-off.** [`src/fdtdmex/io/`](../src/fdtdmex/io/) — `SceneModel` (pydantic facade over fdtdx's JSON), and the `sim_init` → `sim_run` → `sim_postproc` trio, with a GPU-free `mock` backend. `sim_init → sim_run(mlx)` reproduces a direct `run_fdtd` bit-for-bit.
+- **Portable HDF5 hand-off.** [`src/fdtdmex/io/`](../src/fdtdmex/io/) — `SceneModel` (pydantic facade over fdtdx's JSON), and the agent-facing `pack` → `run_simulation_from_hdf5` → `sim_postproc` flow (non-blocking detached launch; fdtdmex stages + owns the job folder), over the `sim_run` engine primitive, with a GPU-free `mock` backend. The packed run reproduces a direct `run_fdtd` bit-for-bit.
 
 ## Next — orchestration layer (the focus)
 
 Build bottom-up; each piece is independently useful. The schema and IO contract are done, so this layer can be built directly against them.
 
-### 1. MCP server ([`server/fdtdmex_mcp/`](../server/fdtdmex_mcp/), stub today)
+### 1. MCP discovery server ([`server/fdtdmex_mcp/`](../server/fdtdmex_mcp/)) — ✅ **done**
 
-The API-discovery + execution surface so an LLM can drive a simulation. Tools:
-- **introspect** — type names + parameter schemas from the pydantic `SceneModel` / `autoinit` models.
-- **build / edit / validate** — construct or mutate a `SceneModel`; return validation errors.
-- **sim_init / sim_run / sim_postproc** — the existing trio.
-
-**Done when** an agent can introspect the API, assemble a valid `SceneModel`, run it (mock or Metal), and read back only the small `sim_postproc` result. Install via the `mcp` extra. Depends on nothing new.
+The **discovery-only** API surface so an LLM can drive a simulation *natively* in its own kernel (it
+teaches *what to write*, never runs a sim). Four fixed tools — `list_solver_apis` / `get_api_schema`
+(live `inspect.signature`) / `search_docs` / `get_doc` (BM25 corpus from real sources) — advertising
+the native flow: assemble a `Scene` → `pack(config, location)` → non-blocking
+`run_simulation_from_hdf5(bundle, parent_folder)` → `sim_postproc(results)`, plus `compute_mode`. The
+server is launched by ag-fdtd's UI (`uv run fdtdmex-mcp`), and also runs standalone in any MCP host
+(`server/install.sh`). Install the deps via the `mcp` (+ `io`) extra. See
+[`docs/mcp-and-ui.md`](../docs/mcp-and-ui.md).
 
 ### 2. Mode sources / detectors on Metal
 
@@ -57,7 +59,7 @@ A locally-hostable reactive editor consuming `SceneModel` + `to_plotly_json(plot
 | [`core/physics/mode_backend/`](../src/fdtdx/core/physics/mode_backend/) · [`modes.py`](../src/fdtdx/core/physics/modes.py) | native FD mode solver + `compute_mode` seam |
 | [`utils/mode_expansion.py`](../src/fdtdx/utils/mode_expansion.py) | mode-expansion monitor + mode cache |
 | [`scene.py`](../src/fdtdx/scene.py) · [`utils/plot_setup_3d.py`](../src/fdtdx/utils/plot_setup_3d.py) | `Scene` facade + interactive plotly 3D |
-| [`src/fdtdmex/io/`](../src/fdtdmex/io/) | `SceneModel` schema + `sim_init`/`sim_run`/`sim_postproc` + mock backend |
+| [`src/fdtdmex/io/`](../src/fdtdmex/io/) | `SceneModel` schema + `pack` / `run_simulation_from_hdf5` (non-blocking launch, `launch.py` + `_runner.py`) / `run_simulation` (cwd worker) / `sim_run` (engine) / `sim_postproc` + mock backend |
 
 ## Physics-correctness contract (every engine change)
 

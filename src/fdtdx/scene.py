@@ -163,8 +163,21 @@ class Scene:
         """Build a :class:`Scene` from a pydantic ``SceneModel`` (requires the ``io`` extra)."""
         return cls.from_json_setup(model.to_json_setup())
 
+    def pack(self, location: Any, **kwargs: Any):
+        """Resolve + pack this scene into a project folder as a portable bundle (``io`` extra).
+
+        The agent-facing form: writes a content-addressed config HDF5 + lightweight config JSON into
+        ``location`` and returns a ``PackResult``. See :func:`fdtdmex.io.pack`.
+        """
+        from fdtdmex.io import pack
+
+        return pack(self, location, **kwargs)
+
     def sim_init(self, path: Any, **kwargs: Any):
-        """Resolve + pack this scene into a self-contained config HDF5 (requires the ``io`` extra)."""
+        """Resolve + pack this scene into a config HDF5 at an explicit *file* path (``io`` extra).
+
+        Low-level primitive; prefer :meth:`pack` for the folder-owning, content-addressed form.
+        """
         from fdtdmex.io import sim_init
 
         return sim_init(self, path, **kwargs)

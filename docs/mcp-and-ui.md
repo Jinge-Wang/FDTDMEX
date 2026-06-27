@@ -6,11 +6,11 @@ Goal: an **LLM-orchestratable** workflow — an agent plans, queries available o
 
 Three layers, with a hard rule: **the LLM/agent never reads or writes large arrays** (ε/material maps, field dumps). It works only at the *script + config* level and reads back only small results (scalars, fluxes, n_eff, rendered thumbnails).
 
-The public API is a matched trio: **`sim_init` → `sim_run` → `sim_postproc`**.
+The public API is a matched trio: **`pack` → `run_simulation_from_hdf5` → `sim_postproc`**.
 
-- **Agentic layer (LLM + MCP).** The LLM writes a short Python script that calls **`sim_init`** with high-level parameters (geometry, materials, sources/detectors *by description*), triggers **`sim_run`**, and inspects via **`sim_postproc`**. It discovers the right function/class names + IO via the MCP server. It does **not** hand-author arrays and does **not** ingest large outputs.
-- **fdtdmex front end — `sim_init` (the simulation creation utility).** A first-class fdtdmex API (`fdtdmex/io/`) that takes the declarative setup and **does the heavy lifting on the front-end machine**: resolve objects + design parameters → rasterize geometry → assemble the ε/µ/σ + dispersive distributions, freeze source/detector profiles, build the grid/boundary spec → **write a self-contained config HDF5**. This is where resolution lives (by design — not the agent, not the backend).
-- **fdtdmex backend — `sim_run`.** Any machine with fdtdmex — **local or remote** — takes the config HDF5, unwraps it, runs the time loop, and writes a results HDF5. The config HDF5 is the portable artifact that ships between machines.
+- **Agentic layer (LLM + MCP).** The LLM writes a short Python script that calls **`pack`** with a Scene assembled from high-level parameters (geometry, materials, sources/detectors *by description*), launches it **non-blocking** via **`run_simulation_from_hdf5`**, and (when the job finishes) inspects via **`sim_postproc`**. It discovers the right function/class names + IO via the MCP server. It does **not** hand-author arrays and does **not** ingest large outputs.
+- **fdtdmex front end — `pack` (the simulation creation utility).** A first-class fdtdmex API (`fdtdmex/io/`) that takes the declarative setup and **does the heavy lifting on the front-end machine**: resolve objects + design parameters → rasterize geometry → assemble the ε/µ/σ + dispersive distributions, freeze source/detector profiles, build the grid/boundary spec → **write a self-contained config HDF5** (content-addressed) into a project folder, plus a lightweight editable config JSON. This is where resolution lives (by design — not the agent, not the backend). (`sim_init` is the same packer aimed at an explicit file path — the retained low-level primitive.)
+- **fdtdmex launcher — `run_simulation_from_hdf5`.** **Non-blocking.** Stages a job folder under `parent_folder`, copies the bundle in, writes `status.json`, and **launches the solver detached** — returning immediately with a `JobHandle`. The detached child (running the bare `run_simulation` worker on any fdtdmex machine, local or remote) unwraps the config HDF5, runs the time loop, and writes the results HDF5 into the job folder's `outputs/`. The config HDF5 is the portable artifact that ships between machines.
 - **`sim_postproc`.** Reduces a results HDF5 to the **small** quantities the agent/user reads — scalars, fluxes, n_eff, S-parameters, rendered thumbnails — so large field data never flows through the LLM.
 
 ## Tidy3D-like architecture
@@ -22,7 +22,7 @@ Declarative Python front end → serialized config → compute backend → resul
 
 ## HDF5 simulation payload — the wrap/unwrap contract
 
-The hand-off between front end and backend is **one self-contained config HDF5 file** (the Tidy3D `.hdf5` model). **`sim_init(setup) → config.hdf5`** on the front end; **`sim_run(config.hdf5) → results.hdf5`** on any fdtdmex machine; **`sim_postproc(results.hdf5) → small results`**. This is the single contract the agentic workspace and the solver agree on, so the workspace can be developed against a **mocked backend** and bridged later.
+The hand-off between front end and backend is **one self-contained config HDF5 file** (the Tidy3D `.hdf5` model). **`pack(setup, location) → bundle.hdf5`** on the front end; **`run_simulation_from_hdf5(bundle, parent_folder) → JobHandle`** launches it detached on any fdtdmex machine (the child writes `outputs/result.hdf5`); **`sim_postproc(results.hdf5) → small results`**. This is the single contract the agentic workspace and the solver agree on, so the workspace can be developed against a **mocked backend** and bridged later.
 
 **Pipeline — the creation utility resolves *before* packing:**
 1. **Author** — the LLM script (or UI) describes the high-level declarative objects (Volume, Structures, Sources, Detectors, Boundaries, Grid, Run) — plus any *design* parameters (device density ρ, latent/optimization variables). The LLM passes these as parameters; it does not build arrays.
@@ -39,16 +39,31 @@ The hand-off between front end and backend is **one self-contained config HDF5 f
 
 ## MCP server (`server/fdtdmex_mcp/`)
 
-**Interaction model:** the LLM **writes and runs Python scripts** that call the fdtdmex creation utility; the MCP server is how it *discovers the API* — it fetches the correct function/class names and their inputs/outputs (from the pydantic/`autoinit` models) so the generated script is valid. The script calls `sim_init(...)` → config HDF5, dispatches `sim_run` on a target machine (local/remote), and reads back only the **small** `sim_postproc` outputs (scalars, fluxes, n_eff, thumbnails) — never the large ε maps or field dumps. ("LLM gets options → `sim_init` → `sim_run` → `sim_postproc`.")
+**Interaction model:** the LLM **writes and runs native fdtdmex Python** (`Scene` / `pack` / `run_simulation_from_hdf5` / `sim_postproc` / `compute_mode`) in its own notebook kernel — the kernel runs in *this* repo's venv. The MCP server is **discovery-only**: it teaches the agent *what to write* (the correct function/class names + signatures, and verified examples) so the generated script is valid. It does **not** run simulations — execution is native in the agent's kernel, and the launch itself is **non-blocking** (`run_simulation_from_hdf5` detaches the solver), so no run ever blocks the kernel through this server. The script calls `pack(...)` → bundle HDF5, launches `run_simulation_from_hdf5(...)` (which writes `status.json`, below), and once the job completes reads back only the **small** `sim_postproc` outputs (scalars, fluxes, n_eff, thumbnails) — never the large ε maps or field dumps.
 
-Tools exposed to an LLM:
-- **introspect** — list available material/source/detector/boundary types and their parameter schemas (names, types, defaults, docstrings) derived from the pydantic models — i.e. the exact signatures the LLM needs to write a correct script.
-- **build / edit / validate** — construct or mutate a setup; return validation errors.
-- **sim_init** — resolve a setup → config HDF5.
-- **sim_run** — execute a config HDF5 on a target machine; stream progress.
-- **sim_postproc** — fetch the small reduced results (scalars/flux/n_eff/thumbnails), not raw fields.
+**The 4-tool discovery contract (as built, `server/fdtdmex_mcp/`).** The agent's tool surface stays small and fixed — four read-only tools — no matter how many docs/examples exist:
+- **`list_solver_apis`** — list the native pack/launch/post-proc entry points (`pack`, `run_simulation_from_hdf5`, `sim_postproc`, `compute_mode`) with one-line summaries. (The bare blocking worker `run_simulation` is deliberately *not* advertised — the agent never calls it directly.)
+- **`get_api_schema(name)`** — the full signature of one entry point, introspected **live** (`inspect.signature` of the real function, so it can't drift) + the `SceneModel` payload fields.
+- **`search_docs(query)`** — BM25 search over a corpus built from real on-disk sources (docs + runnable `examples/`); returns ranked refs + snippets.
+- **`get_doc(ref)`** — fetch one doc/example page in full (a copyable verified setup, or guide prose).
 
-This maps directly onto "LLM gets options → writes a script → `sim_init` → `sim_run` → `sim_postproc`."
+This maps onto "LLM discovers the native API + a verified example → writes a script → `pack` → `run_simulation_from_hdf5` → `sim_postproc`."
+
+### Run telemetry — the `status.json` contract
+
+A run is tracked uniformly through a per-job **`status.json`** file rather than parsed stdout. In the v2 model **fdtdmex owns the job folder**: `fdtdmex.io.run_simulation_from_hdf5(hdf5, parent_folder, *, simulation_name=None, backend, name)` stages `job_dir = <parent_folder>/<simulation_name or unique-job-id>/` (copying the bundle in, snapshotting a lightweight `config.json`, creating `outputs/`), writes the initial `queued` `status.json`, and **launches the solver detached** — returning immediately with a `JobHandle`. The detached child (the bare `run_simulation` worker, cwd = `job_dir`) drives `status.json` + an append-only `progress.jsonl` off the existing `progress(step, total)` callback and writes the results to `outputs/result.hdf5`. **A job folder with no `status.json` means the sim was packed/staged but never run.**
+
+`status.json` schema (written atomically via `os.replace`, so a watcher never reads a half-written file):
+
+```json
+{"run_id": "...", "name": "...", "solver": "fdtdmex",
+ "status": "queued|running|completed|failed",
+ "step": 740, "total": 2000, "heartbeat": <epoch>,
+ "started_at": <epoch>, "finished_at": <epoch|null>,
+ "pid": <int>, "error": <str|null>}
+```
+
+It advances `queued → running` (step/total + `heartbeat` refreshed each tick) `→ completed`, or `→ failed` (with `error`) on an exception. The `mock` backend drives the same ticks, so the offline GPU-free path exercises telemetry end-to-end.
 
 ## Git-like history (app layer)
 

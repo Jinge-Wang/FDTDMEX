@@ -10,7 +10,7 @@
 # 4. **expand** the through-port field onto waveguide modes (TE₀, TE₁, TM₀) — the PIC transmission analysis,
 # 5. read it as **S-parameters**,
 # 6. **verify** against an analytical ring model (slab dispersion, resonance, FSR), and
-# 7. hand the simulation off through the portable **HDF5 contract** (`sim_init` → `sim_run` → `sim_postproc`).
+# 7. hand the simulation off through the portable **HDF5 contract** (`pack` → `run_simulation_from_hdf5` → `sim_postproc`).
 #
 # > **Resolution note.** This notebook runs on a deliberately **coarse 90 nm grid** so every cell finishes in
 # > seconds. Numbers (n_eff, transmission, resonance positions) are therefore *illustrative*, not converged —
@@ -419,27 +419,52 @@ sim = build_ring_scene()
 sim  # _repr_html_ summary (object / source / detector counts, time steps)
 
 # %% [markdown]
-# ### 9a. Pack to a portable config HDF5 (`sim_init`)
+# ### 9a. Pack to a portable bundle in a project folder (`pack`)
 
 # %%
-from fdtdmex.io import SceneModel, sim_init, sim_postproc, sim_run
+import json
+import time
 
-cfg_h5 = os.path.join(tempfile.gettempdir(), "ring_config.hdf5")
-sim_init(sim, cfg_h5)
+from fdtdmex.io import SceneModel, pack, run_simulation_from_hdf5, sim_postproc, sim_run
+
+project = tempfile.mkdtemp(prefix="ring_project_")
+bundle = pack(sim, project)  # content-addressed HDF5 + lightweight config JSON sidecar
+print("packed bundle:", os.path.basename(bundle.hdf5_path), "| config hash:", bundle.config_hash)
 
 import h5py
 
-with h5py.File(cfg_h5, "r") as f:
+with h5py.File(bundle.hdf5_path, "r") as f:
     print("config.hdf5 groups:", list(f.keys()))
     print("  steps:", int(f.attrs["num_steps"]), "| detectors:", int(f.attrs["n_detectors"]))
     print("  payload arrays:", len(f["payload"]["arrays"].keys()), "datasets (resolved ε/µ/σ + source/detector plans)")
 
 # %% [markdown]
-# ### 9b. Run it — real engine, bit-identical to a direct `run_fdtd`; and the GPU-free mock
+# ### 9b. Launch it non-blocking (`run_simulation_from_hdf5`) — the agent-facing flow
 
 # %%
+# The launcher stages a job folder under `jobs/`, copies the bundle in, and detaches the solver —
+# returning immediately while `status.json` advances queued→running→completed. Here we use the
+# GPU-free `mock` backend (what the agentic workspace develops against) and poll to completion.
+jobs = os.path.join(project, "jobs")
+job = run_simulation_from_hdf5(bundle, jobs, backend="mock", name="ring-cold")
+print("launched (non-blocking):", job.run_id, "→", os.path.relpath(job.job_dir, project))
+
+for _ in range(100):
+    status = json.loads(job.status_path.read_text())
+    if status["status"] in ("completed", "failed"):
+        break
+    time.sleep(0.05)
+print("final status:", status["status"], "| results:", os.path.exists(job.results_path))
+print("mock postproc:", sim_postproc(job.results_path)["backend"])
+
+# %% [markdown]
+# ### 9b′. Bit-identity oracle (`sim_run`, the low-level primitive)
+
+# %%
+# `sim_run` is the bare engine executor — handy for showing the packed run is bit-identical to a
+# direct `run_fdtd`. (The agent doesn't call this; `run_simulation_from_hdf5` does, in its child.)
 res_h5 = os.path.join(tempfile.gettempdir(), "ring_results.hdf5")
-sim_run(cfg_h5, res_h5, backend="mlx")  # runs the Metal engine directly (no JAX in the loop)
+sim_run(bundle, res_h5, backend="mlx")  # runs the Metal engine directly (no JAX in the loop)
 
 # Confirm this scene is MLX-eligible (Gaussian source + energy detector, no custom stopping condition).
 from fdtdx.backend.dispatch import select_backend
@@ -454,11 +479,6 @@ direct_energy = np.asarray(direct.detector_states["energy"]["energy"])
 with h5py.File(res_h5, "r") as f:
     packed_energy = np.asarray(f["detector_states"]["energy"]["energy"])
 print("max |direct − packed| =", float(np.max(np.abs(direct_energy - packed_energy))), "(0.0 ⇒ bit-identical)")
-
-# Mock backend: schema-valid results with no GPU — what the agentic workspace develops against.
-mock_h5 = os.path.join(tempfile.gettempdir(), "ring_results_mock.hdf5")
-sim_run(cfg_h5, mock_h5, backend="mock")
-print("mock postproc:", sim_postproc(mock_h5)["backend"])
 
 # %% [markdown]
 # ### 9c. Small reductions (`sim_postproc`) + the editable JSON config (`SceneModel`)
@@ -489,5 +509,6 @@ print("JSON round-trip OK:", model_again.describe()["n_objects"] == model.n_obje
 # - **`plot_setup`** + **`plot_setup_3d`** (interactive plotly) showed the setup; `to_plotly_json` makes it web-ready.
 # - **`compute_mode`** + **`plot_mode`** gave the injected bus mode; **`compute_mode_expansion`** projected the
 #   through-port field onto TE₀/TE₁/TM₀ (with a validated mode cache) — the PIC modal-transmission result.
-# - **`Scene`** + **`sim_init`/`sim_run`/`sim_postproc`** + the **mock** backend + **`SceneModel`** are the agentic
-#   hand-off — bit-identical to a direct run, GPU-free where needed, and JSON-round-tripping for a reactive UI.
+# - **`Scene`** + **`pack`/`run_simulation_from_hdf5`/`sim_postproc`** + the **mock** backend + **`SceneModel`** are
+#   the agentic hand-off — non-blocking detached launch, bit-identical to a direct run, GPU-free where needed,
+#   and JSON-round-tripping for a reactive UI.

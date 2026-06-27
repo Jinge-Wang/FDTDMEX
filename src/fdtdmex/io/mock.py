@@ -8,12 +8,28 @@ whole ``sim_init → sim_run → sim_postproc`` contract with no Mac/GPU. It rea
 
 from __future__ import annotations
 
+import os
+import random
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
 
 from ._hdf5 import SCHEMA_VERSION, read_json
+
+
+def _mock_duration() -> float:
+    """How long a naive mock run should span, in seconds. Defaults to a random 1–60 s so
+    the streamed status/progress telemetry is exercised like a real run; set
+    ``FDTDMEX_MOCK_SECONDS`` (e.g. ``0`` in fast tests) to override with a fixed duration."""
+    env = os.environ.get("FDTDMEX_MOCK_SECONDS")
+    if env not in (None, ""):
+        try:
+            return max(0.0, float(env))
+        except ValueError:
+            pass
+    return random.uniform(1.0, 60.0)
 
 _NP_DTYPE = {
     "float32": np.float32,
@@ -42,9 +58,11 @@ def mock_run(
 ) -> Path:
     """Write a synthetic ``results.hdf5`` matching the detector spec in ``config_path``.
 
-    ``progress``, when given, emits a handful of synthetic ``progress(step, num_steps)`` ticks
-    (monotonic ``1 → num_steps``) so the streamed-telemetry path is exercised end-to-end without a
-    GPU — the mock fabricates results instantly, so the ticks are evenly spaced markers, not timing.
+    ``progress``, when given, drives a NAIVE RUNNING PROCESS: it emits a random number of
+    ``progress(step, num_steps)`` ticks spread over a random ~1–10 s span (see
+    :func:`_mock_duration`), sleeping an artificial per-step delay between them — so the streamed
+    status/progress telemetry advances over real time exactly like a GPU run would, end-to-end and
+    GPU-free. The results themselves are still fabricated instantly at the end.
     """
     import h5py
 
@@ -58,8 +76,10 @@ def mock_run(
         config_json_bytes = np.asarray(f["config"]["json"]) if "config" in f else None
 
     if progress:
-        ticks = min(num_steps, 20)  # a few evenly spaced markers ending exactly at num_steps
+        ticks = max(1, min(num_steps, random.randint(5, 25)))  # a random number of progress steps
+        per_tick = _mock_duration() / ticks                    # artificial per-step delay
         for i in range(1, ticks + 1):
+            time.sleep(per_tick)
             progress(round(i * num_steps / ticks), num_steps)
 
     with h5py.File(results_path, "w") as f:

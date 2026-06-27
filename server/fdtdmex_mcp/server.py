@@ -6,22 +6,26 @@ docs/examples exist. This is the real counterpart to ag-fdtd's in-repo mock
 (`backend/app/mcp_server/__main__.py`): it speaks the IDENTICAL contract and the same
 terse-text + trailing ``Next:`` convention, so the agent can't tell mock from real.
 
-Discovery only. ag-fdtd runs simulations through its own adapter
-(`agentic_adapter/real_solver.py`), NOT through this server — so there is no blocking
-``sim_run`` on the agent's path here.
+Discovery only. ag-fdtd executes **natively** in its own notebook kernel (running in this
+repo's venv): the agent writes native fdtdmex Python (`Scene` / `pack` / `run_simulation_from_hdf5` /
+`sim_postproc` / `compute_mode`) and runs it there — this server teaches *what to write*, it
+never runs a simulation. The launch is **non-blocking**: `run_simulation_from_hdf5` stages a job
+folder and detaches the solver, so there is no blocking run on the agent's path here.
 
-`get_api_schema("run_fdtd_fdtdmex")` is introspected **live** so it cannot drift from the
-adapter: the authoring knobs come straight from ``real_solver._ring_knobs({})`` (the
-adapter's own defaults), the run params mirror the adapter CLI contract, and the
-sim_init payload fields come from ``fdtdmex.io.SceneModel``. `search_docs` / `get_doc`
-serve a BM25 index over a corpus generated from real on-disk sources (see corpus.py).
+`get_api_schema(name)` describes the **native** pack/launch/post-proc entry points and is introspected
+**live** so it cannot drift: each signature comes straight from ``inspect.signature`` of the real
+function (``fdtdmex.io.{pack,run_simulation_from_hdf5,sim_postproc}`` /
+``fdtdx.core.physics.modes.compute_mode``) and the pack payload fields come from
+``fdtdmex.io.SceneModel``. `search_docs` / `get_doc` serve a BM25 index over a corpus generated from
+real on-disk sources (see corpus.py).
 
 `server.py` stays importable (no ``mcp.run`` here — that lives in ``__main__.py``).
 """
 
 from __future__ import annotations
 
-import sys
+import importlib
+import inspect
 
 from mcp.server.fastmcp import FastMCP
 
@@ -30,98 +34,79 @@ from . import corpus
 mcp = FastMCP("fdtdmex-tools")
 
 
-def _p(type_: str, desc: str, *, default=None, required=False) -> dict:
-    return {"type": type_, "description": desc, "default": default, "required": required}
-
-
 # --------------------------------------------------------------------------- #
-# Solver-API manifest (discovery surface). One real run-API: run_fdtd_fdtdmex.
+# Solver-API manifest (discovery surface). The NATIVE authoring API the agent
+# writes in its own kernel: pack → run_simulation_from_hdf5 → sim_postproc, plus
+# compute_mode. Each entry's signature is introspected live (drift-proof) in
+# get_api_schema. The blocking primitive run_simulation is deliberately NOT here.
 # --------------------------------------------------------------------------- #
 _APIS: dict[str, dict] = {
-    "run_fdtd_fdtdmex": {
-        "name": "run_fdtd_fdtdmex",
+    "pack": {
+        "name": "pack",
         "domain": "fdtd",
         "solver": "fdtdmex",
-        "summary": "FDTDMEX (Apple-MLX fork of fdtdx) — Metal forward FDTD. The agent authors an "
-        "ag-fdtd SimConfig (ring knobs); the adapter translates it to an fdtdx Scene and "
-        "runs sim_init → sim_run → S-matrix.",
-        "returns": "Three contract files in --out-dir ({run-id}_result.hdf5, _summary.json, "
-        "_preview.json) with a mode-resolved S-matrix in summary.scalars (per "
-        "output_port·mode ← input_port·mode: mag, phase, transmission=|S|²); PROGRESS "
-        "i/total streams on stdout.",
+        "import": ("fdtdmex.io", "pack"),
+        "summary": "Resolve a declarative fdtdx Scene / SceneModel and pack it into a project folder "
+        "(location) as one self-contained config HDF5 (content-addressed) plus a lightweight editable "
+        "config JSON. Heavy lifting (place objects, rasterize, freeze sources/detectors) happens here. "
+        "One packed bundle can back many runs.",
+        "returns": "PackResult(hdf5_path, config_path, config_hash); os.fspath(result) is the HDF5 path "
+        "you hand to run_simulation_from_hdf5.",
+    },
+    "run_simulation_from_hdf5": {
+        "name": "run_simulation_from_hdf5",
+        "domain": "fdtd",
+        "solver": "fdtdmex",
+        "import": ("fdtdmex.io", "run_simulation_from_hdf5"),
+        "summary": "Launch a packed config HDF5 as a job. NON-BLOCKING: stages a job folder under "
+        "parent_folder (copies the bundle, snapshots config.json, makes outputs/), writes status.json, "
+        "and launches the solver DETACHED — returns immediately. backend='mlx' (Metal) or 'mock' "
+        "(GPU-free, end-to-end). Poll the returned status.json (queued→running→completed|failed).",
+        "returns": "JobHandle(run_id, job_dir, status_path, bundle_hdf5, results_path, pid). Results land "
+        "at job_dir/outputs/result.hdf5 when status='completed'.",
+    },
+    "sim_postproc": {
+        "name": "sim_postproc",
+        "domain": "fdtd",
+        "solver": "fdtdmex",
+        "import": ("fdtdmex.io", "sim_postproc"),
+        "summary": "Reduce a results HDF5 to the small JSON-serializable quantities the agent reads "
+        "(per-detector shape/dtype/max_abs/mean_abs/sum + tiny previews). Never returns large field arrays.",
+        "returns": "dict: {num_steps, backend, detectors: {name: {key: {shape, dtype, max_abs, mean_abs, ...}}}}.",
+    },
+    "compute_mode": {
+        "name": "compute_mode",
+        "domain": "mode",
+        "solver": "fdtdmex",
+        "import": ("fdtdx.core.physics.modes", "compute_mode"),
+        "summary": "Native full-vectorial waveguide mode solver (Tidy3D-free; mode_backend='fdtdmex' is "
+        "the default). Computes optical modes of a cross-section from its inverse-permittivity distribution.",
+        "returns": "tuple (E, H, complex effective index) jax arrays for the selected mode_index / filter_pol.",
     },
 }
 
 
 # --------------------------------------------------------------------------- #
-# Live introspection for get_api_schema (drift-proof against real_solver.py)
+# Live introspection for get_api_schema (drift-proof against the real functions)
 # --------------------------------------------------------------------------- #
-def _ring_knob_defaults() -> dict:
-    """The adapter's own default ring knobs — `real_solver._ring_knobs({})`, imported by
-    path. Returns {} if the adapter can't be imported (degrade gracefully)."""
-    adapter_dir = corpus.repo_root() / "agentic_adapter"
-    if str(adapter_dir) not in sys.path:
-        sys.path.insert(0, str(adapter_dir))
+def _live_signature(api: dict) -> str | None:
+    """``<name><inspect.signature>`` of the real function, or None if it can't be imported."""
+    mod_name, attr = api["import"]
     try:
-        import real_solver  # type: ignore
-
-        return real_solver._ring_knobs({})
+        fn = getattr(importlib.import_module(mod_name), attr)
+        return f"{api['name']}{inspect.signature(fn)}"
     except Exception:
-        return {}
-
-
-def _authoring_params() -> dict[str, dict]:
-    """SimConfig knobs the agent authors, defaulted from the adapter's live values."""
-    k = _ring_knob_defaults()
-    gap = k.get("gap_um", 0.10)
-    radius = k.get("R", 1.2)
-    width = k.get("WG", 0.40)
-    wl_um = round(k.get("wl", 1.55e-6) * 1e6, 6)
-    res_nm = round(k.get("res", 20e-9) * 1e9, 6)
-    return {
-        "gap_um": _p("float", "Bus-ring coupling gap in µm (parameters.gap).", default=gap),
-        "radius_um": _p("float", "Ring radius in µm (structures[Ring].radius).", default=radius),
-        "width_um": _p("float", "Waveguide width in µm (structures[*].width).", default=width),
-        "wavelength_um": _p("float", "Source center wavelength in µm (sources[*].wavelength).", default=wl_um),
-        "grid_spacing_nm": _p(
-            "float",
-            "Uniform grid spacing in nm; floored at 20 nm for tractability (grid_spec.spacing).",
-            default=res_nm,
-        ),
-    }
-
-
-def _run_params() -> dict[str, dict]:
-    """Adapter CLI run params (frozen CLI contract — real_solver.py main())."""
-    return {
-        "backend": _p(
-            "str",
-            "'mlx' (Apple-Metal forward engine) | 'mock' (GPU-free, schema-valid; the workspace default).",
-            default="mlx",
-        ),
-        "steps": _p("int", "Spectrum sample count = wavelength points (adapter --steps).", default=11),
-        "domain": _p("str", "PDE domain tag (adapter --domain).", default="fdtd"),
-        "solver": _p("str", "Solver tag (adapter --solver).", default="fdtdmex"),
-    }
+        return None
 
 
 def _scene_model_fields() -> list[str]:
-    """The fdtdmex.io.SceneModel field names (sim_init payload), live. [] on failure."""
+    """The fdtdmex.io.SceneModel field names (pack payload), live. [] on failure."""
     try:
         from fdtdmex.io import SceneModel  # type: ignore
 
         return list(SceneModel.model_fields.keys())
     except Exception:
         return []
-
-
-def _render_params(label: str, params: dict[str, dict]) -> list[str]:
-    lines = [f"{label}:"]
-    for pname, spec in params.items():
-        req = " (required)" if spec.get("required") else f" (default: {spec.get('default')!r})"
-        lines.append(f"  {pname}: {spec['type']}{req}")
-        lines.append(f"      {spec['description']}")
-    return lines
 
 
 # --------------------------------------------------------------------------- #
@@ -154,17 +139,19 @@ def get_api_schema(name: str) -> str:
     if api is None:
         return f"unknown api {name!r}. Available: {', '.join(_APIS)} (see list_solver_apis)."
     lines = [f"# {api['name']}  [{api['domain']}/{api['solver']}]", api["summary"], ""]
-    lines += _render_params("params (SimConfig knobs the agent authors)", _authoring_params())
-    lines += [""]
-    lines += _render_params("run params (adapter CLI contract)", _run_params())
-    fields = _scene_model_fields()
-    if fields:
-        lines += ["", f"sim_init payload (fdtdmex.io.SceneModel fields): {', '.join(fields)}"]
+    sig = _live_signature(api)
+    if sig:
+        lines += ["signature (live):", f"  {sig}", ""]
+    if name == "pack":
+        fields = _scene_model_fields()
+        if fields:
+            lines += [f"pack payload (fdtdmex.io.SceneModel fields): {', '.join(fields)}", ""]
     lines += [
-        "",
         f"returns: {api['returns']}",
         "",
-        "Next: build_simulation (sim_init) → commit_chapter → run_fdtd (sim_run) → collect_result → analyze.",
+        "Next: write native fdtdmex Python — assemble a Scene → bundle = pack(scene, location) → "
+        "job = run_simulation_from_hdf5(bundle, parent_folder, backend=...) (non-blocking; poll "
+        "job.status_path) → sim_postproc(job.results_path). search_docs(<query>) for a verified example.",
     ]
     return "\n".join(lines)
 
@@ -201,7 +188,19 @@ def get_doc(ref: str) -> str:
         return f"unknown ref {ref!r}. Known refs: {refs} (see search_docs)."
     lines = [f"# {doc['ref']} — {doc['title']}  [{doc['section']}]", "", doc["body"]]
     if doc["section"] == "examples":
-        lines += ["", "Next: set the edited parameter with update_param, then build_simulation."]
+        runs_in_proc = "run_fdtd" in doc["body"] and "run_simulation_from_hdf5" not in doc["body"]
+        steer = (
+            "Next: REUSE this only for the SCENE-BUILDING (geometry/materials/sources/detectors/"
+            "compute_mode). This script runs fdtdx IN-PROCESS via run_fdtd/apply_params — in ag-fdtd "
+            "that is FORBIDDEN; do NOT copy the run section. To execute, REWRITE it as: "
+            "pack(scene, '.') → run_simulation_from_hdf5(bundle, 'jobs', simulation_name=...) (detached, "
+            "non-blocking) → read outputs/result.hdf5 (sim_postproc for scalars, h5py for full fields)."
+            if runs_in_proc else
+            "Next: adapt this setup — assemble the fdtdx.Scene, then pack(scene, '.') → "
+            "run_simulation_from_hdf5(bundle, 'jobs', ...) → read outputs/result.hdf5 "
+            "(sim_postproc for scalars, h5py for full fields). NEVER run fdtdx in-process (run_fdtd)."
+        )
+        lines += ["", steer]
     else:
         lines += ["", "Next: search_docs(<query>) for more, or list_solver_apis for the run API."]
     return "\n".join(lines)

@@ -33,7 +33,7 @@ The fork's `src/fdtdx/` tracks upstream fdtdx; the MLX backend is two added pack
 | `src/fdtdx/mlx/` | The forward engine: array bridge, curl, E/H update, CPML, source injection, detector accumulation, the time loop, and the custom Metal E/H kernels. |
 | `src/fdtdx/core/physics/mode_backend/`, `core/physics/subpixel.py` | Native full-vectorial mode solver and Kottke subpixel smoothing. |
 | `src/fdtdx/fdtd/wrapper.py` | Upstream's `run_fdtd`, with the ~4-line guarded hook that routes a supported forward run to MLX. |
-| `src/fdtdmex/` | Thin brand alias re-exporting `fdtdx`, plus `io/` — the `sim_init` / `sim_run` / `sim_postproc` HDF5 hand-off. |
+| `src/fdtdmex/` | Thin brand alias re-exporting `fdtdx`, plus `io/` — the `pack` / `run_simulation_from_hdf5` / `sim_postproc` HDF5 hand-off (non-blocking detached launch). |
 
 ## Key design decisions
 - **Forward-only, no on-device autodiff** → no reversible gradient, `custom_vjp`, or checkpointing.

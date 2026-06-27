@@ -10,7 +10,7 @@ FDTDMEX keeps fdtdx's entire front end and adds a native forward backend. Relati
 - **Materials & physics on Metal.** Isotropic / diagonal / full-tensor (9-component) anisotropy, lossy + 9-tensor conductivity, and Drude–Lorentz (ADE) dispersion (folded into the E-kernel). Depth: [materials-anisotropy.md](../docs/materials-anisotropy.md).
 - **Boundaries.** CPML, periodic (real / Bloch-k0), and PEC/PMC — all on the Metal path.
 - **2nd-order non-uniform (graded) grids.** Spacing-weighted curl, interpolation, and off-diagonal averaging — *more correct* than upstream's unweighted (1st-order) average. Depth: [nonuniform-grid.md](../docs/nonuniform-grid.md).
-- **Native, Tidy3D-free mode solver + mode-expansion monitor**, Kottke **subpixel smoothing**, a `Scene` front end with interactive 3-D viz, and a **portable HDF5 hand-off** (`sim_init` → `sim_run` → `sim_postproc`). Depth: [mode-solver.md](../docs/mode-solver.md), [subpixel-smoothing.md](../docs/subpixel-smoothing.md), [mcp-and-ui.md](../docs/mcp-and-ui.md).
+- **Native, Tidy3D-free mode solver + mode-expansion monitor**, Kottke **subpixel smoothing**, a `Scene` front end with interactive 3-D viz, and a **portable HDF5 hand-off** (`pack` → non-blocking `run_simulation_from_hdf5` → `sim_postproc`). Depth: [mode-solver.md](../docs/mode-solver.md), [subpixel-smoothing.md](../docs/subpixel-smoothing.md), [mcp-and-ui.md](../docs/mcp-and-ui.md).
 
 All of the above is element-wise parity-validated against the forced-JAX-CPU oracle (`tests/validation/`); fdtdx's own physics tests also pass auto-routed to MLX.
 

@@ -253,7 +253,7 @@ def _schema_entry(root: Path) -> list[dict]:
     if pack_py.is_file():
         pack_doc = _module_docstring(pack_py)
         if pack_doc:
-            parts += ["Config HDF5 layout (sim_init output):", pack_doc, ""]
+            parts += ["Config HDF5 layout (pack / sim_init output):", pack_doc, ""]
     if json_py.is_file():
         sets = _named_sets(json_py, ("valid_object_names", "valid_constraint_names"))
         if sets.get("valid_object_names"):
