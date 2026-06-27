@@ -95,37 +95,15 @@ what `src/fdtdx/mlx/` assumes:
 - A pre-merge grep over the contract surfaces (ArrayContainer fields, grid API signatures, PML
   profile) to flag a contract change *before* trusting the green checkmark.
 
-## Sync history
+## Current sync state
 
-### Fork-base `77e1281` → `e5351a4` (2026-06-27) — DONE
+`mlx-fork` is current with upstream `main` @ **`e5351a4`** (reconciled 2026-06-27, clean merge).
+**Update this one line on each reconcile** — completed syncs don't need a full write-up.
 
-Merged `upstream/main` into `mlx-fork`, **clean merge, zero conflicts** (the additive `__init__.py`
-export lines didn't collide with upstream's `QuasiUniformGrid` export). 5 commits: 3 dependency/CI
-bumps (#369/#371/#370, noise) plus the two below. Validated: `test_mlx_parity.py` (10) +
-`test_mlx_nonuniform.py` (4) green; local commits only (not pushed).
-
-- **#372 — Fix nonuniform PML staggered profile.** Corrects the graded-grid PML `kappa/sigma`
-  profile; the Metal path inherited it free via `mlx/bridge.py` (it bridges those arrays). Regression
-  coverage already exists: `test_mlx_nonuniform.py` builds a PML-z stretched grid, so MLX↔JAX parity
-  on the fixed profile is locked.
-- **#363 — Quasi-uniform grid + origin-at-center.** Analyzed and adopted in full (no divergence).
-  Conclusion: this is a **front-end coordinate-convention change only**.
-  - *Placement is provably index-invariant.* `bounds_for_center` computes
-    `round((center − origin)/spacing)`. Under corner-origin the L/2 domain half-width was added
-    explicitly to `center` with `origin = 0`; under center-origin it's absorbed into `origin = −L/2`
-    with `center` unshifted. The two cancel → objects land in identical cells. (Your "original
-    placement + a cumsum → same placement" intuition, confirmed at the code level.)
-  - *The MLX engine is unaffected.* It never reads grid `origin` or absolute coordinates — only index
-    slices and `cell_widths` (differences, origin-invariant). Verified by grep over `mlx/` + `backend/`.
-  - *No performance impact.* The only added work is a one-time `_resolve_grid_from_volume` pass at
-    placement (host setup), not in the time loop.
-  - *`QuasiUniformGrid` needs no dispatch gate* — it `.resolve()`s to a `RectilinearGrid` and flows
-    through the engine as a (per-axis-uniform) graded grid.
-  - *No front-end breakage* — io/`Scene`/`plot_setup_3d`/examples use relative placement
-    (`place_relative_to` / `place_at_center`); the only `origin=` hits are matplotlib `imshow`.
-
-## Known queue
-
-Empty — `mlx-fork` is current with upstream `e5351a4`.
+Precedent worth keeping: upstream's "origin-at-center" change (#363) was **placement-index-invariant**
+(the `L/2` domain offset cancels in `bounds_for_center`) and the MLX engine is **origin-blind** (it
+reads index slices + `cell_widths`, both origin-invariant). So upstream coordinate-convention changes
+generally need **no engine work** — only a front-end check of anything that *presents* absolute
+coordinates, and even that is covered here because the viz re-centers via `_axis_edges_um`.
 </content>
 </invoke>

@@ -287,7 +287,8 @@ _eps = 1.0 / np.asarray(_a.inv_permittivities)[0, :, :, np.asarray(_a.inv_permit
 print("production grid:", tuple(int(v) for v in _a.inv_permittivities.shape[1:]),
       "| forward backend:", select_backend(_a, _o, _cfg, None))
 fig_set, axs = plt.subplots(figsize=(7.0, 4.6))
-axs.imshow(_eps.T, origin="lower", extent=[0, _eps.shape[0] * PROD_RES * 1e6, 0, _eps.shape[1] * PROD_RES * 1e6],
+_lx, _ly = _eps.shape[0] * PROD_RES * 1e6, _eps.shape[1] * PROD_RES * 1e6  # centered axes (origin at domain center)
+axs.imshow(_eps.T, origin="lower", extent=[-_lx / 2, _lx / 2, -_ly / 2, _ly / 2],
            cmap="viridis", aspect="equal")
 axs.set_title("Simulation setup — top-down ε (ring + bus)"); axs.set_xlabel("x (µm)"); axs.set_ylabel("y (µm)")
 fig_set.savefig(os.path.join(FIG, "setup.png"), dpi=120, bbox_inches="tight")

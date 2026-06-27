@@ -33,10 +33,7 @@ A locally-hostable reactive editor consuming `SceneModel` + `to_plotly_json(plot
 
 FDTDMEX is an additive fork; staying current with [ymahlau/fdtdx](https://github.com/ymahlau/fdtdx) is an ongoing track, not a one-off. The full protocol, branch model, porting rules, and contract-surface checklist live in [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md); what flows *back* upstream (autodiff-safe only) is in [UPSTREAM_CONTRIB.md](UPSTREAM_CONTRIB.md).
 
-**Sync in — fork-base now `e5351a4` (synced 2026-06-27; was `77e1281`). Queue clear.**
-- [x] Merged **#372** (nonuniform PML staggered-profile fix). The Metal path inherits it free via `mlx/bridge.py`; graded-PML parity covered by `test_mlx_nonuniform.py` (PML-z stretched grid).
-- [x] Merged **#363** (quasi-uniform grid + origin-at-center). Verified a no-op for the engine: object placement is index-invariant (the L/2 offset that was added explicitly under corner-origin is now the grid origin `-L/2`, so `bounds_for_center` yields identical cells); the MLX engine never reads grid origin / absolute coords. `QuasiUniformGrid` resolves to a `RectilinearGrid` and flows through transparently (no dispatch gate). No examples/`Scene`/HDF5 used corner-origin absolute coords. No performance impact (the only added work is a one-time grid-resolve at placement).
-- [x] Clean merge, zero conflicts; `test_mlx_parity.py` (10) + `test_mlx_nonuniform.py` (4) green. Local commits only — not pushed.
+**Sync in — `mlx-fork` is current with upstream `ymahlau/fdtdx` main @ `e5351a4` (2026-06-27).** Protocol + current sync state: [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md).
 
 **Contribute out (autodiff-safe; see UPSTREAM_CONTRIB.md for detail):**
 - [ ] **Off-diagonal anisotropic averaging** width-weighting → JAX `fdtd/misc.py` (upstream's `/4` is 1st-order on graded grids for full-tensor media; also fixes our own JAX path). Cleanest first PR.
