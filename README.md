@@ -17,7 +17,7 @@ The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**,
 **What FDTDMEX adds over fdtdx**
 - **Native Metal/MLX forward backend** on Apple Silicon — iso/diagonal forward simulations run **~6.5–7x faster than JAX-CPU** and the lead grows (no plateau) with resolution. Full anisotropy, lossy + 9-tensor conductivity, CPML / periodic / PEC-PMC boundaries, and Drude–Lorentz dispersion all run on Metal.
 - **Unified-memory capacity** — the GPU addresses the whole domain with no host↔device streaming, so large/heterogeneous domains that saturate a discrete GPU's VRAM still fit.
-- **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, interpolation, and off-diagonal averaging; *more correct* than upstream, which leaves the off-diagonal average unweighted (1st-order).
+- **2nd-order accurate non-uniform (graded) grids** — spacing-weighted curl, field interpolation, *and* off-diagonal anisotropic averaging. The metric-scaled curl and the center-to-edge field interpolation are shared with upstream (both already 2nd-order). The distinguishing fix is the **off-diagonal averaging for full-tensor anisotropy**: upstream colocates the off-diagonal tensor terms with an unweighted 4-point mean, so **upstream's full-tensor anisotropic update is only 1st-order on a graded mesh** — FDTDMEX weights it by the local cell widths and stays 2nd-order. (On uniform / per-axis-uniform grids the two are byte-identical; the gap only opens for full-tensor anisotropy on a *truly graded* grid.)
 - **Native full-vectorial mode solver** (no Tidy3D dependency), a **mode-expansion monitor**, a `Scene` facade with interactive **3D visualization**, and a **portable HDF5 contract** (`pack` → `run_simulation_from_hdf5` → `sim_postproc`, a non-blocking detached launch) for remote / agent-driven runs.
 
 **Not on Metal yet → transparently falls back to JAX**
@@ -38,7 +38,7 @@ Differentiable FDTD tooling is built on JAX, whose **Metal backend is unusable**
 
 ![Forward scaling — MLX/Metal vs JAX-CPU](benchmarks/figures/forward_scaling.png)
 
-**Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at 2nd order on graded meshes (measured slope ≈ 2.0), versus 1st order for an unweighted average.
+**Non-uniform (graded) grids — 2nd-order accurate.** FDTDMEX's spacing-weighted operators converge at 2nd order on graded meshes (measured slope ≈ 2.0). The curl and field interpolation match upstream; the difference is the **off-diagonal anisotropic average** — upstream still computes it as an unweighted 4-point mean, so **upstream's full-tensor anisotropic update degrades to 1st order on a graded grid** while FDTDMEX's width-weighted average holds 2nd order.
 
 ![Non-uniform grid convergence](tests/visualization/figures/nonuniform_convergence_mlx.png)
 
