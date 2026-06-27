@@ -29,6 +29,7 @@ from fdtdx.objects.boundaries.perfectly_matched_layer import PerfectlyMatchedLay
 from fdtdx.objects.boundaries.pmc import PerfectMagneticConductor
 from fdtdx.objects.detectors.detector import Detector
 from fdtdx.objects.sources.source import Source
+
 # Upstream helper (in fdtdx's own plot_setup): converts grid indices to *domain-centered* µm
 # coordinates by subtracting the grid's domain center. Delegating to it keeps this fork view robust
 # to upstream grid-origin changes with no edit here — e.g. fdtdx #363 moved the grid origin to the
