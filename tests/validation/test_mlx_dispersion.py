@@ -101,7 +101,8 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
 
     arr = arrays.reset()
     periodic_axes = get_wrap_padding_axes(oc)
-    state = to_mlx_state(arr, config, periodic_axes)
+    # objects required for CPML (upstream #384 moved PML coeffs onto the PML objects).
+    state = to_mlx_state(arr, config, periodic_axes, objects=oc)
     source_plans = freeze_sources(oc, config, arr)
     detector_plans = freeze_detectors(oc, config)
     detector_buffers = allocate_buffers(detector_plans)
@@ -116,7 +117,7 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
         use_metal_kernel=use_metal_kernel,
     )
     detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
-    return to_array_container(arr, state, detector_states)
+    return to_array_container(arr, state, detector_states, objects=oc)
 
 
 def _assert_parity(arr_j, arr_m):
@@ -125,9 +126,9 @@ def _assert_parity(arr_j, arr_m):
         m = np.asarray(getattr(arr_m.fields, name))
         assert np.isfinite(j).all() and np.isfinite(m).all(), f"field {name} not finite"
         assert _rel(j, m) < _RTOL, f"field {name} mismatch ({_rel(j, m):.2e})"
-    # Polarization state, written back by the bridge, must also match the JAX engine.
+    # Polarization state (now in FieldState upstream), written back by the bridge, must also match.
     for name in ("dispersive_P_curr", "dispersive_P_prev"):
-        assert _rel(getattr(arr_j, name), getattr(arr_m, name)) < _RTOL, f"{name} mismatch"
+        assert _rel(getattr(arr_j.fields, name), getattr(arr_m.fields, name)) < _RTOL, f"{name} mismatch"
     assert _rel(arr_j.detector_states["E"]["energy"], arr_m.detector_states["E"]["energy"]) < _RTOL
 
 
@@ -156,7 +157,7 @@ def test_kernel_ade_matches_ops(name):
     assert kernels.KERNEL_CORES_BUILT == before + 1, "ADE kernel path did not engage (fell back to MLX ops)"
     for field in ("E", "H"):
         assert _rel(getattr(out_ops.fields, field), getattr(out_ker.fields, field)) < _KTOL, field
-    assert _rel(out_ops.dispersive_P_curr, out_ker.dispersive_P_curr) < _KTOL, "P_curr kernel vs ops"
+    assert _rel(out_ops.fields.dispersive_P_curr, out_ker.fields.dispersive_P_curr) < _KTOL, "P_curr kernel vs ops"
     assert _rel(out_ops.detector_states["E"]["energy"], out_ker.detector_states["E"]["energy"]) < _KTOL
 
 

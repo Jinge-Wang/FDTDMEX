@@ -121,6 +121,14 @@ def _unsupported_reason_arrays(arrays) -> str | None:
     # coefficients carried in ``MLXState``. fdtdx forbids dispersion + off-diagonal tensors, so it is
     # always iso/diagonal: lossless rides the Metal kernel, lossy+dispersive uses the MLX-op cores.
     # (Dispersive *plane sources* remain gated separately in ``_unsupported_reason``.)
+    #
+    # CCPR dispersion (upstream #383) adds a ``b * dE/dt`` term carried in a 4th ADE coefficient
+    # ``dispersive_c4`` (non-``None`` only when a pole has non-zero ``coupling_edot``). The MLX ADE
+    # fold only threads ``c1/c2/c3``, so a CCPR pole would silently drop that term -> gate to JAX.
+    # (Non-dispersive *complex* permittivity/conductivity, #382, needs no gate: ``from_complex_*``
+    # splits it into a real ε plus an equivalent conductivity, i.e. the already-supported lossy path.)
+    if getattr(arrays, "dispersive_c4", None) is not None:
+        return "CCPR dispersion (dispersive_c4 / dE-dt term) not supported by the MLX backend yet"
     return None
 
 
@@ -211,5 +219,5 @@ def _run_mlx_forward(arrays, objects, config):
     c = float(config.courant_number)
 
     state, detector_states = run_forward_from_plans(state, source_plans, detector_plans, num_steps, c)
-    out_arrays = to_array_container(arrays, state, detector_states)
+    out_arrays = to_array_container(arrays, state, detector_states, objects=objects)
     return jnp.asarray(num_steps, dtype=jnp.int32), out_arrays

@@ -1,15 +1,55 @@
-"""Host-side precompute of the (time-invariant) CPML recurrence coefficients.
+"""Host-side assembly of the (time-invariant) CPML recurrence coefficients.
 
-Mirrors the inline ``a``/``b`` computation in ``fdtdx.core.physics.curl`` (lines
-245-246 / 317-318). Because ``alpha``, ``kappa``, ``sigma`` and ``dt`` are all constant
-over the simulation, ``a`` and ``b`` are computed once on the host (numpy) and shipped to
-MLX, so the MLX curl never recomputes them per step. ``1/kappa`` is precomputed for the
-same reason. Computed in the field dtype (float32 by default) to match the JAX path.
+Upstream fdtdx #384 ("Refactor PML: attach constants to obj") moved the CPML ``a``/``b``/
+``1/kappa`` coefficients out of the global ``ArrayContainer`` (they no longer live in
+``arrays.alpha/kappa/sigma``) and onto each :class:`PerfectlyMatchedLayer` object as
+``pml_a_E``/``pml_b_E``/``inv_kappa_E`` (+ ``_H``), sized to that PML's slab. The fork's Metal
+kernel still consumes a single global ``(6, Nx, Ny, Nz)`` coefficient array (E-side axis-``k``
+in channel ``k``, H-side in ``k+3``), so :func:`build_cpml_coeffs_from_pml_objects` re-assembles
+that global view from the per-object arrays. All quantities are time-invariant, so this runs
+once on the host (numpy) and the MLX curl never recomputes them per step. Computed in the field
+dtype (float32 by default) to match the JAX path.
 """
 
 from __future__ import annotations
 
 import numpy as np
+
+#: Map a PML object's ``axis`` to the two channels its ``(psi_1, psi_2)`` tuple occupies in the
+#: fork's 6-channel derivative-term ψ layout (``_AX = (1, 2, 2, 0, 0, 1)``). Derived from the
+#: ``step_cpml`` call order in ``fdtdx.core.physics.curl.curl_E``/``curl_H``: for a PML on axis
+#: ``a`` the first corrected derivative (``d_a_F_j`` → ``psi_1``) and second (``d_a_F_i`` →
+#: ``psi_2``) land in these channels. Used to round-trip ψ to/from the per-object dict that
+#: upstream #379 now stores in ``arrays.fields.psi_E/psi_H``.
+PML_AXIS_TO_PSI_CHANNELS: dict[int, tuple[int, int]] = {0: (3, 4), 1: (5, 0), 2: (1, 2)}
+
+
+def build_cpml_coeffs_from_pml_objects(
+    pml_objects, field_shape: tuple[int, int, int]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Assemble the global ``(a, b, inv_kappa)`` CPML arrays, each shape ``(6, Nx, Ny, Nz)``.
+
+    Channels ``0..2`` hold the E-side axis-``0..2`` profile, ``3..5`` the H-side, matching the
+    layout ``detect_pml_slabs`` and the Metal kernel expect. Each PML on ``axis`` writes its E
+    coefficients into channel ``axis`` and its H coefficients into ``axis+3`` over its
+    ``grid_slice``; every other cell keeps the trivial ``(a=0, b=1, inv_kappa=1)`` value, exactly
+    like the old full-grid profiles outside the PML shell.
+    """
+    nx, ny, nz = field_shape
+    dtype = np.float32
+    a = np.zeros((6, nx, ny, nz), dtype=dtype)
+    b = np.ones((6, nx, ny, nz), dtype=dtype)
+    inv_kappa = np.ones((6, nx, ny, nz), dtype=dtype)
+    for pml in pml_objects:
+        k = int(pml.axis)
+        sl = tuple(pml.grid_slice)
+        a[k][sl] = np.asarray(pml.pml_a_E, dtype=dtype)
+        b[k][sl] = np.asarray(pml.pml_b_E, dtype=dtype)
+        inv_kappa[k][sl] = np.asarray(pml.inv_kappa_E, dtype=dtype)
+        a[k + 3][sl] = np.asarray(pml.pml_a_H, dtype=dtype)
+        b[k + 3][sl] = np.asarray(pml.pml_b_H, dtype=dtype)
+        inv_kappa[k + 3][sl] = np.asarray(pml.inv_kappa_H, dtype=dtype)
+    return a, b, inv_kappa
 
 
 def precompute_cpml_coeffs(

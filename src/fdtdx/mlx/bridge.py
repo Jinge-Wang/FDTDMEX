@@ -13,9 +13,8 @@ import mlx.core as mx
 import numpy as np
 
 from fdtdx.constants import c as c_light
-from fdtdx.constants import eps0
 from fdtdx.mlx.curl import _AX, _slab_take, slab_to_full
-from fdtdx.mlx.pml import detect_pml_slabs, precompute_cpml_coeffs
+from fdtdx.mlx.pml import PML_AXIS_TO_PSI_CHANNELS, build_cpml_coeffs_from_pml_objects, detect_pml_slabs
 from fdtdx.mlx.state import MLXState
 
 
@@ -82,17 +81,19 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
     ``objects`` (the :class:`ObjectContainer`) is used only to freeze the PEC/PMC keep-masks (Phase
     3); pass ``None`` to skip them.
     """
-    dt = float(config.time_step_duration)
-    a, b, inv_kappa = precompute_cpml_coeffs(
-        np.asarray(arrays.alpha), np.asarray(arrays.kappa), np.asarray(arrays.sigma), dt, eps0
-    )
+    # CPML coefficients now live on each PerfectlyMatchedLayer object (upstream #384); re-assemble
+    # the fork's global (6, Nx, Ny, Nz) view from them (E-side axis-k in channel k, H-side in k+3).
+    field_shape = tuple(int(s) for s in np.asarray(arrays.fields.E).shape[1:])  # (Nx, Ny, Nz)
+    pml_objects = [] if objects is None else objects.pml_objects
+    a, b, inv_kappa = build_cpml_coeffs_from_pml_objects(pml_objects, field_shape)
     # slab-CPML: ψ and the CPML correction are confined to the PML boundary slabs. Detect each
     # axis's slab extent, then carry ψ only there (component i on the slabs perpendicular to _AX[i]).
     extents = tuple(detect_pml_slabs(a, b, inv_kappa))
-    psi_E_full = _to_mx(arrays.fields.psi_E)
-    psi_H_full = _to_mx(arrays.fields.psi_H)
-    psi_E_slabs = tuple(_slab_take(psi_E_full[i], _AX[i], *extents[_AX[i]]) for i in range(6))
-    psi_H_slabs = tuple(_slab_take(psi_H_full[i], _AX[i], *extents[_AX[i]]) for i in range(6))
+    # ψ is zeroed by ``arrays.reset()`` before bridging (upstream #379 now stores it as a per-PML
+    # dict; we do not read those values, only allocate zero slabs of the matching shape here).
+    zero_psi = mx.zeros((6, *field_shape), dtype=mx.float32)
+    psi_E_slabs = tuple(_slab_take(zero_psi[i], _AX[i], *extents[_AX[i]]) for i in range(6))
+    psi_H_slabs = tuple(_slab_take(zero_psi[i], _AX[i], *extents[_AX[i]]) for i in range(6))
 
     inv_mu = arrays.inv_permeabilities
     if hasattr(inv_mu, "ndim") and getattr(inv_mu, "ndim", 0) > 0:
@@ -116,8 +117,9 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
         disp_c1 = _to_mx(arrays.dispersive_c1)
         disp_c2 = _to_mx(arrays.dispersive_c2)
         disp_c3 = _to_mx(arrays.dispersive_c3)
-        disp_P_curr = _to_mx(arrays.dispersive_P_curr)
-        disp_P_prev = _to_mx(arrays.dispersive_P_prev)
+        # Upstream moved the ADE polarization state P into FieldState (coeffs stay on ArrayContainer).
+        disp_P_curr = _to_mx(arrays.fields.dispersive_P_curr)
+        disp_P_prev = _to_mx(arrays.fields.dispersive_P_prev)
 
     return MLXState(
         E=_to_mx(arrays.fields.E),
@@ -152,24 +154,41 @@ def buffers_to_detector_states(buffers: dict[str, dict[str, mx.array]]) -> dict[
     return {name: {key: _to_jnp(buf) for key, buf in bufs.items()} for name, bufs in buffers.items()}
 
 
-def to_array_container(template_arrays, state: MLXState, detector_states=None):
-    """Write MLX field results (and optional detector states) back into the container."""
+def to_array_container(template_arrays, state: MLXState, detector_states=None, objects=None):
+    """Write MLX field results (and optional detector states) back into the container.
+
+    ``objects`` (the :class:`ObjectContainer`) is needed to rebuild the per-PML ψ dict that
+    upstream #379 stores in ``arrays.fields.psi_E/psi_H``; pass ``None`` to leave ψ untouched
+    (E/H/detectors are the parity bar — ψ is internal CPML memory kept for completeness/resumption).
+    """
     arrays = template_arrays
     arrays = arrays.aset("fields->E", _to_jnp(state.E))
     arrays = arrays.aset("fields->H", _to_jnp(state.H))
-    # slab-CPML: scatter the per-component ψ slabs back into full (6, Nx, Ny, Nz) arrays (zeros in
-    # the interior) so the host container is indistinguishable from the full-domain engine.
-    shape = state.E.shape  # (3, Nx, Ny, Nz)
-    ext = state.cpml_extents
-    psi_E_full = mx.stack([slab_to_full(state.psi_E[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
-    psi_H_full = mx.stack([slab_to_full(state.psi_H[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
-    arrays = arrays.aset("fields->psi_E", _to_jnp(psi_E_full))
-    arrays = arrays.aset("fields->psi_H", _to_jnp(psi_H_full))
+    if objects is not None and objects.pml_objects:
+        # Scatter the per-component ψ slabs back to full (6, Nx, Ny, Nz), then slice each PML's
+        # region out into the (psi_1, psi_2) tuple upstream now keys by PML name.
+        shape = state.E.shape  # (3, Nx, Ny, Nz)
+        ext = state.cpml_extents
+        psi_E_full = np.asarray(
+            mx.stack([slab_to_full(state.psi_E[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
+        )
+        psi_H_full = np.asarray(
+            mx.stack([slab_to_full(state.psi_H[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
+        )
+        psi_E_dict: dict = {}
+        psi_H_dict: dict = {}
+        for pml in objects.pml_objects:
+            c1, c2 = PML_AXIS_TO_PSI_CHANNELS[int(pml.axis)]
+            sl = tuple(pml.grid_slice)
+            psi_E_dict[pml.name] = (_to_jnp(psi_E_full[c1][sl]), _to_jnp(psi_E_full[c2][sl]))
+            psi_H_dict[pml.name] = (_to_jnp(psi_H_full[c1][sl]), _to_jnp(psi_H_full[c2][sl]))
+        arrays = arrays.aset("fields->psi_E", psi_E_dict)
+        arrays = arrays.aset("fields->psi_H", psi_H_dict)
     # Dispersive (ADE) polarization write-back — keeps the host container's state consistent with the
     # full-domain JAX engine (E/H/detectors are the parity bar; this is for completeness/resumption).
     if state.dispersive_P_curr is not None:
-        arrays = arrays.aset("dispersive_P_curr", _to_jnp(state.dispersive_P_curr))
-        arrays = arrays.aset("dispersive_P_prev", _to_jnp(state.dispersive_P_prev))
+        arrays = arrays.aset("fields->dispersive_P_curr", _to_jnp(state.dispersive_P_curr))
+        arrays = arrays.aset("fields->dispersive_P_prev", _to_jnp(state.dispersive_P_prev))
     if detector_states is not None:
         arrays = arrays.aset("detector_states", detector_states)
     return arrays

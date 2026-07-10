@@ -35,6 +35,21 @@ _TIME = 12e-15
 
 
 def _rel(a, b):
+    # PmlAuxField (upstream #379): {pml_name: (psi_1, psi_2)}. Compare as one pool normalized by the
+    # global ψ magnitude (matches the old whole-array _rel), so a physically-~zero component's float
+    # noise isn't divided by its own tiny scale.
+    if isinstance(a, dict):
+        if set(a) != set(b):
+            return float("inf")
+        max_diff = 0.0
+        max_ref = 0.0
+        for k in a:
+            for t in range(len(a[k])):
+                at, bt = np.asarray(a[k][t]), np.asarray(b[k][t])
+                if at.size:
+                    max_diff = max(max_diff, float(np.abs(at - bt).max()))
+                    max_ref = max(max_ref, float(np.abs(at).max()))
+        return max_diff / (max_ref + 1e-30)
     a, b = np.asarray(a), np.asarray(b)
     return float(np.abs(a - b).max() / (np.abs(a).max() + 1e-30))
 
@@ -58,7 +73,9 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
 
     arr = arrays.reset()
     periodic_axes = get_wrap_padding_axes(oc)
-    state = to_mlx_state(arr, config, periodic_axes)
+    # objects is now required for CPML: upstream #384 moved the PML a/b/inv_kappa onto the PML
+    # objects, so the bridge assembles them from oc.pml_objects (was global arrays.alpha/kappa/sigma).
+    state = to_mlx_state(arr, config, periodic_axes, objects=oc)
     source_plans = freeze_sources(oc, config, arr)
     detector_plans = freeze_detectors(oc, config)
     detector_buffers = allocate_buffers(detector_plans)
@@ -75,7 +92,7 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
         use_metal_kernel=use_metal_kernel,
     )
     detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
-    return to_array_container(arr, state, detector_states)
+    return to_array_container(arr, state, detector_states, objects=oc)
 
 
 def _assert_kernel_matches_ops(objects, constraints, config, rtol=1e-4):

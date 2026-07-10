@@ -66,6 +66,21 @@ def _placed():
 
 
 def _rel(j, m):
+    # PmlAuxField (upstream #379): {pml_name: (psi_1, psi_2)}. Compare as one pool normalized by the
+    # global ψ magnitude (matches the old whole-array _rel), so a physically-~zero component's float
+    # noise isn't divided by its own tiny scale.
+    if isinstance(j, dict):
+        if set(j) != set(m):
+            return float("inf")
+        max_diff = 0.0
+        max_ref = 0.0
+        for k in j:
+            for t in range(len(j[k])):
+                jt, mt = np.asarray(j[k][t]), np.asarray(m[k][t])
+                if jt.size:
+                    max_diff = max(max_diff, float(np.abs(jt - mt).max()))
+                    max_ref = max(max_ref, float(np.abs(jt).max()))
+        return max_diff / (max_ref + 1e-30)
     j, m = np.asarray(j), np.asarray(m)
     return float(np.abs(j - m).max() / (np.abs(j).max() + 1e-30))
 
