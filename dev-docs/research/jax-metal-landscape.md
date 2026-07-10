@@ -33,13 +33,22 @@ does). For "keep JAX code," you want a plugin that targets MLX → jax-mps.
 - **🔑 Issue #203 "Generic metal kernel dispatch" (OPEN):** a contributor (porting ColabFold/AlphaFold) has a
   **~1500-line prototype** for `mps.metal_kernel_jit` (compile+dispatch a Metal kernel from source) and
   `mps.metal_kernel_lib` (load `.metallib`), which *"would enable external code to register custom fused
-  Metal kernels without modifying jax-mps core."* **This is exactly the hook Task 1 needs** — awaiting the
-  maintainer's design call. Today there is otherwise **no runtime FFI/registration** (custom_call targets
-  are hard-coded C++: `mps.rms_norm`, etc.), so without #203 you must fork+rebuild jax-mps.
+  Metal kernels without modifying jax-mps core."* **This is exactly the hook Task 1 needs.** **Audit
+  (2026-07, main @ `7b1ae82`): NOT in flight** — the issue is *unanswered* (no maintainer reply, no
+  milestone/assignee, **no PR**; prototype unsubmitted), not on main or any branch. Custom_call targets are
+  all hard-coded C++ (~23 of them: `mps.rms_norm`, `mps.eigh/qr/svd`, …). **So without #203 you must fork +
+  rebuild jax-mps yourself; and we can't assume it lands.**
+- **Two hazards for injecting a kernel (precedent):** (i) jax-mps *tried and abandoned* a hand-written Metal
+  kernel (eigh Jacobi) — *"races under MLX's untracked-resource model"* + slow → reverted to CPU LAPACK
+  (jax-mps#169). (ii) **buffer donation is unimplemented** (`nullptr`) → `while`/`scan` carry copies. The
+  counted-loop fast path (#193/#194) is on main and helps.
+- **Also note:** jax-mps has *gained* linalg on the GPU/CPU (`mps.eigh/qr/svd`) and complex64 scatter since
+  early 2026 — it's no longer as "lean" as it was; the gap to applejax's breadth is narrowing on the MLX side.
 - **Known correctness watch:** #195 — nondeterministic/incorrect gradients through `fori_loop` with nested
   conditionals. Relevant to the reversible-FDTD adjoint; validate gradients carefully.
-- **Verdict:** best substrate (MLX), most momentum, reuses our MSL kernel, and the extensibility hook is
-  already in flight. **Primary bet.**
+- **Verdict:** best substrate (MLX), most momentum, reuses our MSL kernel. The extensibility hook is
+  *proposed but uncommitted* — so it's **still the primary bet, but the kernel-injection is a build-it-
+  ourselves research effort**, not a "turn it on."
 
 ### 2b. jax-mlx-plugin (tsumme1) — a **second MLX-based plugin**, nascent
 - **What:** another PJRT plugin, StableHLO→**MLX** (same healthy substrate as jax-mps), C++/Python (+ a little

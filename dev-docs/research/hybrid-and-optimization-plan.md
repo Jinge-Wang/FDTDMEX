@@ -75,8 +75,11 @@ source build). (ii) **generalize + port** all kernel variants (iso/diagonal/full
 ADE, periodic, PEC/PMC) to the custom_call form — this is the bulk, but it is *re-expressing the existing
 1444-LOC kernel*, not new physics. (iii) **retire scaffolding** (~1548 LOC bridge/loop/dispatch/freeze).
 (iv) upstream the jax-mps PR + the fdtdx Metal-backend PR. The reverse kernel (3b) is a separable follow-on.
-Net: weeks, not months, for the forward-differentiable-via-fallback unification — *because the fusion+VJP+
-metal_kernel infrastructure in jax-mps already exists.*
+Net (revised by the 2026-07 audit below): the *pattern* exists in jax-mps (23 hard-coded `custom_call`
+handlers with VJPs, `mlx/fast.h` available), but the **generic user-kernel hook does not** and is not
+reliably coming (#203 unanswered) — so step (i) now includes **implementing** `mps.metal_kernel_jit` on a
+jax-mps fork/PR ourselves, plus clearing the MLX-resource race (#169) and the no-donation cost. That makes
+this a **months-scale research bet, not weeks** — see the Reassessment section.
 
 ## WS-4 — Upstream contributions (branch off **upstream fdtdx**, not the fork)
 
@@ -96,13 +99,54 @@ Mechanics: `git worktree` or a clone at `upstream/main`; do **not** carry MLX/fo
 
 ---
 
-## Sequencing
-- **Now / near:** WS-2 (mps platform + recipe — days) ‖ WS-4.1 (monitor upstream PR — independent, on an
-  upstream branch).
-- **Next:** WS-1.1 (in-kernel full-tensor / per-tile material — the biggest measured perf gap).
-- **Then:** WS-1.2 (tiled sub-floor engine, spill-justified).
-- **Longer horizon:** WS-3 (custom_call unification) — the highest-leverage but largest item; decide after
-  WS-1/WS-2 land whether to invest in the plugin contribution.
+## Reassessment (2026-07, after a fresh jax-mps code + issue audit)
+
+**Is `custom_call` the *only* bottleneck — i.e., without it is jax-mps hard-capped below fdtdmex?**
+Yes, it is the **primary and necessary** one, but not the *only* factor for full parity:
+
+1. **Stencil fusion (the hard cap) — needs `custom_call`.** jax-mps runs the update as one
+   `mlx::core::compile()` op-graph; that fuses elementwise chains but **cannot** merge the stencil's halo
+   reads / keep the working set on-chip. Measured ceiling ≈ **2× CPU / ~240 Mcs/s**, ~5× below the fork's
+   fused kernel. **No jax-mps op-level tuning crosses this** — only injecting a hand-written fused kernel
+   does. So without `custom_call`, jax-mps forward is permanently ~5× under fdtdmex. **Confirmed cap.**
+2. **Buffer donation is unimplemented** (`PJRT_Buffer_DonateWithControlDependency = nullptr`). The JAX
+   time loop carries E/H/ψ as the `while`/`scan` carry; without donation those buffers can be copied each
+   step (fdtdmex avoids this with a plain loop + MLX's caching allocator). Residual traffic — partly
+   absorbed by MLX's allocator, magnitude **TBD, measure**.
+3. **MLX "untracked-resource" races for custom Metal kernels** (jax-mps#169). jax-mps *tried* a hand-written
+   Metal kernel (eigh Jacobi) and **abandoned it** — "intermittently races under MLX's untracked-resource
+   model" — falling back to CPU LAPACK. Our kernel is race-free in fdtdmex (MLX functional/out-of-place),
+   but jax-mps's execution model wraps it differently; a WAR-fence workaround may be needed. **Real risk.**
+4. **Control-flow loop overhead** — largely mitigated on main by the **counted-loop fast path** (#193/#194);
+   our FDTD loop is counted, so it benefits. Minor.
+
+**So:** overcoming `custom_call` is **necessary and make-or-break** — it lifts forward from ~2× to most of
+the ~13× CPU band — but (2)+(3) may leave a **residual gap** vs fdtdmex's hand-tuned loop. We don't need
+*exact* parity (the goal is unification + most of the speed), but the Task-1 spike must **measure** the real
+custom_call-kernel throughput (and race-freedom) rather than assume parity.
+
+**Status of the hook (#203), re-checked:** the generic metal-kernel dispatch is an **open, unanswered
+proposal** — no maintainer response, no milestone/assignee, **no PR** (the ~1500-LOC prototype is unsubmitted,
+awaiting guidance). It is **missing and not reliably upcoming.** We therefore **cannot wait for it**; the
+realistic path is to *drive it ourselves* (implement `mps.metal_kernel_jit` on a jax-mps fork/PR, ideally
+co-developing with #203's author) — a meaningful commitment, not a "turn it on."
+
+**Consequence for the roadmap:** WS-3 (unification / retire-the-fork) is a **longer, higher-uncertainty
+research bet**, not a near-term certainty. → **Do not retire the fork on its expectation.** Keep investing in
+the **kernel** (WS-1) — it is the durable asset reused by *any* future path (fork bridge today, custom_call
+later) — and land the low-risk upstream wins (WS-2/WS-4) now. Gate the whole unification on the Task-1 spike.
+
+## Sequencing (revised)
+- **Now / near (low-risk, independent, parallel):** WS-2 / Task 3 (mps-platform recognition + recipe — days)
+  ‖ WS-4.1 / Task 2 (monitor upstream PR, on an `upstream/main` branch). Both ship value regardless of WS-3.
+- **Main ongoing investment:** WS-1.1 (in-kernel full-tensor / per-tile material — the biggest *measured*
+  perf gap, full_aniso only ~1.4× CPU) then WS-1.2 (tiled sub-floor engine, spill-justified). **The kernel is
+  the durable asset** — it is what a future `custom_call` path would register, so this work is not lost to WS-3.
+- **Gated research bet — Task 1 / WS-3:** the `custom_call` spike (build jax-mps, implement/borrow
+  `mps.metal_kernel_jit`, prove one FDTD kernel runs race-free at kernel speed inside JAX). **Do this before
+  any decision to retire the fork.** Its outcome — does the injected kernel hit the acceptable throughput band
+  despite no donation + the MLX-race model — is the go/no-go for the whole unification.
+- **Do NOT retire the fork** on the *expectation* of WS-3; only after the spike proves out.
 
 ## Open verification hooks
 - WS-1: re-run `benchmarks/research/engine_matrix.py` per material class + the O-band MRM reference wall
