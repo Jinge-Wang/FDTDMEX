@@ -1,94 +1,98 @@
-# Task 1 — Make jax-mps able to run our hand-rolled Metal kernel
+# Task 1 — Feasibility & effort study: hand-rolling custom-kernel (`custom_call`) support in jax-mps
 
-**Type:** investigation + de-risking spike (C++/build-heavy). **Parallelizable:** yes (independent of Tasks 2/3).
-**Background:** [`../research/jax-mps-eval.md`](../research/jax-mps-eval.md), [`../research/hybrid-and-optimization-plan.md`](../research/hybrid-and-optimization-plan.md) (WS-3), [`../research/jax-metal-landscape.md`](../research/jax-metal-landscape.md).
+**Type:** deep investigation → **feasibility report with a grounded effort/resource/timeline estimate**
+(C++/Metal/MLIR-heavy). **Parallelizable:** yes (independent of Tasks 2/3).
+**Background:** [`../research/jax-mps-eval.md`](../research/jax-mps-eval.md),
+[`../research/jax-metal-landscape.md`](../research/jax-metal-landscape.md),
+[`../research/hybrid-and-optimization-plan.md`](../research/hybrid-and-optimization-plan.md) (WS-3 + Reassessment).
 
-> **⚠️ Scheduling note (may be postponed).** A fresh audit (2026-07, jax-mps @ `7b1ae82`) confirms the
-> generic user-kernel hook **is not implemented and not reliably upcoming**: issue #203 is an *unanswered*
-> proposal — **no maintainer response, no milestone, no PR** (the ~1500-LOC prototype is unsubmitted). So this
-> task is **not "turn on a coming feature"** — it means *building* `mps.metal_kernel_jit` ourselves (fork/PR),
-> and clearing two known hazards (below). It is a **months-scale research bet**. **Sequencing:** do Tasks 2 & 3
-> and the fork's kernel work (WS-1) first; treat this as the **go/no-go spike that gates retiring the fork** —
-> start it deliberately, and consider postponing full investment until the low-risk wins land and/or the
-> maintainer signals on #203. **Do not retire the fork on this task's expectation.**
+> **⚠️ This is a scoping study first, not an implementation sprint.** The owner (project lead) is **not
+> familiar with this class of work** (PJRT plugin internals, Metal kernel authoring, MLIR/StableHLO) and needs
+> a **realistic estimate of how much time, skill, and risk** this carries before committing. So the **primary
+> deliverable is the feasibility report + effort estimate**; a minimal proof-of-concept is secondary (do it
+> only if the build + first kernel prove quick). This gates whether the fork can eventually be retired —
+> **do not retire the fork on this task's expectation.** Sequencing: run Tasks 2 & 3 and the fork's kernel
+> work (WS-1) first; start this deliberately.
 
-## Why this exists (the robust answer to "why can't I just use it")
+## The question to answer
 
-jax-mps is a **PJRT plugin that executes JAX's StableHLO by mapping each op to MLX** (`mlx::core::…`) and
-running the whole program as one `mlx::core::compile()` graph. That op-graph is exactly the fork's own
-"MLX-op cores" ceiling (~200–240 Mcs/s); it **cannot fuse the FDTD stencil into one dispatch** — only a
-hand-written `metal_kernel` does (the fork's 5-RT kernel, ~5× faster). "Inject our kernel via `custom_call`"
-means: emit a `stablehlo.custom_call @<target>` from JAX in place of the op-graph update, and have jax-mps
-recognize `@<target>` and run **our** Metal kernel for it. That is the *only* way to get the 5-RT speed
-while staying inside JAX (and keeping autodiff via `custom_vjp`).
+Can we ourselves add a **generic "run this Metal kernel" `custom_call`** to jax-mps (so fdtdx can emit
+`stablehlo.custom_call @mps.metal_kernel(...)` and run our fused FDTD kernel *inside JAX*, with `custom_vjp`
+for autodiff), and **what does that actually cost** — in person-weeks, required skills, and risk? Today this
+is the *only* way to get the fork's ~5-RT kernel speed while staying in JAX; the generic hook is **not in
+jax-mps** and issue #203 that proposes it is an **unanswered, unsubmitted** proposal (audited 2026-07, main
+`7b1ae82`) — so we cannot wait for it, we would build it.
 
-**What already exists in jax-mps** (so this is a moderate extension, not new infra):
-- custom_call **dispatch by target name** — `src/pjrt_plugin/ops/control_flow.cc` has
-  `if (callTargetName == "mps.rms_norm") { … mlx::core::fast::rms_norm(...) }`, plus `mps.layer_norm`,
-  `mps.rope`, `mps.scaled_dot_product_attention`. Each handler is ~20–40 lines. **Several already ship a
-  VJP/gradient rule** (rms_norm/layer_norm backward) — a template for our `custom_vjp`.
-- `#include <mlx/fast.h>` is present, so **`mlx::core::fast::metal_kernel`** (the C++ twin of the Python
-  `mx.fast.metal_kernel` the fork uses) is directly callable — **our existing MSL string is reusable**.
-- Its own fusion passes (`passes/fuse_softmax|layer_norm|rms_norm`) already emit `custom_call @mps.*`.
+## Investigation area A — jax-mps infrastructure (how much would we add, and where)
 
-**What is MISSING (why you can't use it today) — audited on main @ `7b1ae82`:**
-- **No runtime / FFI custom_call registration.** No XLA-FFI or PJRT-FFI custom-call extension
-  (`PJRT_Buffer_DonateWithControlDependency = nullptr`, only a *profiler* extension in `pjrt_api.cc`). jax-mps
-  recognizes **only ~23 hard-coded target names** (`mps.sdpa`, `mps.rms_norm`, `mps.layer_norm[_bwd]`,
-  `mps.eigh/qr/svd`, `mps.quantized_matmul`, …); any other target → error. So you **cannot register a kernel
-  from Python** — you must add a handler to jax-mps's source and **rebuild**.
-- **The generic hook (#203) is an unanswered proposal, NOT in flight.** `mps.metal_kernel_jit` /
-  `mps.metal_kernel_lib` are proposed by a ColabFold contributor with a **~1500-LOC prototype**, but as of the
-  audit: **no maintainer response, no milestone/assignee, no PR** (prototype unsubmitted). Not on main, not on
-  any origin branch. **We cannot assume it lands** — the realistic path is to *implement it ourselves* on a
-  jax-mps fork/PR (co-develop with #203's author if possible).
-- **Two known hazards the spike must clear (precedent inside jax-mps):**
-  1. **MLX "untracked-resource" races (jax-mps#169).** jax-mps *wrote and then abandoned* a hand-written Metal
-     kernel (eigh Jacobi) because it *"intermittently races under MLX's untracked-resource model"* (and was
-     slower), reverting to CPU LAPACK. Our fdtdmex kernel is race-free (MLX functional/out-of-place), but
-     jax-mps wraps execution differently — **prove race-freedom explicitly**, expect to need a WAR-fence.
-  2. **No buffer donation** → the `while`/`scan` carry (E/H/ψ) may be copied each step (fdtdmex avoids this via
-     a plain loop + MLX caching allocator). **Measure** the residual cost. (The counted-loop fast path, #194,
-     is on main and helps; our FDTD loop is counted.)
-  See the landscape survey [`../research/jax-metal-landscape.md`](../research/jax-metal-landscape.md) and the
-  Reassessment in the plan.
+Read the plugin end-to-end and map exactly what a generic-kernel `custom_call` touches:
+- The **PJRT plugin surface** (`src/pjrt_plugin/pjrt_api.cc`, `mlx_executable.{cc,h}`, `mlx_client`,
+  `mlx_buffer`): how StableHLO is parsed and lowered to an MLX lazy graph and run under one
+  `mlx::core::compile()` + `async_eval`.
+- The **op-handler + custom_call dispatch** (`ops/control_flow.cc`): the ~23 hard-coded targets
+  (`mps.rms_norm`, `mps.eigh/qr/svd`, `mps.sdpa`, …), several with **built-in VJP handlers** — this is the
+  *template*. What a new `@mps.metal_kernel` target needs: unpack operands/attrs (MSL source, grid,
+  I/O dtypes/shapes) → build & dispatch via **`mlx::core::fast::metal_kernel`** (`#include <mlx/fast.h>` is
+  already present) → return the output arrays. Compare with the **#203 prototype's ~1500 LOC** estimate.
+- **Build system reality** (the first friction, quantify it): scikit-build-core + CMake + **pinned
+  LLVM/StableHLO matching jaxlib 0.10.x**. Can we build jax-mps from source on this machine, and how long/how
+  fragile? Document the recipe.
+- **The XLA-FFI alternative**: would implementing the PJRT/XLA-FFI custom-call extension (so kernels register
+  from Python with **no rebuild**) be more work but far more reusable/upstreamable than a bespoke target?
+  Scope both.
 
-## Goal
+## Investigation area B — how Apple Silicon actually runs these kernels (the risk surface)
 
-Deliver a **working spike + a spec** proving that an FDTD update kernel, injected via `custom_call`, runs
-inside JAX on Metal at ~kernel speed — and decide the cleanest mechanism to contribute upstream.
+Understand the Metal execution model well enough to judge whether our kernel injects **correctly and fast**:
+- How MLX dispatches a `fast::metal_kernel`: MSL → `MTLComputePipelineState` → command buffer, the
+  **unified-memory** buffer model, the lazy graph + `eval`, threadgroup/SIMD, and the "no device-wide barrier
+  inside a kernel" constraint.
+- **The race hazard (make-or-break):** jax-mps *wrote and abandoned* a hand-written Metal kernel (eigh Jacobi)
+  because it **"intermittently races under MLX's untracked-resource model"** (jax-mps#169), reverting to CPU.
+  Our fdtdmex kernel is race-free (MLX functional/out-of-place), but jax-mps wraps execution differently —
+  **determine what MLX's resource-tracking model requires** (WAR-fences, `array` dependency edges) so an
+  injected kernel is deterministic. This is the single biggest technical unknown.
+- **The no-donation cost:** `PJRT_Buffer_DonateWithControlDependency = nullptr` → the `while`/`scan` carry
+  (E/H/ψ) may be copied each step. Estimate the residual traffic; note the counted-loop fast path (#193/#194)
+  helps. This bounds how close we can get to fdtdmex even *with* the kernel.
 
-## Steps
+## Investigation area C — what optimized numerical libraries Apple already provides (leverage vs build)
 
-1. **Build jax-mps from source** (`github.com/tillahoffmann/jax-mps`, or the clone in the session
-   scratchpad). This is the first real friction: scikit-build-core + CMake + LLVM/StableHLO pinned to the
-   jaxlib 0.10.x bytecode. **Document the build recipe** (deps, versions, gotchas) — it gates everything.
-2. **Prototype the general mechanism (preferred over a bespoke FDTD target):** add a general
-   **`custom_call @mps.metal_kernel`** handler that takes the MSL source + grid/threadgroup + I/O
-   dtypes/shapes as `backend_config`/attributes and dispatches via `mlx::core::fast::metal_kernel`. Mirror
-   the `mps.rms_norm` handler. *Also assess* implementing the **PJRT/XLA-FFI extension** so JAX's
-   `jax.ffi.register_ffi_target` works — that would let kernels register from Python with **no rebuild**, a
-   far more reusable contribution likely welcomed in jax-mps upstream. Recommend one.
-3. **End-to-end trivial proof:** from JAX, emit that custom_call for a toy kernel (`out = a + b` via a
-   hand MSL) and confirm correct GPU execution under `JAX_PLATFORMS=mps`.
-4. **FDTD proof — the go/no-go measurement:** register a single **E-update** kernel reusing the fork's MSL
-   (`src/fdtdx/mlx/kernels.py` `_field_source`/`_common`). Verify (a) **race-freedom** across many repeats
-   (the #169 hazard — no intermittent wrong results), (b) **element-wise equality** to the fork's kernel, and
-   (c) **throughput** in a real `run_fdtd` loop. Report where it lands: the ~5-RT / ~1600+ Mcs/s regime
-   (success) vs the ~240 op-graph ceiling (failure), and **attribute any residual gap vs fdtdmex** to the
-   no-donation carry copies and/or WAR-fence overhead. This number is the whole task's verdict.
-5. **Spec the full port:** enumerate what it takes to cover all kernel variants (iso/diagonal/full-tensor,
-   CPML fold, non-uniform metric, ADE, periodic, PEC/PMC) and the **`custom_vjp`** (start: fall back to
-   the op-graph `reversible_fdtd` for gradients — already runs under jax-mps at ~CPU-parity; later: a
-   reverse-time Metal kernel). Give an effort estimate.
+Motivated by the owner's Apple background (an internal team's LAPACK-for-Apple-Silicon work). Map the
+landscape so we know what to **reuse** vs **hand-write**, and to contextualize the eigh-on-CPU decision:
+- **CPU — Accelerate (vecLib + BLAS + LAPACK) on the AMX coprocessor.** Apple's strong, optimized dense-linalg
+  path (AMX is L2-cache-coupled, high-throughput; beats OpenBLAS at medium/large sizes). This is what jax-mps
+  calls for `eigh` and why linalg lives on CPU. Confirm current scope + any GPU/Accelerate crossover APIs.
+- **GPU — Metal.** Enumerate what Apple ships: **MPS** (`MPSMatrixMultiplication`, `MPSMatrixDecomposition*`
+  LU/Cholesky, `MPSMatrixSolve` — BLAS/LAPACK-*style* but ML/image-oriented and incomplete), **MPSGraph**, and
+  the newer **MetalPerformancePrimitives** (macOS 26, matmul). Establish the key fact for us: **there is no
+  comprehensive GPU LAPACK** (no robust GPU `eigh`/`svd`; "upstream MLX has no GPU eigh either"), which is why
+  dense linalg stays on CPU/AMX. **Verify whether that has changed** (MetalPerformancePrimitives, newer MPS).
+- **The conclusion this drives:** the **FDTD update is a memory-bound stencil, not dense linalg** — precisely
+  the regime where the **GPU beats AMX** and where **no Apple library helps**, so it is genuinely a
+  hand-written **`fast::metal_kernel`** (our existing MSL). Apple's numerical libraries are *not* a shortcut
+  for the FDTD kernel; they only matter for the mode solver's eig/linalg (which should stay CPU/Accelerate,
+  like jax-mps's eigh). Record this explicitly so the effort estimate doesn't assume a library shortcut that
+  doesn't exist.
 
-## Deliverables
-- jax-mps build recipe; the `@mps.metal_kernel` (and/or FFI) patch on a jax-mps fork/branch; the trivial +
-  FDTD spikes with correctness + throughput numbers; a written recommendation (bespoke handler vs general
-  metal_kernel custom_call vs full FFI) and full-port effort estimate. **Update the research log with results.**
+## Deliverable — the feasibility report (the point of this task)
+
+A written report answering, with evidence:
+1. **Is it feasible** to add generic Metal-kernel `custom_call` to jax-mps and inject our kernel race-free? Y/N
+   with the specific unknowns resolved (race model, build, donation).
+2. **Effort & resources:** person-weeks with confidence bands, broken down (build setup; the generic handler
+   ≈ #203's ~1500 LOC?; JAX-side custom primitive + `custom_vjp`; porting kernel variants iso/diagonal/
+   full-tensor/CPML/ADE/boundaries; clearing the race; upstreaming). **Required skills** (C++, Metal/MSL, MLIR/
+   StableHLO, PJRT) — so the owner can staff it.
+3. **Expected payoff & residual gap:** if we injected one E-update kernel, where would throughput land
+   (~1600 Mcs/s kernel regime vs ~240 op-graph), and what residual gap vs fdtdmex remains from donation/race.
+4. **Go/no-go recommendation** + the cheapest next step (usually: build jax-mps + one trivial `a+b` custom
+   kernel to de-risk the build & the race model before scoping the rest).
+5. **Optional PoC** (only if quick): one FDTD E-update kernel via `@mps.metal_kernel`, element-wise-equal to
+   the fork's kernel, race-checked over many repeats, with a throughput number.
 
 ## Caveats
-- Community sentiment strongly favors **MLX over MPSGraph** ("avoid MPSGraph at all costs"), so target
-  **jax-mps (MLX)**, not applejax (MPSGraph; it also crashes here — see the research log).
-- The upstream-fdtdx PyTorch refactor risk applies to the *fdtdx-side* wiring, not to this jax-mps work
-  (a Metal-kernel-via-custom_call mechanism in jax-mps is framework-agnostic and reusable regardless).
+- Target **jax-mps (MLX)**, not applejax/MetalHLO (MPSGraph — community-warned, and applejax crashes here).
+- The upstream-fdtdx PyTorch-refactor risk applies to the *fdtdx-side* wiring, not to this jax-mps work
+  (a Metal-kernel-via-custom_call mechanism is framework-agnostic and reusable).
+- Coordinate the `mps`-platform handling with Task 3.
