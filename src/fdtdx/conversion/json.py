@@ -115,6 +115,9 @@ class JsonSetup:
             # detectors
             "EnergyDetector",
             "FieldDetector",
+            "FieldProjectionAngleDetector",
+            "FieldProjectionCartesianDetector",
+            "FieldProjectionKSpaceDetector",
             "ModeOverlapDetector",
             "PhasorDetector",
             "PoyntingFluxDetector",
@@ -199,11 +202,22 @@ def _export_json(obj: Any) -> dict | float | int | str | bool | None:
     if isinstance(obj, float | int | str | bool):
         # basic data types
         return obj
-    # numpy / jax arrays (e.g. polygon vertices, resolved RectilinearGrid edges) — small geometry data
-    # kept in the editable JSON config.
-    if isinstance(obj, (np.ndarray, jax.Array)):
-        arr = np.asarray(obj)
-        return {"__ndarray__": {"data": arr.tolist(), "dtype": str(arr.dtype)}}
+    # numpy arrays — must be checked before JAX_DTYPES to avoid ndarray.__eq__ TypeError.
+    # Adopt upstream's canonical serialization (#393, with roundtrip); the fork's legacy
+    # {"__ndarray__": ...} decoder below is retained for backward-compat reads of old configs.
+    if isinstance(obj, np.ndarray):
+        return {
+            "__module__": "numpy",
+            "__name__": "array",
+            "__value__": obj.tolist(),
+        }
+    # JAX arrays — serialize as numpy arrays; RectilinearGrid.__post_init__ re-wraps via jnp.asarray
+    if isinstance(obj, jax.Array):
+        return {
+            "__module__": "numpy",
+            "__name__": "array",
+            "__value__": np.asarray(obj).tolist(),
+        }
     # jax data types
     if obj in JAX_DTYPES:
         str_name = str(obj).split("'")[1]
@@ -275,11 +289,13 @@ def export_json_str(obj: Any) -> str:
     return _json_dict_to_str(d)
 
 
-def _import_obj_from_json(obj: dict | float | int | str | bool | None) -> Any:
+def _import_obj_from_json(obj: dict | list | float | int | str | bool | None) -> Any:
     if obj is None:
         return None
     if isinstance(obj, int | float | str | bool):
         return obj
+    if isinstance(obj, list):
+        return [_import_obj_from_json(v) for v in obj]
     assert isinstance(obj, dict)
     # numpy arrays
     if "__ndarray__" in obj:
@@ -303,8 +319,11 @@ def _import_obj_from_json(obj: dict | float | int | str | bool | None) -> Any:
             kwargs = {k: _import_obj_from_json(v) for k, v in vals.items()}
             return cls(**kwargs)
         # sequence
-        imported_vals = [_import_obj_from_json(v) for v in vals]
-        return cls(imported_vals)
+        if isinstance(vals, list):
+            imported_vals = [_import_obj_from_json(v) for v in vals]
+            return cls(imported_vals)
+        # 0-d numpy/jax array: ndarray.tolist() returns a bare scalar, not a list
+        return cls(_import_obj_from_json(vals))
     # dictionary
     if name == "dict":
         return {k: _import_obj_from_json(v) for k, v in obj.items() if k not in ["__module__", "__name__"]}
