@@ -110,6 +110,16 @@ so 1a/1b mostly help final evaluation; 1c helps any spectral objective.
   placement.
 - **Recommendation:** offer as a forward-accuracy utility / discuss a JAX port with maintainers
   rather than shipping numpy into the differentiable path. Lower priority.
+- **Adjacency to live upstream work:** an open fdtdx effort is reworking *material* interpolation —
+  switching the continuous / voxel-mask blend from inverse-permittivity to permittivity, and adding
+  etching (devices that leave existing materials intact). That is the same subpixel/material-averaging
+  domain as this track (the principled Kottke answer is neither pure-ε nor pure-1/ε linear: average ε
+  tangential and 1/ε normal). So coordinate the Track 4 RFC with that work. Note this is the
+  *material* path; it is independent of Track 2 (off-diagonal *field* averaging), which is a separate
+  code path and can land on its own. For the MLX engine the material change is transparent as long as
+  it only alters how `inv_permittivities` is computed (the bridge reads that array); watch for a
+  stored-quantity change (ε vs 1/ε in the ArrayContainer) or new voxel-mask/etched device types,
+  which are contract-surface items for the dispatcher.
 
 ---
 
