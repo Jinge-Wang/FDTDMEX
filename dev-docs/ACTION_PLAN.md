@@ -19,6 +19,15 @@ FDTDMEX is a fork of [fdtdx](https://github.com/ymahlau/fdtdx) (a JAX FDTD Maxwe
 
 ## Next — the focus
 
+> **Strategic direction (2026-07):** a measured study ([research/jax-mps-eval.md](research/jax-mps-eval.md))
+> found that the **jax-mps** plugin runs unmodified fdtdx forward *and* the reversible adjoint on the Apple
+> GPU (inverse design on a Mac — the thing this fork gave up), and that our Metal kernel could be injected
+> into jax-mps via `custom_call` to keep its speed *inside JAX*. The north star is to **fold Metal
+> acceleration back into upstream fdtdx and retire this fork** (no more hand-porting upstream commits). The
+> concrete parallel workstreams are in [research/hybrid-and-optimization-plan.md](research/hybrid-and-optimization-plan.md)
+> and spun out as agent tasks in [tasks/](tasks/). The two build items below remain relevant to the fork
+> until/unless that unification lands.
+
 Two remaining build items, plus the ongoing upstream-sync track below.
 
 ### 1. Mode sources / detectors on Metal

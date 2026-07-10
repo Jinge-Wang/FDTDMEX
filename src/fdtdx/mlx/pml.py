@@ -52,32 +52,6 @@ def build_cpml_coeffs_from_pml_objects(
     return a, b, inv_kappa
 
 
-def precompute_cpml_coeffs(
-    alpha: np.ndarray,
-    kappa: np.ndarray,
-    sigma: np.ndarray,
-    dt: float,
-    eps0: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return ``(a, b, inv_kappa)``, each shape ``(6, Nx, Ny, Nz)``.
-
-    Matches ``b = expm1(-dt/eps0 * (sigma/kappa + alpha)) + 1`` and
-    ``a = nan_to_num((b - 1) * sigma / (sigma + alpha*kappa) / kappa)``.
-    """
-    alpha = np.asarray(alpha)
-    kappa = np.asarray(kappa)
-    sigma = np.asarray(sigma)
-
-    b = np.expm1(-dt / eps0 * (sigma / kappa + alpha)) + 1.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        a = (b - 1.0) * sigma / (sigma + alpha * kappa) / kappa
-    a = np.nan_to_num(a, nan=0.0, posinf=0.0, neginf=0.0)
-    inv_kappa = 1.0 / kappa
-
-    dtype = alpha.dtype
-    return a.astype(dtype), b.astype(dtype), inv_kappa.astype(dtype)
-
-
 def detect_pml_slabs(a: np.ndarray, b: np.ndarray, inv_kappa: np.ndarray, pad: int = 1) -> list[tuple[int, int]]:
     """Per-axis ``(lo, hi)`` PML slab thickness: the CPML correction is confined to indices
     ``[0:lo]`` and ``[N-hi:N]`` along each axis ``k``.
