@@ -11,8 +11,10 @@
 capability upstream fdtdx lacks today (on a Mac it runs CPU-only). The goal here is **not** the fork's raw
 kernel speed — it is a **robust, low-effort infrastructure ("canvas")** so that:
 - fdtdx users on Apple Silicon get GPU forward + **inverse design on a Mac** immediately, and
-- once Task 1's kernel-via-`custom_call` lands in jax-mps, fdtdx is *already* running on `mps` and simply
-  gets faster — no further fdtdx plumbing needed for the boost.
+- **if/when** Task 1's kernel-via-`custom_call` proves out (it's a gated research bet, not a certainty),
+  fdtdx is *already* running on `mps` and simply gets faster — no further fdtdx plumbing needed for the boost.
+  This canvas is worth building **regardless** of Task 1's outcome (op-graph GPU + Mac inverse design stand
+  on their own).
 
 ## What's missing (the one blocker) — and it's small
 
