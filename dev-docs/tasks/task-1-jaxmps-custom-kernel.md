@@ -23,11 +23,17 @@ while staying inside JAX (and keeping autodiff via `custom_vjp`).
 - Its own fusion passes (`passes/fuse_softmax|layer_norm|rms_norm`) already emit `custom_call @mps.*`.
 
 **What is MISSING (why you can't use it today):**
-- **No runtime / FFI custom_call registration.** There is *no* XLA-FFI or PJRT-FFI custom-call extension
-  (grep confirms: only a *profiler* extension in `pjrt_api.cc`; no `XLA_FFI`/`register_custom_call`). jax-mps
-  recognizes **only the target names hard-coded in its C++**; any other target → error. So you **cannot
-  register a kernel from Python** — you must add a handler to jax-mps's source and **rebuild the plugin**.
-- Therefore there is no FDTD handler and no general "run this MSL" hook.
+- **No runtime / FFI custom_call registration *yet*.** There is *no* XLA-FFI or PJRT-FFI custom-call
+  extension (grep confirms: only a *profiler* extension in `pjrt_api.cc`; no `XLA_FFI`/`register_custom_call`).
+  jax-mps recognizes **only the target names hard-coded in its C++**; any other target → error. So today you
+  **cannot register a kernel from Python** — you'd have to add a handler to jax-mps's source and rebuild.
+- **BUT this exact hook is already in flight — jax-mps issue #203 "Generic metal kernel dispatch" (OPEN).**
+  A contributor (porting ColabFold/AlphaFold) has a **~1500-line prototype** for `mps.metal_kernel_jit`
+  (compile+dispatch a Metal kernel from MSL source) and `mps.metal_kernel_lib` (load `.metallib`), which
+  *"would enable external code to register custom fused Metal kernels without modifying jax-mps core"* — it's
+  awaiting the maintainer's design decision, no PR merged. **So the mechanism we need may land upstream; the
+  highest-leverage move is to engage/support #203, not build our own from scratch.** See the landscape survey
+  [`../research/jax-metal-landscape.md`](../research/jax-metal-landscape.md).
 
 ## Goal
 
