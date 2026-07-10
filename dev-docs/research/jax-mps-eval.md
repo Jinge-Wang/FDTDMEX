@@ -182,6 +182,82 @@ corners the fork's own thesis predicted:
 forward, so it doesn't replace the engine. Its real value is the **opposite** end: it hands the fork back
 the one thing it gave up (Metal autodiff / inverse design), for free and without divergence.
 
+---
+
+## Deep-dive round 2 (regression, root-causes, broader coverage, the custom_call path)
+
+### Post-merge regression check — none; a **+14%** gain
+Rigorous A/B of the fused kernel, pre-merge `10d39ae` vs post-merge, N=128/192 @ 500 steps:
+128: 1459 → **1659** (+13.7%); 192: 1586 → **1810** (+14.1%). The kernel MSL is byte-identical, so
+this is upstream **#379 "memory-efficient PML"** flowing in — CPML coeffs now sit slab-sized on the PML
+objects instead of full `(6,N³)` container arrays, lightening setup/bridge. No per-step regression.
+
+### Why jax-mps lags — structural, **not** autodiff
+`jax-mps/src/pjrt_plugin/mlx_executable.cc:868` wraps the whole StableHLO program in
+**`mlx::core::compile()`** (+ `async_eval` pipelining). So jax-mps runs the *identical* computation as
+the fork's **MLX-op cores** (`mx.compile`-fused MLX ops) — and lands at the same **op-graph ceiling**
+(~200–240 Mcs/s, matching the fork's MLX-op path). `compile()` fuses elementwise chains but **cannot**
+merge the stencil's neighbour reads or keep the working set on-chip; the fused kernel's ~5× edge is the
+**traffic gap** (single-dispatch MSL, 5 RT vs ~21–36 RT), a property of `mx.fast.metal_kernel` that op-
+graph compilation structurally can't reach. The forward gap appears with **no autodiff involved**, so the
+user's "choked by auto-diff" hypothesis is **disproven** — the cause is fusion granularity, not gradients.
+
+### Can a plugin "hand-roll" like we did? — **yes, via `custom_call`** (the key strategic path)
+JAX supports hand-written kernels wrapped for autodiff (`jax.ffi` / a custom primitive with
+`custom_vjp`). The plugin just has to route `stablehlo.custom_call` to a kernel. **applejax already has a
+`CustomCallRegistry`** (`ops/control_flow_ops.mm:222`, `CustomCallRegistry::Find(target)`) — it's how it
+does LAPACK QR/SVD/eigh. **jax-mps has no such hook** (no custom_call/FFI handling in source). So the
+"holy grail" — **fused-kernel forward speed + autodiff + one JAX codebase** — is *architecturally
+reachable*: register the FDTD update (and its reverse-time adjoint) as `custom_call` targets, wrap them in
+`custom_vjp`. It is **not available today**; it is a *contribution* (add custom_call + kernel registration
+to the plugin; a Metal/MSL kernel behind the target). jax-mps (MLX, matches the fork's kernel) is the more
+natural host for this; applejax already has the registry but uses MPSGraph and currently crashes.
+
+### Why applejax crashes — a fixable library bug, not a verdict
+Native **SIGTRAP / EXC_BREAKPOINT** in `jax_mps::MpsExecutable::Execute → CFRelease.cold.2`
+(CoreFoundation **double-release / use-after-free**), inside the Apple GPU driver `AGXMetalG16X`, on the
+fdtdx init graph. Basic FDTD ops (pad/roll/dynamic_update/scatter/stacked-curl) each run fine in isolation,
+so it's a ref-counting bug in applejax's execute path on a non-trivial graph — **fixable** (root-cause the
+over-released buffer, rebuild). applejax's forward/inverse perf is therefore **untested**, not ruled out.
+
+### Broader material coverage (M4 Pro, 150–200 steps, Mcs/s) — the anisotropic flip
+| material | JAX-CPU | jax-mps | MLX-op cores | fused kernel |
+|---|---:|---:|---:|---:|
+| isotropic N=128 | 129 | 236 | 195 | **1659** |
+| diagonal N=128 | ~70 | 208 | 218 | **1080** |
+| **full_aniso N=128** | 70 | **46** | 99 | **99** (falls back to MLX-op) |
+
+- **iso/diagonal:** fused kernel ~5–6× jax-mps, ~8–13× CPU — the fork's strong regime.
+- **full-tensor anisotropic (uniform 9-tensor):** the fused kernel **has no in-kernel tensor path** (the
+  block hybrid only accelerates *compact* inclusions), so it runs the MLX-op aniso cores → only **~1.4×
+  CPU**, and **jax-mps is slower than CPU** (46 vs 70). This is the fork's weakest regime and, per
+  `performance-roadmap.md §8`, the **largest untapped win** (per-tile material compaction / an in-kernel
+  tensor update). The user's demand for anisotropic coverage surfaced this — it was invisible in the
+  iso-only numbers.
+
+### Large-N spill gate (the tiling decision) — **positive**
+Fused-kernel throughput vs N (iso, 200 steps): 128=1176, 192=**1395 (peak)**, 256=1307, 384=979,
+512=905 — a **~35% drop** from the N=192 peak to N=512. The cache spills on the strided x/y neighbour
+lines exactly as `performance-roadmap.md §4` predicts, so the tiled engine's **spatial-tile** component is
+load-bearing at large N (the fork's target regime), on top of temporal blocking + material compaction.
+
+### How much cleaner would jax-mps make the fork?
+Fork MLX engine + backend = **3004 LOC**: ~**1444** physics/kernel (`kernels/curl/aniso/pml/update/
+interpolate` — the *keeper*, wrappable as a `custom_call`) + ~**1548** scaffolding (`bridge/loop/state/
+source_freeze/detector_freeze/inject/accumulate/boundary_mask/serialize/metrics` + `backend/dispatch`).
+A JAX-native `custom_call` approach retires most of the **1548 scaffolding LOC** (JAX owns tracing,
+execution, the sim loop, autodiff) plus the whole element-wise parity harness, while keeping the kernel.
+The forward-vs-unification trade is now quantified: unify fully on the op-graph plugin = lose ~5× forward;
+unify via `custom_call`-registered kernel = keep the kernel, shed the plumbing, gain autodiff.
+
+### Monitor optimization — where it lives, and upstreaming
+The 3.9× monitor win (region-restricted interpolation + activity-gating + DFT auto-subsampling;
+`docs/performance.md §Monitor recording`) lives **only in the MLX path** (`mlx/detector_freeze.py`,
+`mlx/accumulate.py`, `mlx/interpolate.py`) — the JAX detector classes don't have it. Upstreaming it means
+**re-implementing it in fdtdx's JAX detector path, differentiably**, on a branch off *upstream* fdtdx (not
+the fork). Region-restriction + activity-gating are exact; DFT subsampling is exact within the
+oversampling margin — all three are autodiff-safe and generally useful, so they are strong upstream PRs.
+
 ## Track 3 — strategic decision memo (PENDING)
 Option matrix (A unify+retire fork / B keep fused kernel + upstream Metal / C improve the sounder
 plugin / D hybrid), scored on forward Mcs/s × autodiff × features × unification/divergence cost.
