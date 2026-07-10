@@ -45,7 +45,7 @@ FDTDMEX is an additive fork; staying current with [ymahlau/fdtdx](https://github
 **Sync in — `mlx-fork` is current with upstream `ymahlau/fdtdx` main @ `65e0fd4` (2026-07-09).** Protocol + current sync state: [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md).
 
 **Contribute out (autodiff-safe; see UPSTREAM_CONTRIB.md for detail):**
-- [ ] **Off-diagonal anisotropic averaging** width-weighting → JAX `fdtd/misc.py` (upstream's `/4` is 1st-order on graded grids for full-tensor media; also fixes our own JAX path). Cleanest first PR.
+- [x] **Off-diagonal anisotropic averaging** width-weighting → JAX `fdtd/misc.py`. **DONE — merged upstream as fdtdx #378** (`d54898b`) and synced back into the fork at `65e0fd4`; both the JAX path and the MLX engine now carry it. (Was the "cleanest first PR"; the remaining items below are the queue.)
 - [ ] **Region-restricted detector interpolation** + activity-gating → `update_detector_states` (upstream interpolates the whole domain every step; the ring example went 1478→377 s from this class of change). Differentiable, scan-safe.
 - [ ] **Nyquist-aware DFT subsampling** for phasor/frequency monitors (`lax.cond` stride gate + Riemann normalization). New capability upstream lacks.
 - [ ] **Tidy3D-free FD mode solver** (numpy/scipy, not in the gradient path) → optional `mode_backend`. RFC first.

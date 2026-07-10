@@ -68,10 +68,14 @@ so 1a/1b mostly help final evaluation; 1c helps any spectral objective.
 
 ---
 
-## Track 2 — Accuracy: width-weighted off-diagonal anisotropic averaging ⭐
+## Track 2 — Accuracy: width-weighted off-diagonal anisotropic averaging ✅ DONE
 
-- **What:** upstream `fdtd/misc.py:avg_anisotropic_E/H_component` colocates off-diagonal tensor terms
-  with a plain `/4` 4-point mean → **1st-order on graded grids for full-tensor anisotropy** (still so
+> **✅ Merged upstream as fdtdx #378** (`d54898b`) and synced back into the fork at `65e0fd4`. Upstream's
+> JAX `fdtd/misc.py` + `fdtd/update.py` now carry the width-weighting; the fork's MLX engine mirrors it.
+> The text below is retained as the record of what was contributed.
+
+- **What:** upstream `fdtd/misc.py:avg_anisotropic_E/H_component` *used to* colocate off-diagonal tensor
+  terms with a plain `/4` 4-point mean → **1st-order on graded grids for full-tensor anisotropy** (so
   at `e5351a4`). FDTDMEX's `mlx/aniso.py` splits it into two separable half-steps and width-weights
   the center→edge step → **2nd-order**. (Upstream's *curl* and *detector interpolation* are already
   weighted/2nd-order; this off-diagonal average is the one remaining gap.)

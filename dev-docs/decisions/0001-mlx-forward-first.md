@@ -13,7 +13,7 @@ We want native Apple-Silicon (Metal) FDTD. JAX's Metal path is unusable (no JIT 
 2. **Forward-only on Metal.** Do not port the reversible/`custom_vjp` gradient or checkpointing. This removes the single hardest porting blocker.
 3. **Host/GPU split at a plain-array bridge.** Reuse FDTDX's mature CPU front end (geometry, constraints, GDS, PML profiles, source profiles); own only the MLX hot loop (~1.5–3k lines).
 4. **Functional/out-of-place updates** for race-freedom without ping-pong buffers/atomics.
-5. **Non-uniform grids are first-class** (spacing-weighted operators), improving on FDTDX.
+5. **Non-uniform grids are first-class** (spacing-weighted operators). *(Update: the off-diagonal-averaging accuracy fix this motivated was later upstreamed — merged into fdtdx as #378 — so it is no longer a fork-only improvement.)*
 6. **Mode solver written in-house** (host scipy eig), avoiding MLX's missing complex GPU eig and the Tidy3D dependency.
 
 ## Consequences
