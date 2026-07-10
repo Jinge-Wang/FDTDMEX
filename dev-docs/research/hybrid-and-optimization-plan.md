@@ -45,21 +45,38 @@ jax-mps runs unmodified fdtdx forward **and** the reversible adjoint on the GPU 
 
 ## WS-3 — Unification via `custom_call` (the "fast + differentiable + one codebase" endgame)
 
-The path to keeping the fused-kernel speed *and* getting autodiff *and* collapsing the ~1548 LOC of
-bridge/loop/dispatch scaffolding into JAX:
+**This is the strategic north star**: if a `custom_call`-registered kernel matches the fork's speed *inside
+JAX*, then fdtdx upstream can ship Metal acceleration behind `pip install jax-mps`, the fork is **retired**,
+upstream commits stop needing hand-porting, and the speedup reaches every fdtdx user. Feasibility is now
+**high** — jax-mps already has the exact machinery:
 
-1. **Add `stablehlo.custom_call` dispatch + a kernel-registration API to jax-mps** (applejax already has a
-   `CustomCallRegistry`; jax-mps does not). Contribution to jax-mps: route a custom_call target to an
-   `mx.fast.metal_kernel` — reusing the fork's *existing MLX MSL* directly.
-2. **Wrap the FDTD forward + reverse-time adjoint as JAX custom primitives with `custom_vjp`**, lowering to
-   those custom_call targets. Result: JAX-native, differentiable, fused FDTD on Metal — one `import fdtdx`,
-   forward at kernel speed, gradients included, most scaffolding retired.
-3. **Alternative host — fix applejax.** applejax already has the registry (MPSGraph) but crashes on a
-   `CFRelease` double-free in `MpsExecutable::Execute`; root-cause + patch would make its complex/linalg
-   breadth available too. Lower priority than the jax-mps custom_call path (which reuses our MLX kernel).
+- Its own fusion passes emit `stablehlo.custom_call @mps.softmax / @mps.layer_norm / @mps.rms_norm / @mps.rope`
+  and its handler (`ops/control_flow.cc`) dispatches by `call_target_name` to `mlx::core::fast::…` calls —
+  **~20-line handlers**, several with **built-in VJP rules** (rms_norm/layer_norm backward). It `#include
+  <mlx/fast.h>`, so **`mlx::core::fast::metal_kernel`** (the C++ twin of the fork's `mx.fast.metal_kernel`)
+  is available. Registering the FDTD update is "add another handler like rms_norm, calling `fast::metal_kernel`
+  with our existing MSL string." **The kernel is the durable asset; only the invocation path changes.**
 
-This is the big, longer-horizon item; it is *architecturally validated* (custom_call + custom_vjp is the
-standard JAX hand-rolled-kernel mechanism) but is a real plugin contribution, not a config change.
+Path:
+1. **Contribute a general `@mps.metal_kernel` custom_call to jax-mps** (source MSL + grid/attrs → `fast::
+   metal_kernel`). More reusable than an FDTD-specific target and the likeliest-accepted upstream PR — it is
+   effectively "JAX FFI for Metal kernels." (applejax has a `CustomCallRegistry` too but uses MPSGraph, which
+   the community warns against and which is what crashed it — prefer jax-mps/MLX.)
+2. **fdtdx side:** a JAX primitive that emits that custom_call for the E/H update, reusing the fork's MSL
+   (`mlx/kernels.py`). Forward-only first (fast forward in JAX, no gradient on that path).
+3. **Differentiable tier (`custom_vjp`):** provide the reverse pass. Two options — (a) cheap: fall back to
+   the existing op-graph `reversible_fdtd` for gradients (runs under jax-mps at ~CPU-parity — already
+   validated), fast forward via the kernel; (b) full: a reverse-time Metal kernel as the custom_vjp for fast
+   inverse design too. Start with (a); (b) is a later perf item.
+
+**Effort estimate.** Moderate, front-loaded on a spike: (i) **de-risk spike** — one E-update MSL kernel behind
+a jax-mps `@mps.metal_kernel` handler, prove correctness + ~5-RT speed inside JAX (days, needs a jax-mps
+source build). (ii) **generalize + port** all kernel variants (iso/diagonal/full-tensor, CPML fold, metric,
+ADE, periodic, PEC/PMC) to the custom_call form — this is the bulk, but it is *re-expressing the existing
+1444-LOC kernel*, not new physics. (iii) **retire scaffolding** (~1548 LOC bridge/loop/dispatch/freeze).
+(iv) upstream the jax-mps PR + the fdtdx Metal-backend PR. The reverse kernel (3b) is a separable follow-on.
+Net: weeks, not months, for the forward-differentiable-via-fallback unification — *because the fusion+VJP+
+metal_kernel infrastructure in jax-mps already exists.*
 
 ## WS-4 — Upstream contributions (branch off **upstream fdtdx**, not the fork)
 
