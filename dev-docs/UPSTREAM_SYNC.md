@@ -97,8 +97,20 @@ what `src/fdtdx/mlx/` assumes:
 
 ## Current sync state
 
-`mlx-fork` is current with upstream `main` @ **`e5351a4`** (reconciled 2026-06-27, clean merge).
+`mlx-fork` is current with upstream `main` @ **`65e0fd4`** (reconciled 2026-07-09).
 **Update this one line on each reconcile** — completed syncs don't need a full write-up.
+
+`e5351a4 → 65e0fd4` (15 commits) was a non-trivial engine sync, not a doc-only one. Text merge was
+near-clean (2 conflicts: `conversion/json.py` array serialization #393 → took upstream's canonical
+form, kept the fork's legacy `__ndarray__` decoder; `test_modes.py` → upstream's 4-elem coords +
+the fork's `mode_backend` arg). The behavioral work was re-pointing the MLX bridge onto two upstream
+restructurings: **PML #379/#384** moved CPML `a/b/inv_kappa` off `ArrayContainer.alpha/kappa/sigma`
+onto each `PerfectlyMatchedLayer` object and turned `psi_E/psi_H` into a per-PML dict — `mlx/pml.py`
+now re-assembles the global `(6,…)` coeff view + round-trips ψ (`build_cpml_coeffs_from_pml_objects`,
+`PML_AXIS_TO_PSI_CHANNELS`); **dispersion** moved ADE `P` into `FieldState`. New JAX-fallback gate:
+CCPR dispersion (#383, `dispersive_c4`); #382 complex materials need none (split to real ε + σ).
+Contract-surface note: `to_mlx_state`/`to_array_container` now **require `objects`** (CPML reads the
+PML objects). Parity gate green (55 validation tests). Full analysis: `research/jax-mps-eval.md`.
 
 Precedent worth keeping: upstream's "origin-at-center" change (#363) was **placement-index-invariant**
 (the `L/2` domain offset cancels in `bounds_for_center`) and the MLX engine is **origin-blind** (it

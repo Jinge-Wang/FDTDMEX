@@ -33,7 +33,7 @@ A locally-hostable reactive editor consuming `SceneModel` + `to_plotly_json(plot
 
 FDTDMEX is an additive fork; staying current with [ymahlau/fdtdx](https://github.com/ymahlau/fdtdx) is an ongoing track, not a one-off. The full protocol, branch model, porting rules, and contract-surface checklist live in [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md); what flows *back* upstream (autodiff-safe only) is in [UPSTREAM_CONTRIB.md](UPSTREAM_CONTRIB.md).
 
-**Sync in — `mlx-fork` is current with upstream `ymahlau/fdtdx` main @ `e5351a4` (2026-06-27).** Protocol + current sync state: [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md).
+**Sync in — `mlx-fork` is current with upstream `ymahlau/fdtdx` main @ `65e0fd4` (2026-07-09).** Protocol + current sync state: [UPSTREAM_SYNC.md](UPSTREAM_SYNC.md).
 
 **Contribute out (autodiff-safe; see UPSTREAM_CONTRIB.md for detail):**
 - [ ] **Off-diagonal anisotropic averaging** width-weighting → JAX `fdtd/misc.py` (upstream's `/4` is 1st-order on graded grids for full-tensor media; also fixes our own JAX path). Cleanest first PR.
