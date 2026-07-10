@@ -5,7 +5,8 @@ fdtdx" decision. Sources: project repos + issue trackers, the `jax-ml/jax` discu
 Swift Forums, and MLX-ecosystem coverage (links at bottom). **Bottom line up front:** the substrate war is
 settled in MLX's favor; **jax-mps is the leader and the right vehicle**, and its open issue **#203 is
 literally the generic-Metal-kernel hook we need**; **MetalHLO** is the ambitious wildcard to watch;
-applejax and Apple's jax-metal are deprioritized.
+**jax-mlx-plugin** is a newer 2nd MLX-based option to track (nascent, closed issue tracker); applejax and
+Apple's jax-metal are deprioritized.
 
 ## The substrate: MLX vs MPSGraph (this decides everything)
 
@@ -16,7 +17,7 @@ applejax and Apple's jax-metal are deprioritized.
   graph (a CFRelease double-free); MetalHLO (MPSGraph-default) reports CNN-training drift + random-normal
   divergence. **Anything MLX-based inherits the healthier foundation.**
 
-## The five players
+## The players (two MLX-based, three MPSGraph-based, plus MLX the substrate)
 
 ### 1. MLX itself — not a JAX plugin, but the foundation
 The array framework. You'd only use it directly if you *rewrite* in MLX (that's what this fork's engine
@@ -39,6 +40,24 @@ does). For "keep JAX code," you want a plugin that targets MLX → jax-mps.
   conditionals. Relevant to the reversible-FDTD adjoint; validate gradients carefully.
 - **Verdict:** best substrate (MLX), most momentum, reuses our MSL kernel, and the extensibility hook is
   already in flight. **Primary bet.**
+
+### 2b. jax-mlx-plugin (tsumme1) — a **second MLX-based plugin**, nascent
+- **What:** another PJRT plugin, StableHLO→**MLX** (same healthy substrate as jax-mps), C++/Python (+ a little
+  Julia). "Compiles standard JAX code to Metal compute kernels automatically." **MIT.**
+- **Claims (broader than jax-mps on paper):** **387 ops** exhaustively tested; **full autodiff** (`grad`,
+  `value_and_grad`, `jacfwd/jacrev`, `hessian`); control flow (`cond/while/scan/fori`); **linalg on MLX**
+  (matmul, SVD, QR, Cholesky, eig) — notable because it's linalg *without* MPSGraph (applejax needed
+  MPSGraph+Accelerate for that); **FFT** (fft/ifft/rfft/irfft + 2D); convolutions. No f64 (Metal); LU/slogdet
+  fall back to CPU; while-loops block kernel fusion.
+- **Maturity — very early:** **12★, 1 fork, v0.0.4 (Mar 2026), only ~10 commits, 2 releases.** **Issue
+  creation is *restricted*** (0 open issues; can't easily file requests) — a real negative for a
+  collaboration/contribution strategy, and near-zero community traction. jax/jaxlib pin unspecified.
+- **No custom-kernel/custom_call registration** documented.
+- **Verdict:** the same *substrate* strength as jax-mps and broader *claimed* coverage (linalg/FFT on MLX),
+  but ~15× less mature, effectively solo, and **closed to external issues** — so it's a worse
+  *contribution* target than jax-mps (whose tracker is open and whose #203 is our exact hook). Worth
+  **tracking** as a 2nd MLX option (and as a linalg/FFT-on-MLX reference), not a bet. Its existence shows the
+  MLX-plugin space is getting crowded — good for substrate longevity, fragmenting for any single project.
 
 ### 3. applejax (danielpcox) — MPSGraph fork, deprioritize
 - **What:** fork of jax-mps, but swapped to **MPSGraph + Accelerate LAPACK**; jax/jaxlib **0.9.x** (behind).
