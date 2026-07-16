@@ -38,7 +38,7 @@ io = ["h5py>=3.10", "pydantic>=2.6"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
 viz = ["plotly>=5.22", "pyvista>=0.44", "trame>=3.6"]
 # MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
-mcp = ["mcp>=1.0", "h5py>=3.10", "pydantic>=2.6", "plotly>=5.22"]
+mcp = ["mcp>=1.28.1", "h5py>=3.10", "pydantic>=2.6", "plotly>=5.22"]
 dev = [
     "black>=24.10.0",
     "ipykernel>=6.29.5",
