@@ -235,6 +235,66 @@ def test_gaussian_plane_source_matches_jax():
     assert _rel(arr_j.detector_states["PF"]["poynting_flux"], arr_m.detector_states["PF"]["poynting_flux"]) < _RTOL
 
 
+def _plane_case_rect(source, nx=48, ny=24, nz=32, pml=8, spacing=100e-9):
+    """Like ``_plane_case`` but on a rectangular domain, so the source plane is NON-square."""
+    config = fdtdx.SimulationConfig(grid=fdtdx.UniformGrid(spacing=spacing), time=30e-15, dtype=jnp.float32)
+    objects, constraints = [], []
+    vol = fdtdx.SimulationVolume(partial_real_shape=(nx * spacing, ny * spacing, nz * spacing))
+    objects.append(vol)
+    bdict, clist = fdtdx.boundary_objects_from_config(fdtdx.BoundaryConfig.from_uniform_bound(thickness=pml), vol)
+    constraints.extend(clist)
+    objects.extend(bdict.values())
+    constraints.extend(
+        [
+            source.same_size(vol, axes=(0, 1)),
+            source.place_at_center(vol, axes=(0, 1)),
+            source.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(pml + 2,)),
+        ]
+    )
+    objects.append(source)
+    pf = fdtdx.PoyntingFluxDetector(
+        name="PF", partial_grid_shape=(None, None, 1), direction="+", reduce_volume=True, plot=False
+    )
+    constraints.extend(
+        [
+            pf.same_size(vol, axes=(0, 1)),
+            pf.place_at_center(vol, axes=(0, 1)),
+            pf.set_grid_coordinates(axes=(2,), sides=("-",), coordinates=(nz // 2 + 4,)),
+        ]
+    )
+    objects.append(pf)
+    return _run_both(objects, constraints, config)
+
+
+def test_gaussian_plane_source_nonsquare_plane_matches_jax():
+    """GaussianPlaneSource on a NON-square (48 x 24 cell) plane: MLX vs JAX-CPU parity.
+
+    The MLX engine freezes the source ``_E``/``_H`` produced by the JAX ``apply()``
+    path, so a coordinate-order bug in the transverse profile shows up identically
+    on both backends. This test guards the frozen non-square profile end to end:
+    the fields must be finite and non-trivial, and the two backends must agree.
+    Companion unit test: tests/unit/objects/sources/test_gaussian_plane_source_nonsquare.py.
+    """
+    arr_j, arr_m = _plane_case_rect(
+        fdtdx.GaussianPlaneSource(
+            partial_grid_shape=(None, None, 1),
+            fixed_E_polarization_vector=(1, 0, 0),
+            wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
+            direction="+",
+            radius=1.0e-6,  # 10 cells: fits inside the 24-cell short side, not the 48-cell long one
+            std=1 / 3,
+        )
+    )
+    # A misplaced / empty transverse profile shows up as NaN or a dead run.
+    for arr in (arr_j, arr_m):
+        assert np.all(np.isfinite(np.asarray(arr.fields.E))), "non-finite E (empty source profile?)"
+        assert float(np.abs(np.asarray(arr.fields.E)).max()) > 0.0, "no energy injected"
+
+    assert _rel(arr_j.fields.E, arr_m.fields.E) < _RTOL
+    assert _rel(arr_j.fields.H, arr_m.fields.H) < _RTOL
+    assert _rel(arr_j.detector_states["PF"]["poynting_flux"], arr_m.detector_states["PF"]["poynting_flux"]) < _RTOL
+
+
 def test_phasor_detector_matches_jax():
     """PhasorDetector (complex running DFT), reduce + full, on a plane wave."""
     wc = fdtdx.WaveCharacter(wavelength=1.55e-6)
