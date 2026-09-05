@@ -486,6 +486,7 @@ def compute_mode_symmetry_reduced(
     bend_axis: int | None = None,
     transverse_coords: Sequence[jax.Array] | None = None,
     object_name: str = "mode object",
+    mode_backend: Literal["fdtdmex", "tidy3d"] | None = None,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Solve a mode on a symmetry-reduced cross-section by way of the full cross-section.
 
@@ -532,6 +533,8 @@ def compute_mode_symmetry_reduced(
         transverse_coords (Sequence[jax.Array] | None): Reduced transverse edge coordinates, or
             None on a uniform grid.
         object_name (str): Name used in diagnostics.
+        mode_backend (Literal["fdtdmex", "tidy3d"] | None, optional): Mode-solver backend forwarded to
+            :func:`compute_mode`. Defaults to None (environment or fork default).
 
     Returns:
         tuple[jax.Array, jax.Array, jax.Array]: ``(E, H, effective_index)`` on the reduced
@@ -582,6 +585,7 @@ def compute_mode_symmetry_reduced(
         bend_axis=bend_axis,
         symmetry=(0, 0),
         transverse_coords=full_transverse_coords,
+        mode_backend=mode_backend,
     )
 
     mode_E, residual_E = project_onto_parity(mode_E, "E", walls)

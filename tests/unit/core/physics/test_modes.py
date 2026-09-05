@@ -260,6 +260,7 @@ class TestComputeMode:
             inv_permeabilities=1.0,
             resolution=1e-8,
             direction="+",
+            mode_backend="tidy3d",
             transverse_coords=[
                 np.asarray([0.0, 1e-6, 2e-6]),  # Uniform spacing of 1um
                 np.asarray([0.0, 2e-6, 5e-6, 6e-6, 8e-6, 9e-6]),  # Non-uniform spacing
@@ -1017,7 +1018,7 @@ class TestComputeModeSymmetryReduced:
 
         def traced(inv_permittivities):
             mode_E, _mode_H, _neff = compute_mode_symmetry_reduced(
-                **self._kwargs(inv_permittivities=inv_permittivities)
+                **self._kwargs(inv_permittivities=inv_permittivities, mode_backend="tidy3d")
             )
             return mode_E
 
