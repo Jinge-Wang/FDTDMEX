@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Literal
 
 import jax
@@ -51,6 +52,22 @@ class GradientConfig(TreeClass):
             raise Exception("Need Checkpoint Number in gradient config to compute checkpointed gradients")
         if self.num_checkpoints_reversible < 0:
             raise Exception("num_checkpoints_reversible must be >= 0")
+
+
+#: The accepted values of :attr:`SimulationConfig.material_sampling`, in widening order.
+MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("box", "yee", "yee_smooth")
+
+#: The subset of :data:`MATERIAL_SAMPLING_MODES` that samples per Yee component position rather
+#: than once per cell centre. Test membership through
+#: :attr:`SimulationConfig.uses_yee_material_sampling`, never by comparing the string literal:
+#: a literal ``== "yee"`` silently excludes ``"yee_smooth"``, which is how the source gates in
+#: ``linear_polarization.py`` and ``tfsf_region.py`` first went wrong.
+YEE_MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("yee", "yee_smooth")
+
+#: Environment variable that turns the box-vs-Yee sampling diagnostic on without touching the config.
+YEE_DIAGNOSTICS_ENV_VAR = "FDTDX_YEE_SAMPLING_DIAGNOSTICS"
+
+_TRUTHY = ("1", "true", "yes", "on")
 
 
 @autoinit
@@ -141,13 +158,25 @@ class SimulationConfig(TreeClass):
     #: block-hybrid kernel wherever the tilted pixels are scattered.
     yee_smooth_full_tensor: bool = frozen_field(default=False)
 
+    #: Report how many Yee sample points disagree with what the legacy ``"box"`` path would have
+    #: written, in ``info["yee_sampling_difference"]``. Off by default: answering it rasterises the
+    #: whole scene a second time on the cell-centre lattice and holds another ``int32`` copy of the
+    #: domain, and nothing in the simulation reads the answer. The measured cost is scene-dependent
+    #: and smaller than a doubling — about 8% on a 120 x 120 x 30 grid with three nested cylinders,
+    #: because the comparison pass only touches each object's rounded box while the Yee pass
+    #: evaluates three full-domain lattices — but it is pure diagnostic work either way. The
+    #: environment variable ``FDTDX_YEE_SAMPLING_DIAGNOSTICS=1`` turns it on without editing the
+    #: config. The smoothing counters under ``info["yee_sampling_difference"]["smoothing"]`` come
+    #: out of the pass that has to run anyway and are always reported.
+    yee_sampling_diagnostics: bool = frozen_field(default=False)
+
     #: Optional configuration for gradient computation.
     gradient_config: GradientConfig | None = field(default=None)
 
     def __post_init__(self):
         from jax import extend
 
-        if self.material_sampling not in ("box", "yee", "yee_smooth"):
+        if self.material_sampling not in MATERIAL_SAMPLING_MODES:
             raise ValueError(
                 f"config.material_sampling must be 'box', 'yee' or 'yee_smooth', got {self.material_sampling!r}"
             )
@@ -199,6 +228,41 @@ class SimulationConfig(TreeClass):
                 domain will be reduced and a PEC/PMC wall placed on the symmetry plane(s).
         """
         return any(s != 0 for s in self.symmetry)
+
+    @property
+    def uses_yee_material_sampling(self) -> bool:
+        """Whether static materials are sampled at the Yee component positions.
+
+        True for both ``material_sampling="yee"`` and ``material_sampling="yee_smooth"``. This is
+        the predicate every caller should use: the two modes share one lattice, one priority rule
+        and one set of array-tier consequences, and they differ only in what happens afterwards at
+        the two-material pixels.
+
+        Returns:
+            bool: True when the per-Yee-point loader assembles the static arrays.
+        """
+        return self.material_sampling in YEE_MATERIAL_SAMPLING_MODES
+
+    @property
+    def uses_yee_smoothing(self) -> bool:
+        """Whether the Kottke sub-pixel post-pass runs on top of the Yee sampling.
+
+        Returns:
+            bool: True only for ``material_sampling="yee_smooth"``.
+        """
+        return self.material_sampling == "yee_smooth"
+
+    @property
+    def yee_sampling_diagnostics_enabled(self) -> bool:
+        """Whether to spend a second rasterisation on the box-vs-Yee difference diagnostic.
+
+        Returns:
+            bool: True when :attr:`yee_sampling_diagnostics` is set or the environment variable
+                ``FDTDX_YEE_SAMPLING_DIAGNOSTICS`` is one of ``1``/``true``/``yes``/``on``.
+        """
+        if self.yee_sampling_diagnostics:
+            return True
+        return os.environ.get(YEE_DIAGNOSTICS_ENV_VAR, "").strip().lower() in _TRUTHY
 
     @property
     def courant_number(self) -> float:

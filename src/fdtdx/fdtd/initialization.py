@@ -223,7 +223,7 @@ def place_objects(
     if grid.shape != volume_shape:
         raise ValueError(f"Configured grid shape {grid.shape} does not match simulation volume shape {volume_shape}.")
 
-    if config.material_sampling in ("yee", "yee_smooth") and config.has_symmetry:
+    if config.uses_yee_material_sampling and config.has_symmetry:
         raise NotImplementedError(
             f"material_sampling={config.material_sampling!r} (per-Yee-point material sampling) does not "
             "support config.symmetry yet: a per-component lattice does not mirror like a cell-centred "
@@ -683,8 +683,8 @@ def _init_arrays(
     # no longer represent an interface cell: force every property up to at least the diagonal
     # (3-component) tier. A genuinely full-tensor material or oriented dispersion can still push it
     # to 9 further down. The 3-component tier keeps the Metal block-hybrid kernel eligible.
-    yee_sampling = config.material_sampling in ("yee", "yee_smooth")
-    yee_smoothing = config.material_sampling == "yee_smooth"
+    yee_sampling = config.uses_yee_material_sampling
+    yee_smoothing = config.uses_yee_smoothing
     if yee_sampling:
         if subpixel_permittivity and not yee_smoothing:
             raise NotImplementedError(
@@ -892,6 +892,7 @@ def _init_arrays(
             smooth=yee_smoothing,
             supersample=config.yee_smooth_supersample,
             full_tensor=config.yee_smooth_full_tensor,
+            report_box_difference=config.yee_sampling_diagnostics_enabled,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
         full_index = (slice(None), slice(None), slice(None), slice(None))

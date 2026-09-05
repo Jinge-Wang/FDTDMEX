@@ -446,6 +446,7 @@ def load_scene_on_yee_lattices(
     smooth: bool = False,
     supersample: int = 8,
     full_tensor: bool = False,
+    report_box_difference: bool = False,
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -468,6 +469,11 @@ def load_scene_on_yee_lattices(
             answer analytically.
         full_tensor (bool): Request the 9-component tier. The row form is used whenever
             ``num_perm_components`` is 9, however that tier was reached.
+        report_box_difference (bool): Also rasterise the scene the legacy ``"box"`` way and count
+            how many Yee points the two modes disagree on. Off by default: it is a second pass over
+            every object plus another ``int32`` copy of the domain, and nothing in the simulation
+            reads the answer. It is cheaper than the Yee pass it is compared against (it only fills
+            each object's rounded box), so the added cost is a fraction rather than a doubling.
 
     Returns:
         YeeSceneArrays: The host-side arrays plus the front-material index arrays.
@@ -487,15 +493,15 @@ def load_scene_on_yee_lattices(
             axis=0,
         )
 
-    box_front = box_mode_material_indices(scene, volume_shape)
-    difference = {
-        "num_points_E": int(front_E.size),
-        "num_differing_E": int(np.count_nonzero(front_E != box_front[None, ...])),
-        "num_differing_E_per_component": [int(np.count_nonzero(front_E[c] != box_front)) for c in range(3)],
-    }
-    if front_H is not None:
-        difference["num_points_H"] = int(front_H.size)
-        difference["num_differing_H"] = int(np.count_nonzero(front_H != box_front[None, ...]))
+    difference: dict[str, Any] = {"box_difference_reported": report_box_difference}
+    if report_box_difference:
+        box_front = box_mode_material_indices(scene, volume_shape)
+        difference["num_points_E"] = int(front_E.size)
+        difference["num_differing_E"] = int(np.count_nonzero(front_E != box_front[None, ...]))
+        difference["num_differing_E_per_component"] = [int(np.count_nonzero(front_E[c] != box_front)) for c in range(3)]
+        if front_H is not None:
+            difference["num_points_H"] = int(front_H.size)
+            difference["num_differing_H"] = int(np.count_nonzero(front_H != box_front[None, ...]))
 
     inv_permittivities = _assemble_property(
         front_E,
