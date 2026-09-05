@@ -65,3 +65,27 @@ uvx ruff check  src/fdtdx/mlx src/fdtdx/backend
 ## Skills
 
 `.claude/skills/` seeds the workflow: `fdtdmex` (framework/physics conventions), `porting-from-fdtdx` (JAX→MLX recipe, what NOT to port), `physics-validation` (how to validate). Note these predate the fork pivot and still describe a separate `fdtdmex` package; the recipes (MLX conventions, array-bridge, validation) still apply — just build inside `src/fdtdx/{backend,mlx}`.
+
+## Upstream conventions (fdtdx main)
+
+### Type checking
+```bash
+uv run --locked ty check --error-on-warning
+```
+
+### Build docs
+```bash
+sh docs/scripts/sync_notebooks.sh && uv run sphinx-build -W --keep-going docs/source/ docs/build/
+```
+
+## Code Style
+
+- **Ruff** for linting and formatting: target Python 3.12, line length 120, import sorting enabled
+- Ruff excludes: `examples/`, `slurm/`, `checks/`, `docs/`, `reference/`, `web/`, `benchmarks/`
+- Type checking via **ty** (run with `uv run --locked ty check --error-on-warning`), excludes `tests/`
+
+## Architecture
+
+All source code is in `src/fdtdx/`. Public API is exported from `src/fdtdx/__init__.py`.
+
+See `.claude/skills/fdtdx/SKILL.md` for detailed framework patterns, Yee grid conventions, field normalization, constraint system, gradient strategies, and common pitfalls.

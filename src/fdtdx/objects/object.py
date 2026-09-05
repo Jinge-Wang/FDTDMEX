@@ -1,6 +1,6 @@
 from abc import ABC
 from dataclasses import dataclass
-from typing import Literal, Self
+from typing import TYPE_CHECKING, Literal, Self
 
 import jax
 
@@ -14,6 +14,10 @@ from fdtdx.core.jax.pytrees import (
     private_field,
 )
 from fdtdx.core.misc import ensure_slice_tuple
+
+if TYPE_CHECKING:
+    from fdtdx.fdtd.container import ObjectContainer
+
 from fdtdx.typing import (
     INVALID_SLICE_TUPLE_3D,
     UNDEFINED_SHAPE_3D,
@@ -239,6 +243,12 @@ class SimulationObject(TreeClass, ABC):
     _grid_slice_tuple: SliceTuple3D = frozen_private_field(
         default=INVALID_SLICE_TUPLE_3D,
     )
+    #: Slice this object would occupy without mirror-symmetry reduction, expressed in the
+    #: reduced grid's coordinates. Set by place_objects only when config.symmetry is active;
+    #: read via unreduced_grid_slice_tuple.
+    _unreduced_grid_slice_tuple: SliceTuple3D = frozen_private_field(
+        default=INVALID_SLICE_TUPLE_3D,
+    )
     _config: SimulationConfig = private_field()
 
     @property
@@ -246,6 +256,80 @@ class SimulationObject(TreeClass, ABC):
         if self._grid_slice_tuple == INVALID_SLICE_TUPLE_3D:
             raise Exception(f"Object is not yet initialized: {self}")
         return self._grid_slice_tuple
+
+    @property
+    def unreduced_grid_slice_tuple(self) -> SliceTuple3D:
+        """Full-domain slice of this object, in the reduced grid's coordinate frame.
+
+        Identical to :attr:`grid_slice_tuple` unless ``config.symmetry`` clipped this object.
+        Where the object crossed a symmetry plane the start index is **negative**: the plane sits
+        at reduced index 0, so an object that straddled it extends to negative coordinates. Object
+        contents that depend on the object's full extent (e.g. a Gaussian beam's centre) must be
+        derived from this slice, not from the clipped one.
+
+        Returns:
+            SliceTuple3D: Per-axis ``(start, stop)`` in reduced-grid coordinates.
+        """
+        if self._unreduced_grid_slice_tuple == INVALID_SLICE_TUPLE_3D:
+            return self.grid_slice_tuple
+        return self._unreduced_grid_slice_tuple
+
+    @property
+    def unreduced_grid_shape(self) -> GridShape3D:
+        """Grid shape this object would have without mirror-symmetry reduction."""
+        tpl = self.unreduced_grid_slice_tuple
+        return (
+            tpl[0][1] - tpl[0][0],
+            tpl[1][1] - tpl[1][0],
+            tpl[2][1] - tpl[2][0],
+        )
+
+    def straddles_symmetry_plane(self, axis: int) -> bool:
+        """Whether ``config.symmetry`` clipped this object on ``axis`` because it crossed the plane.
+
+        This is strictly stronger than "the clipped slice starts at index 0": an object that
+        happens to begin exactly at the symmetry plane but lies entirely inside the kept half was
+        not clipped and must not be treated as mirror-extended.
+
+        Args:
+            axis (int): Physical axis (0=x, 1=y, 2=z).
+
+        Returns:
+            bool: True if the object extends past the symmetry plane into the discarded half.
+        """
+        return self.unreduced_grid_slice_tuple[axis][0] < 0
+
+    @property
+    def straddled_symmetry_axes(self) -> tuple[int, ...]:
+        """Axes on which this object was clipped by a symmetry plane (see straddles_symmetry_plane)."""
+        return tuple(a for a in range(3) if self.straddles_symmetry_plane(a))
+
+    def symmetry_mirror_axes(self, exclude_axis: int | None = None) -> tuple[int, ...]:
+        """Axes that must be mirrored to reconstruct this object's full-domain extent.
+
+        Args:
+            exclude_axis (int | None): Axis to skip, e.g. a plane object's propagation axis, which
+                is one cell thick and therefore never split by a plane.
+
+        Returns:
+            tuple[int, ...]: Straddled symmetry axes, excluding ``exclude_axis``.
+        """
+        return tuple(a for a in self.straddled_symmetry_axes if a != exclude_axis)
+
+    def touches_symmetry_plane(self, axis: int) -> bool:
+        """Whether this object's placed slice begins on the symmetry plane of ``axis``.
+
+        True both for objects clipped by the plane and for objects that merely start there; use
+        :meth:`straddles_symmetry_plane` to distinguish the two.
+
+        Args:
+            axis (int): Physical axis (0=x, 1=y, 2=z).
+
+        Returns:
+            bool: True if ``config.symmetry`` is active on ``axis`` and the object sits at its
+            reduced min edge, where the PEC/PMC mirror wall lives.
+        """
+        return self._config.symmetry[axis] != 0 and self.grid_slice_tuple[axis][0] == 0
 
     @property
     def grid_slice(self) -> Slice3D:
@@ -318,12 +402,30 @@ class SimulationObject(TreeClass, ABC):
         dispersive_c2: jax.Array | None = None,
         dispersive_c3: jax.Array | None = None,
         electric_conductivity: jax.Array | None = None,
-        dispersive_c4: jax.Array | None = None,
     ) -> Self:
         del key, inv_permittivities, inv_permeabilities
-        del dispersive_c1, dispersive_c2, dispersive_c3, dispersive_c4
+        del dispersive_c1, dispersive_c2, dispersive_c3
         del electric_conductivity
         return self
+
+    def validate_placement(self, objects: "ObjectContainer") -> list[str]:
+        """Validate this object against the fully-resolved object container.
+
+        Called once by :func:`~fdtdx.fdtd.initialization.place_objects` after every
+        object has been placed and the container built, giving cross-object checks
+        (e.g. a source verifying the boundaries around it) a place to run. Returns a
+        list of human-readable error messages; an empty list means the placement is
+        valid. The default implementation performs no checks.
+
+        Args:
+            objects (ObjectContainer): The fully-resolved container of all placed
+                objects (exposes ``.volume``, ``.boundary_objects``, ``.sources``, ...).
+
+        Returns:
+            list[str]: Error messages describing invalid placement, or ``[]``.
+        """
+        del objects
+        return []
 
     def place_relative_to(
         self,

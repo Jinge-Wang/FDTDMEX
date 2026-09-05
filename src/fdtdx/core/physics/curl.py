@@ -4,6 +4,7 @@ import jax.numpy as jnp
 from fdtdx.config import SimulationConfig
 from fdtdx.constants import c as c0
 from fdtdx.fdtd.container import ObjectContainer, PmlAuxField
+from fdtdx.typing import SliceTuple3D
 
 
 def _metric_scale(
@@ -43,12 +44,24 @@ def _backward_edge_average(
     previous: jax.Array,
     config: SimulationConfig | None,
     axis: int,
+    region_slice: SliceTuple3D | None = None,
 ) -> jax.Array:
     """Interpolate center-staggered samples back to an edge on a rectilinear grid.
 
     Uniform grids use the historical arithmetic mean.  On stretched grids the
     target edge is not halfway between neighboring cell centers, so the average
     is weighted by the half-widths of the cells on each side of the edge.
+
+    Args:
+        current: Center-staggered samples of the cells on the target edges.
+        previous: Center-staggered samples of the neighboring cells behind the edges.
+        config: Optional simulation configuration carrying the grid.
+        axis: Grid axis along which the interpolation is performed.
+        region_slice: Grid slice ``((x0, x1), (y0, y1), (z0, z1))`` covered by the inputs
+            when they are a sub-block of the domain. The cell widths are sliced to match.
+
+    Returns:
+        Edge-interpolated samples of the same shape as ``current``.
     """
     if config is None or not config.has_nonuniform_grid:
         return 0.5 * (current + previous)
@@ -57,6 +70,10 @@ def _backward_edge_average(
     assert grid is not None
     widths = grid.cell_widths(axis)
     previous_widths = jnp.concatenate([widths[:1], widths[:-1]])
+    if region_slice is not None:
+        start, stop = region_slice[axis]
+        widths = widths[start:stop]
+        previous_widths = previous_widths[start:stop]
     current_half_width = 0.5 * widths
     previous_half_width = 0.5 * previous_widths
     broadcast_shape = [1, 1, 1]
@@ -70,6 +87,7 @@ def interpolate_fields(
     E_pad: jax.Array,
     H_pad: jax.Array,
     config: SimulationConfig | None = None,
+    region_slice: SliceTuple3D | None = None,
 ) -> tuple[jax.Array, jax.Array]:
     """Interpolates E and H fields onto the E_z Yee grid point (i, j, k+½).
 
@@ -92,6 +110,9 @@ def interpolate_fields(
         config: Optional simulation configuration.  When it carries a
             non-uniform ``RectilinearGrid``, center-to-edge interpolations use local
             physical distances instead of equal weights.
+        region_slice: Grid slice ``((x0, x1), (y0, y1), (z0, z1))`` covered by the inputs
+            when they are a haloed sub-block of the domain instead of the whole padded
+            domain. The interpolation weights are sliced to match.
 
     Returns:
         Tuple of (E_interp, H_interp), each of shape (3, Nx, Ny, Nz)
@@ -105,12 +126,14 @@ def interpolate_fields(
         previous=E_x[:-2, 1:-1, 1:-1],
         config=config,
         axis=0,
+        region_slice=region_slice,
     )
     E_x_upper_z = _backward_edge_average(
         current=E_x[1:-1, 1:-1, 2:],
         previous=E_x[:-2, 1:-1, 2:],
         config=config,
         axis=0,
+        region_slice=region_slice,
     )
     E_x = (E_x_lower_z + E_x_upper_z) / 2.0
 
@@ -120,12 +143,14 @@ def interpolate_fields(
         previous=E_y[1:-1, :-2, 1:-1],
         config=config,
         axis=1,
+        region_slice=region_slice,
     )
     E_y_upper_z = _backward_edge_average(
         current=E_y[1:-1, 1:-1, 2:],
         previous=E_y[1:-1, :-2, 2:],
         config=config,
         axis=1,
+        region_slice=region_slice,
     )
     E_y = (E_y_lower_z + E_y_upper_z) / 2.0
 
@@ -138,6 +163,7 @@ def interpolate_fields(
         previous=H_x[1:-1, :-2, 1:-1],
         config=config,
         axis=1,
+        region_slice=region_slice,
     )
 
     # H_y: (i+½, j, k+½) → (i, j, k+½): x backward only
@@ -146,6 +172,7 @@ def interpolate_fields(
         previous=H_y[:-2, 1:-1, 1:-1],
         config=config,
         axis=0,
+        region_slice=region_slice,
     )
 
     # H_z: (i+½, j+½, k) → (i, j, k+½): x backward, y backward, z forward
@@ -154,6 +181,7 @@ def interpolate_fields(
         previous=H_z[:-2, 1:-1, 1:-1],
         config=config,
         axis=0,
+        region_slice=region_slice,
     )
     H_z_lower_z_xy = _backward_edge_average(
         current=H_z_lower_z_x,
@@ -162,15 +190,18 @@ def interpolate_fields(
             previous=H_z[:-2, :-2, 1:-1],
             config=config,
             axis=0,
+            region_slice=region_slice,
         ),
         config=config,
         axis=1,
+        region_slice=region_slice,
     )
     H_z_upper_z_x = _backward_edge_average(
         current=H_z[1:-1, 1:-1, 2:],
         previous=H_z[:-2, 1:-1, 2:],
         config=config,
         axis=0,
+        region_slice=region_slice,
     )
     H_z_upper_z_xy = _backward_edge_average(
         current=H_z_upper_z_x,
@@ -179,9 +210,11 @@ def interpolate_fields(
             previous=H_z[:-2, :-2, 2:],
             config=config,
             axis=0,
+            region_slice=region_slice,
         ),
         config=config,
         axis=1,
+        region_slice=region_slice,
     )
     H_z = (H_z_lower_z_xy + H_z_upper_z_xy) / 2.0
 
@@ -229,17 +262,22 @@ def curl_E(
     dy_scale = _metric_scale(config, axis=1, shape=shape, stencil="forward")
     dz_scale = _metric_scale(config, axis=2, shape=shape, stencil="forward")
 
-    dyEz = (jnp.roll(E_pad[2], -1, axis=1) - E_pad[2])[1:-1, 1:-1, 1:-1] * dy_scale
-    dzEy = (jnp.roll(E_pad[1], -1, axis=2) - E_pad[1])[1:-1, 1:-1, 1:-1] * dz_scale
-    dzEx = (jnp.roll(E_pad[0], -1, axis=2) - E_pad[0])[1:-1, 1:-1, 1:-1] * dz_scale
-    dxEz = (jnp.roll(E_pad[2], -1, axis=0) - E_pad[2])[1:-1, 1:-1, 1:-1] * dx_scale
-    dxEy = (jnp.roll(E_pad[1], -1, axis=0) - E_pad[1])[1:-1, 1:-1, 1:-1] * dx_scale
-    dyEx = (jnp.roll(E_pad[0], -1, axis=1) - E_pad[0])[1:-1, 1:-1, 1:-1] * dy_scale
+    Ex = E_pad[0]
+    Ey = E_pad[1]
+    Ez = E_pad[2]
+    center = (slice(1, -1), slice(1, -1), slice(1, -1))
+
+    dyEz = (Ez[1:-1, 2:, 1:-1] - Ez[center]) * dy_scale
+    dzEy = (Ey[1:-1, 1:-1, 2:] - Ey[center]) * dz_scale
+    dzEx = (Ex[1:-1, 1:-1, 2:] - Ex[center]) * dz_scale
+    dxEz = (Ez[2:, 1:-1, 1:-1] - Ez[center]) * dx_scale
+    dxEy = (Ey[2:, 1:-1, 1:-1] - Ey[center]) * dx_scale
+    dyEx = (Ex[1:-1, 2:, 1:-1] - Ex[center]) * dy_scale
 
     curl_x = dyEz - dzEy
     curl_y = dzEx - dxEz
     curl_z = dxEy - dyEx
-    curl = jnp.stack((curl_x, curl_y, curl_z), axis=0)
+    curl_components = [curl_x, curl_y, curl_z]
 
     psi_H_updated = {}
 
@@ -264,11 +302,12 @@ def curl_E(
             d_field_1, d_field_2, psi_1, psi_2, is_curl_E=True, simulate_boundaries=simulate_boundaries
         )
 
-        curl = curl.at[i, *pml.grid_slice].add(-corr_1)
-        curl = curl.at[j, *pml.grid_slice].add(corr_2)
+        curl_components[i] = curl_components[i].at[pml.grid_slice].add(-corr_1)
+        curl_components[j] = curl_components[j].at[pml.grid_slice].add(corr_2)
 
         psi_H_updated[pml.name] = (psi_1_new, psi_2_new)
 
+    curl = jnp.stack(curl_components, axis=0)
     return curl, psi_H_updated
 
 
@@ -310,17 +349,22 @@ def curl_H(
     dy_scale = _metric_scale(config, axis=1, shape=shape, stencil="backward")
     dz_scale = _metric_scale(config, axis=2, shape=shape, stencil="backward")
 
-    dyHz = (H_pad[2] - jnp.roll(H_pad[2], 1, axis=1))[1:-1, 1:-1, 1:-1] * dy_scale
-    dzHy = (H_pad[1] - jnp.roll(H_pad[1], 1, axis=2))[1:-1, 1:-1, 1:-1] * dz_scale
-    dzHx = (H_pad[0] - jnp.roll(H_pad[0], 1, axis=2))[1:-1, 1:-1, 1:-1] * dz_scale
-    dxHz = (H_pad[2] - jnp.roll(H_pad[2], 1, axis=0))[1:-1, 1:-1, 1:-1] * dx_scale
-    dxHy = (H_pad[1] - jnp.roll(H_pad[1], 1, axis=0))[1:-1, 1:-1, 1:-1] * dx_scale
-    dyHx = (H_pad[0] - jnp.roll(H_pad[0], 1, axis=1))[1:-1, 1:-1, 1:-1] * dy_scale
+    Hx = H_pad[0]
+    Hy = H_pad[1]
+    Hz = H_pad[2]
+    center = (slice(1, -1), slice(1, -1), slice(1, -1))
+
+    dyHz = (Hz[center] - Hz[1:-1, :-2, 1:-1]) * dy_scale
+    dzHy = (Hy[center] - Hy[1:-1, 1:-1, :-2]) * dz_scale
+    dzHx = (Hx[center] - Hx[1:-1, 1:-1, :-2]) * dz_scale
+    dxHz = (Hz[center] - Hz[:-2, 1:-1, 1:-1]) * dx_scale
+    dxHy = (Hy[center] - Hy[:-2, 1:-1, 1:-1]) * dx_scale
+    dyHx = (Hx[center] - Hx[1:-1, :-2, 1:-1]) * dy_scale
 
     curl_x = dyHz - dzHy
     curl_y = dzHx - dxHz
     curl_z = dxHy - dyHx
-    curl = jnp.stack((curl_x, curl_y, curl_z), axis=0)
+    curl_components = [curl_x, curl_y, curl_z]
 
     psi_E_updated = {}
 
@@ -344,9 +388,10 @@ def curl_H(
             d_field_1, d_field_2, psi_1, psi_2, is_curl_E=False, simulate_boundaries=simulate_boundaries
         )
 
-        curl = curl.at[i, *pml.grid_slice].add(-corr_1)
-        curl = curl.at[j, *pml.grid_slice].add(corr_2)
+        curl_components[i] = curl_components[i].at[pml.grid_slice].add(-corr_1)
+        curl_components[j] = curl_components[j].at[pml.grid_slice].add(corr_2)
 
         psi_E_updated[pml.name] = (psi_1_new, psi_2_new)
 
+    curl = jnp.stack(curl_components, axis=0)
     return curl, psi_E_updated

@@ -7,6 +7,7 @@ API
     fdtdx.apply_params
     fdtdx.ArrayContainer
     fdtdx.autoinit
+    fdtdx.BaseModeOverlapDetector
     fdtdx.BinaryMedianFilterModule
     fdtdx.BlochBoundary
     fdtdx.boundary_objects_from_config
@@ -14,8 +15,9 @@ API
     fdtdx.BrushConstraint2D
     fdtdx.calculate_sparam
     fdtdx.calculate_sparams
-    fdtdx.CCPRPole
     fdtdx.circular_brush
+    fdtdx.ClosedSurfacePhasorPoyntingFluxDetector
+    fdtdx.ClosedSurfacePoyntingFluxDetector
     fdtdx.ClosestIndex
     fdtdx.Color
     fdtdx.compute_energy
@@ -24,8 +26,11 @@ API
     fdtdx.compute_integrated_power
     fdtdx.compute_mode
     fdtdx.compute_pole_coefficients
+    fdtdx.compute_pole_coefficients_per_axis
+    fdtdx.compute_pole_coefficients_tensor
     fdtdx.compute_poynting_flux
     fdtdx.ConnectHolesAndStructures
+    fdtdx.CustomModeOverlapDetector
     fdtdx.CustomTimeSignalProfile
     fdtdx.Cylinder
     fdtdx.Detector
@@ -56,9 +61,12 @@ API
     fdtdx.frozen_field
     fdtdx.frozen_private_field
     fdtdx.full_backward
+    fdtdx.gaussian_mode_function
+    fdtdx.GaussianModeOverlapDetector
     fdtdx.GaussianPlaneSource
     fdtdx.GaussianPulseProfile
     fdtdx.GaussianSmoothing2D
+    fdtdx.GaussianWindow
     fdtdx.GradientConfig
     fdtdx.GridCoordinateConstraint
     fdtdx.HorizontalSymmetry2D
@@ -82,6 +90,7 @@ API
     fdtdx.PerfectlyMatchedLayer
     fdtdx.PeriodicBoundary
     fdtdx.PhasorDetector
+    fdtdx.PhasorPoyntingFluxDetector
     fdtdx.PillarDiscretization
     fdtdx.place_objects
     fdtdx.plot_field_slice
@@ -121,7 +130,10 @@ API
     fdtdx.SubpixelSmoothedProjection
     fdtdx.TanhProjection
     fdtdx.TemporalProfile
+    fdtdx.TemporalWindow
+    fdtdx.TFSFPlaneSourceRegion
     fdtdx.TreeClass
+    fdtdx.TukeyWindow
     fdtdx.unfold_array
     fdtdx.unfold_detector_states
     fdtdx.unfold_fields

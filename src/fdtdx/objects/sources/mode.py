@@ -12,7 +12,7 @@ from fdtdx.core.grid import calculate_time_offset_yee
 from fdtdx.core.jax.pytrees import autoinit, frozen_field, private_field
 from fdtdx.core.linalg import get_wave_vector_raw
 from fdtdx.core.physics.metrics import compute_energy
-from fdtdx.core.physics.modes import compute_mode
+from fdtdx.core.physics.modes import compute_mode, compute_mode_symmetry_reduced
 from fdtdx.dispersion import effective_complex_inv_permittivity, effective_inv_permittivity
 from fdtdx.objects.sources.tfsf import TFSFPlaneSource, _build_dispersive_H_filter
 
@@ -28,10 +28,12 @@ class ModePlaneSource(TFSFPlaneSource):
     #: Symmetry-plane condition at the min edge of each transverse axis (the two
     #: non-propagation physical axes, in increasing-index order): ``0`` = PEC
     #: mirror (electric wall, the default), ``1`` = PMC mirror (magnetic wall).
-    #: Set this when the source plane's waveguide lies on a symmetry plane of a
-    #: reduced (half/quarter) domain, so the mode solver imposes the same wall
-    #: the FDTD uses there (e.g. ``(0, 1)`` for PEC at y=0 and PMC at the z
-    #: Si-mid plane of a +x-propagating quarter domain).
+    #: Set this only for a **hand-built** half/quarter domain (your own PEC/PMC boundary at the min
+    #: edge), where it asks the mode solver for its own symmetric solve. It is *not* needed - and is
+    #: ignored - when ``config.symmetry`` performs the reduction: there the mode is solved on the
+    #: mirrored full cross-section and restricted, which reproduces the full-domain mode exactly
+    #: (the mode solver's symmetric solve does not, because FDTDX rasterizes materials per cell
+    #: while the solver samples them on its staggered grid).
     symmetry: tuple[int, int] = frozen_field(default=(0, 0))
 
     _inv_permittivity: jax.Array = private_field()
@@ -99,7 +101,6 @@ class ModePlaneSource(TFSFPlaneSource):
         dispersive_c2: jax.Array | None = None,
         dispersive_c3: jax.Array | None = None,
         electric_conductivity: jax.Array | None = None,
-        dispersive_c4: jax.Array | None = None,
     ) -> Self:
         del key
         if (
@@ -126,12 +127,11 @@ class ModePlaneSource(TFSFPlaneSource):
         # Frequency-correct the permittivity seen by the mode solver so that
         # mode profiles computed inside a dispersive medium reflect the true
         # epsilon at the carrier frequency, not epsilon_infinity.
-        c1_slice = c2_slice = c3_slice = c4_slice = None
+        c1_slice = c2_slice = c3_slice = None
         if dispersive_c1 is not None and dispersive_c2 is not None and dispersive_c3 is not None:
             c1_slice = dispersive_c1[:, :, *self.grid_slice]
             c2_slice = dispersive_c2[:, :, *self.grid_slice]
             c3_slice = dispersive_c3[:, :, *self.grid_slice]
-            c4_slice = None if dispersive_c4 is None else dispersive_c4[:, :, *self.grid_slice]
             inv_permittivity_slice = effective_inv_permittivity(
                 inv_eps=inv_permittivity_slice,
                 c1=c1_slice,
@@ -139,7 +139,6 @@ class ModePlaneSource(TFSFPlaneSource):
                 c3=c3_slice,
                 omega=2.0 * np.pi * self.wave_character.get_frequency(),
                 dt=self._config.time_step_duration,
-                c4=c4_slice,
             )
 
         self = self.aset("_inv_permittivity", inv_permittivity_slice, create_new_ok=True)
@@ -161,7 +160,6 @@ class ModePlaneSource(TFSFPlaneSource):
                 c1=c1_slice,
                 c2=c2_slice,
                 c3=c3_slice,
-                c4=c4_slice,
                 electric_conductivity=sigma_slice,
                 conductivity_spacing=(
                     None
@@ -171,18 +169,37 @@ class ModePlaneSource(TFSFPlaneSource):
             )
 
         # compute mode
-        mode_E, mode_H, eff_index = compute_mode(
-            frequency=self.wave_character.get_frequency(),
-            inv_permittivities=mode_inv_permittivity,
-            inv_permeabilities=inv_permeability_slice,
-            resolution=self._mode_solver_resolution(),
-            direction=self.direction,
-            mode_index=self.mode_index,
-            filter_pol=self.filter_pol,
-            dtype=self._config.dtype,
-            symmetry=self.symmetry,
-            transverse_coords=self._transverse_edge_coordinates(),
-        )
+        mirrored_axes = self.symmetry_mirror_axes(exclude_axis=self.propagation_axis)
+        if mirrored_axes:
+            # Symmetry-reduced cross-section: solve on the mirrored full cross-section and restrict,
+            # so the injected mode is exactly the one the unreduced simulation would launch.
+            mode_E, mode_H, eff_index = compute_mode_symmetry_reduced(
+                mirrored_axes=mirrored_axes,
+                walls={axis: self._config.symmetry[axis] for axis in mirrored_axes},
+                frequency=self.wave_character.get_frequency(),
+                inv_permittivities=mode_inv_permittivity,
+                inv_permeabilities=inv_permeability_slice,
+                resolution=self._mode_solver_resolution(),
+                direction=self.direction,
+                mode_index=self.mode_index,
+                filter_pol=self.filter_pol,
+                dtype=self._config.dtype,
+                transverse_coords=self._transverse_edge_coordinates(),
+                object_name=self.name,
+            )
+        else:
+            mode_E, mode_H, eff_index = compute_mode(
+                frequency=self.wave_character.get_frequency(),
+                inv_permittivities=mode_inv_permittivity,
+                inv_permeabilities=inv_permeability_slice,
+                resolution=self._mode_solver_resolution(),
+                direction=self.direction,
+                mode_index=self.mode_index,
+                filter_pol=self.filter_pol,
+                dtype=self._config.dtype,
+                symmetry=self.symmetry,
+                transverse_coords=self._transverse_edge_coordinates(),
+            )
         # Keep the complex modal fields when the mode was solved against a lossy
         # (conductivity) permittivity, so the launched source carries the
         # eigenmode's transverse phase — TFSFPlaneSource.update_E/update_H inject
@@ -244,7 +261,6 @@ class ModePlaneSource(TFSFPlaneSource):
                 c3_slice=c3_slice,
                 inv_eps_inf_slice=inv_eps_inf_slice,
                 dtype=self._config.dtype,
-                c4_slice=c4_slice,
             )
             self = self.aset("_temporal_H_filter", filtered, create_new_ok=True)
         else:

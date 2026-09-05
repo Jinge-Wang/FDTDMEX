@@ -129,6 +129,15 @@ def solve_modes_diagonal(
     # Return to the standard H-field normalisation expected downstream.
     H = H * (-1j / eta0)
 
+    # Fix the global phase of every mode: the largest |E_t| entry is made real and positive, so a
+    # lossless mode comes out with a real transverse E (the tidy3d convention, and what the
+    # "+"/"-" reciprocity relation downstream assumes) instead of the arbitrary eigenvector phase.
+    e_t = np.concatenate((E[0], E[1]), axis=0)
+    pivot = e_t[np.argmax(np.abs(e_t), axis=0), np.arange(e_t.shape[1])]
+    phase = np.where(np.abs(pivot) > 0, pivot / np.where(np.abs(pivot) > 0, np.abs(pivot), 1.0), 1.0)
+    E = E / phase[None, None, :]
+    H = H / phase[None, None, :]
+
     if direction == "-":
         H[0] *= -1
         H[1] *= -1

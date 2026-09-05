@@ -36,8 +36,8 @@ from fdtdx.core.physics.modes import compute_mode
 from fdtdx.core.physics.subpixel import smooth_cross_section_2d, smooth_inverse_permittivity
 from fdtdx.core.switch import OnOffSwitch
 from fdtdx.core.wavelength import WaveCharacter
+from fdtdx.core.window import GaussianWindow, TemporalWindow, TukeyWindow
 from fdtdx.dispersion import (
-    CCPRPole,
     DispersionModel,
     DrudePole,
     LorentzPole,
@@ -45,6 +45,8 @@ from fdtdx.dispersion import (
     compute_eps_spectrum_from_coefficients,
     compute_impedance_corrected_temporal_profile,
     compute_pole_coefficients,
+    compute_pole_coefficients_per_axis,
+    compute_pole_coefficients_tensor,
 )
 from fdtdx.fdtd.backward import full_backward
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer, SimulationState
@@ -68,9 +70,20 @@ from fdtdx.objects.detectors.field_projection import (
     FieldProjectionCartesianDetector,
     FieldProjectionKSpaceDetector,
 )
-from fdtdx.objects.detectors.mode import ModeOverlapDetector
+from fdtdx.objects.detectors.mode import (
+    BaseModeOverlapDetector,
+    CustomModeOverlapDetector,
+    GaussianModeOverlapDetector,
+    ModeOverlapDetector,
+    gaussian_mode_function,
+)
 from fdtdx.objects.detectors.phasor import PhasorDetector
-from fdtdx.objects.detectors.poynting_flux import PoyntingFluxDetector
+from fdtdx.objects.detectors.poynting_flux import (
+    ClosedSurfacePhasorPoyntingFluxDetector,
+    ClosedSurfacePoyntingFluxDetector,
+    PhasorPoyntingFluxDetector,
+    PoyntingFluxDetector,
+)
 from fdtdx.objects.device.device import Device
 from fdtdx.objects.device.parameters.continuous import (
     GaussianSmoothing2D,
@@ -118,6 +131,7 @@ from fdtdx.objects.sources.profile import (
     SingleFrequencyProfile,
     TemporalProfile,
 )
+from fdtdx.objects.sources.tfsf_region import TFSFPlaneSourceRegion
 from fdtdx.objects.static_material.cylinder import Cylinder
 from fdtdx.objects.static_material.gds_layer_stack import (
     GDSLayerObject,
@@ -161,14 +175,17 @@ SimulationState = SimulationState
 
 __all__ = [
     "ArrayContainer",
+    "BaseModeOverlapDetector",
     "BinaryMedianFilterModule",
     "BlochBoundary",
     "BoundaryConfig",
     "BrushConstraint2D",
-    "CCPRPole",
+    "ClosedSurfacePhasorPoyntingFluxDetector",
+    "ClosedSurfacePoyntingFluxDetector",
     "ClosestIndex",
     "Color",
     "ConnectHolesAndStructures",
+    "CustomModeOverlapDetector",
     "CustomTimeSignalProfile",
     "Cylinder",
     "Detector",
@@ -189,9 +206,11 @@ __all__ = [
     "GDSLayerObject",
     "GDSLayerSpec",
     "GDSPortSpec",
+    "GaussianModeOverlapDetector",
     "GaussianPlaneSource",
     "GaussianPulseProfile",
     "GaussianSmoothing2D",
+    "GaussianWindow",
     "GradientConfig",
     "GridCoordinateConstraint",
     "HorizontalSymmetry2D",
@@ -212,6 +231,7 @@ __all__ = [
     "PerfectlyMatchedLayer",
     "PeriodicBoundary",
     "PhasorDetector",
+    "PhasorPoyntingFluxDetector",
     "PillarDiscretization",
     "PointDipoleSource",
     "PointSymmetry2D",
@@ -240,9 +260,12 @@ __all__ = [
     "StandardToInversePermittivityRange",
     "StandardToPlusOneMinusOneRange",
     "SubpixelSmoothedProjection",
+    "TFSFPlaneSourceRegion",
     "TanhProjection",
     "TemporalProfile",
+    "TemporalWindow",
     "TreeClass",
+    "TukeyWindow",
     "UniformGrid",
     "UniformMaterialObject",
     "UniformPlaneSource",
@@ -262,6 +285,8 @@ __all__ = [
     "compute_mode",
     "compute_mode_expansion",
     "compute_pole_coefficients",
+    "compute_pole_coefficients_per_axis",
+    "compute_pole_coefficients_tensor",
     "compute_poynting_flux",
     "detectors_from_gds_ports",
     "export_arrays_snapshot_to_vti",
@@ -277,6 +302,7 @@ __all__ = [
     "frozen_field",
     "frozen_private_field",
     "full_backward",
+    "gaussian_mode_function",
     "gds_layer_stack",
     "gds_layer_stack_from_component",
     "import_from_json",

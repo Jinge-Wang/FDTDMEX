@@ -12,10 +12,10 @@ repos:
         args: [--assume-in-merge]
   - repo: https://github.com/astral-sh/ruff-pre-commit
     # Ruff version.
-    rev: v0.15.20
+    rev: v0.16.3
     hooks:
       # Run the linter.
-      - id: ruff
+      - id: ruff-check
         args:
           - --fix
       # Run the formatter.
@@ -34,15 +34,15 @@ repos:
   #         --skip-checking-raises=True,
         # ]
   - repo: https://github.com/woodruffw/zizmor-pre-commit
-    rev: v1.26.1
+    rev: v1.29.0
     hooks:
       - id: zizmor
   - repo: local
     hooks:
       - id: ty
-        name: ty (via uvx)
-        # This executes exactly what you run in the terminal
-        entry: uvx ty check --error-on-warning
+        name: ty (from uv.lock)
+        # Use the project-managed version for reproducible local and CI checks.
+        entry: uv run --locked ty check --error-on-warning
         language: system
         types: [python]
-        pass_filenames: false  
+        pass_filenames: false
