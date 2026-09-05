@@ -129,10 +129,15 @@ def _tfsf_plan(source: LinearlyPolarizedPlaneSource, config, arrays) -> SourcePl
             return mu_scalar
 
     # Spatial parts of the scattered-field correction (mirrors tfsf.update_E/update_H).
-    spatialE_h = H_prof[v] * c * eps_comp(h)
-    spatialE_v = H_prof[h] * c * eps_comp(v)
-    spatialH_v = E_prof[h] * c * mu_comp(v)
-    spatialH_h = E_prof[v] * c * mu_comp(h)
+    # On non-uniform grids the derivative at the source plane carries the local cell-width
+    # metric (upstream #407): the E-side correction uses the backward stencil, the H-side the
+    # forward one. Both factors are exactly 1.0 on uniform grids.
+    c_E = c * float(np.asarray(source._metric_scale_at_plane("backward")))
+    c_H = c * float(np.asarray(source._metric_scale_at_plane("forward")))
+    spatialE_h = H_prof[v] * c_E * eps_comp(h)
+    spatialE_v = H_prof[h] * c_E * eps_comp(v)
+    spatialH_v = E_prof[h] * c_H * mu_comp(v)
+    spatialH_h = E_prof[v] * c_H * mu_comp(h)
 
     spatial_shape = spatialE_h.shape  # source grid_shape
 

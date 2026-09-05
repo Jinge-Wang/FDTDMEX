@@ -74,6 +74,11 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
         return "custom stopping_condition not supported by the MLX backend yet"
     if getattr(config, "use_complex_fields", None) is True:
         return "forced complex fields not supported by the MLX backend yet"
+    # Mirror-symmetry reduction (config.symmetry) lives in the JAX curl/halo code
+    # (fdtdx.fdtd.update.pad_fields_with_symmetry_mirror) and the mode-source unfolding; the MLX
+    # loop has no equivalent, so a reduced domain would run without its mirror planes.
+    if any(s != 0 for s in getattr(config, "symmetry", (0, 0, 0))):
+        return "config.symmetry (mirror-reduced domain) not supported by the MLX backend yet"
     for b in objects.bloch_objects:
         if b.needs_complex_fields:
             return "Bloch (nonzero-k, complex) boundaries not supported by the MLX backend yet"
@@ -99,12 +104,25 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
             if getattr(s, "_temporal_H_filter", None) is not None:
                 return f"dispersive plane source ({type(s).__name__}) not supported by the MLX backend yet"
 
+    from fdtdx.objects.detectors.phasor import PhasorDetector
+
     supported_detectors = _supported_detector_types()
     for d in objects.detectors:
         if not isinstance(d, supported_detectors):
             return f"detector type {type(d).__name__} not supported by the MLX backend yet"
         if getattr(d, "as_slices", False):
             return f"{type(d).__name__}(as_slices=True) not supported by the MLX backend yet"
+        if isinstance(d, PhasorDetector):
+            # Upstream subclasses (PhasorPoyntingFluxDetector, ClosedSurfacePhasorPoyntingFluxDetector)
+            # post-process the phasors; the MLX phasor plan only knows the plain running DFT.
+            if type(d) is not PhasorDetector:
+                return f"detector type {type(d).__name__} not supported by the MLX backend yet"
+            # Temporal apodization windows (#428) and explicit DFT subsampling (#406) are not
+            # threaded through the MLX phasor plan.
+            if getattr(d, "apodization", None) is not None:
+                return "PhasorDetector(apodization=...) not supported by the MLX backend yet"
+            if getattr(d, "dft_subsample", 1) != 1:
+                return "PhasorDetector(dft_subsample!=1) not supported by the MLX backend yet"
 
     return None
 
