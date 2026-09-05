@@ -19,6 +19,11 @@ from fdtdx.core.jax.sharding import (
 from fdtdx.core.jax.ste import straight_through_estimator
 from fdtdx.dispersion import compute_pole_coefficients_tensor
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer
+from fdtdx.fdtd.metric_shadow import (
+    build_placement_report,
+    format_placement_report,
+    resolve_metric_shadow_detailed,
+)
 from fdtdx.fdtd.symmetry import apply_mode_symmetry, make_symmetry_walls, reduce_resolved_slices
 from fdtdx.materials import (
     compute_allowed_dispersive_coefficients,
@@ -93,6 +98,27 @@ def _resolve_grid_from_volume(
         )
     pre_volume_shape: tuple[int, int, int] = (pre_shape_list[0], pre_shape_list[1], pre_shape_list[2])
     return config.aset("grid", config.grid.resolve(pre_volume_shape))
+
+
+def _shadow_to_bounds(axes) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Reduce the per-axis metric-shadow state to plain ``(lower, upper)`` bound pairs."""
+    out = []
+    for sh in axes:
+        assert sh.lo is not None and sh.hi is not None
+        out.append((float(sh.lo), float(sh.hi)))
+    return (out[0], out[1], out[2])
+
+
+def _box_metric_bounds(
+    slice_tuple, grid: RectilinearGrid
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Metric bounds of a placed integer box: the grid edge coordinates it spans."""
+    out = []
+    for axis in range(3):
+        edges = grid.edges(axis)
+        b0, b1 = slice_tuple[axis]
+        out.append((float(edges[b0]), float(edges[b1])))
+    return (out[0], out[1], out[2])
 
 
 def place_objects(
@@ -196,6 +222,24 @@ def place_objects(
     if grid.shape != volume_shape:
         raise ValueError(f"Configured grid shape {grid.shape} does not match simulation volume shape {volume_shape}.")
 
+    if config.material_sampling == "yee" and config.has_symmetry:
+        raise NotImplementedError(
+            "material_sampling='yee' (Stage A per-Yee-point material sampling) does not support "
+            "config.symmetry yet: a per-component lattice does not mirror like a cell-centred one. "
+            "Use material_sampling='box' or drop the symmetry."
+        )
+
+    # Step 5b: Metric shadow of the same solve. Every object keeps the continuous extent and
+    # position it was asked for, in metres, next to the integer box it was rounded onto. Nothing
+    # about the integer placement changes; see fdtdx.fdtd.metric_shadow for the resolution rules.
+    metric_shadows = resolve_metric_shadow_detailed(
+        object_list=object_list,
+        constraints=constraints,
+        config=config,
+        resolved_slices=resolved_slices,
+    )
+    metric_bounds = {name: _shadow_to_bounds(axes) for name, axes in metric_shadows.items()}
+
     # Step 6: Place objects on grid based on resolved slice tuples. Under symmetry each object also
     # remembers its unclipped extent (in reduced coordinates) so object *contents* that depend on
     # the full extent - a Gaussian beam's centre, a mode cross-section - can be derived correctly
@@ -214,6 +258,8 @@ def place_objects(
         )
         if name in unreduced_slices:
             placed = placed.aset("_unreduced_grid_slice_tuple", unreduced_slices[name])
+        if name in metric_bounds:
+            placed = placed.aset("_metric_bounds", metric_bounds[name])
         placed_objects.append(placed)
 
     # Step 7: Place volume first (index 0)
@@ -226,6 +272,8 @@ def place_objects(
     )
     if volume_obj.name in unreduced_slices:
         placed_volume = placed_volume.aset("_unreduced_grid_slice_tuple", unreduced_slices[volume_obj.name])
+    if volume_obj.name in metric_bounds:
+        placed_volume = placed_volume.aset("_metric_bounds", metric_bounds[volume_obj.name])
     placed_objects.insert(0, placed_volume)
 
     # Step 8: Insert the PEC/PMC symmetry walls and forward the per-axis condition to mode
@@ -252,6 +300,13 @@ def place_objects(
             f"fdtdx.unfold_fields to reconstruct the full domain."
         )
 
+    # Step 8b: Objects created after the solve (the symmetry walls) get their metric shadow
+    # straight from their placed box, which is exactly what they asked for.
+    placed_objects = [
+        o if o.has_metric_bounds else o.aset("_metric_bounds", _box_metric_bounds(o.grid_slice_tuple, grid))
+        for o in placed_objects
+    ]
+
     # Step 9: Create object container
     objects_container = ObjectContainer(
         object_list=placed_objects,
@@ -276,6 +331,19 @@ def place_objects(
     key, subkey = jax.random.split(key)
     params = _init_params(objects=objects_container, key=subkey)
     arrays, config, info = _init_arrays(objects=objects_container, config=config)
+
+    # Placement report: requested vs realised extent per object per axis. Useful in both sampling
+    # modes; it is the evidence that motivates the yee path (a 500 nm bus placed as 480 nm).
+    report_rows = build_placement_report(
+        object_list=[o for o in objects_container.objects if o.name in metric_shadows],
+        resolved_slices=resolved_slices,
+        shadows=metric_shadows,
+        config=config,
+    )
+    info["placement_report"] = report_rows
+    report_table = format_placement_report(report_rows)
+    if report_table:
+        logger.info(f"Placement report (requested metric extent vs placed box):\n{report_table}")
 
     # Step 11: Update object configs and apply objects if possible
     disp_c1 = None if arrays.dispersive_c1 is None else jax.lax.stop_gradient(arrays.dispersive_c1)

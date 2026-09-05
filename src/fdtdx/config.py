@@ -111,11 +111,25 @@ class SimulationConfig(TreeClass):
     #: cell-for-cell); otherwise :func:`fdtdx.place_objects` raises a ``ValueError``.
     symmetry: tuple[int, int, int] = frozen_field(default=(0, 0, 0))
 
+    #: Where the material of a static object is sampled when the arrays are assembled.
+    #: ``"box"`` (default, legacy) samples every object once per cell centre and broadcasts the
+    #: single mask to all field components, after the object's extent has been rounded to a whole
+    #: number of cells. ``"yee"`` keeps every static object's requested metric extent continuous and
+    #: samples the material once per Yee component position (E_x, E_y, E_z, and the H positions when
+    #: a permeability or magnetic-conductivity array exists), taking the material of the
+    #: highest-priority object that contains that point. Priority is the order in which objects are
+    #: written today (``placement_order`` ascending, later wins), with the simulation volume as the
+    #: background. Devices, sources, detectors and PML keep their integer boxes in both modes.
+    material_sampling: Literal["box", "yee"] = frozen_field(default="box")
+
     #: Optional configuration for gradient computation.
     gradient_config: GradientConfig | None = field(default=None)
 
     def __post_init__(self):
         from jax import extend
+
+        if self.material_sampling not in ("box", "yee"):
+            raise ValueError(f"config.material_sampling must be 'box' or 'yee', got {self.material_sampling!r}")
 
         if len(self.symmetry) != 3 or any(s not in (-1, 0, 1) for s in self.symmetry):
             raise ValueError(
