@@ -376,6 +376,7 @@ class TFSFPlaneSourceRegion(TFSFPlaneSource):
             h_polarization=h_pol,
             coordinate_edges=coord_edges,
             center_physical=center_physical,
+            allow_anisotropic=self._config.material_sampling == "yee",
         )
 
     def update_E(

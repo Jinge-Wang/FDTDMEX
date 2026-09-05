@@ -318,6 +318,7 @@ class LinearlyPolarizedPlaneSource(TFSFPlaneSource, ABC):
             h_polarization=h_pol,
             coordinate_edges=self._local_edge_coordinates(),
             center_physical=self._source_center_physical(center),
+            allow_anisotropic=self._config.material_sampling == "yee",
         )
 
         self = self.aset("_E", E, create_new_ok=True)
