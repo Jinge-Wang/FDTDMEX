@@ -494,11 +494,22 @@ def smooth_inverse_permittivity_on_yee_pixels(
         inv_permittivities (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` point-sampled inverse permittivity,
             modified in place and returned.
         supersample (int): Samples per axis where no analytic overlap or normal is available.
-        full_tensor (bool): Write the full Kottke row instead of the diagonal entry.
+        full_tensor (bool): Write the full Kottke row instead of the diagonal entry. Must match the
+            array's own tier: a 9-component array is always written as rows, because entry ``(c, c)``
+            of a row-major 3x3 sits at index ``4*c``, not at ``c``.
 
     Returns:
         tuple: ``(inv_permittivities, stats)``.
+
+    Raises:
+        ValueError: If ``full_tensor`` disagrees with the array's component count.
     """
+    expected = 9 if full_tensor else 3
+    if inv_permittivities.shape[0] != expected:
+        raise ValueError(
+            f"full_tensor={full_tensor} needs a {expected}-component inverse permittivity array, "
+            f"got {inv_permittivities.shape[0]}."
+        )
     stats = SmoothingStats()
     classes = _material_value_classes(scene)
     permittivity, isotropic = _isotropic_permittivity(scene)

@@ -466,8 +466,8 @@ def load_scene_on_yee_lattices(
             (``material_sampling="yee_smooth"``). Conductivity and dispersion stay point-sampled.
         supersample (int): Samples per axis used for a fill fraction or a normal that no shape can
             answer analytically.
-        full_tensor (bool): Write the whole Kottke row per component instead of its diagonal entry.
-            Only meaningful together with ``smooth`` and ``num_perm_components == 9``.
+        full_tensor (bool): Request the 9-component tier. The row form is used whenever
+            ``num_perm_components`` is 9, however that tier was reached.
 
     Returns:
         YeeSceneArrays: The host-side arrays plus the front-material index arrays.
@@ -512,8 +512,10 @@ def load_scene_on_yee_lattices(
             front_material=front_E,
             front_owner=owner_E,
             inv_permittivities=inv_permittivities,
+            # A 9-component array must always be written as the full Kottke row: entry (c, c) of a
+            # row-major 3x3 lives at 4*c, not at c. The config flag's only job is to force the tier.
             supersample=supersample,
-            full_tensor=full_tensor and num_perm_components == 9,
+            full_tensor=num_perm_components == 9,
         )
         difference["smoothing"] = smoothing_stats.as_dict()
 

@@ -703,6 +703,41 @@ def test_sphere_falls_back_to_supersampling_and_stays_accurate():
     assert abs(volume_estimate - truth) < 0.06 * truth
 
 
+def test_the_smoother_refuses_a_mismatched_component_tier():
+    """Entry (c, c) of a row-major 3x3 sits at 4*c, so the tier and the write form must agree."""
+    from fdtdx.core.physics.geometry_raster import build_scene
+    from fdtdx.core.physics.geometry_smooth import smooth_inverse_permittivity_on_yee_pixels
+
+    name = _tag()
+    config = _config(50e-9, "yee")
+    volume = _volume((8, 8, 1), f"v{name}")
+    core = ExtrudedPolygon(
+        axis=2,
+        vertices=_rectangle(210e-9, 210e-9),
+        material_name="core",
+        materials={"core": Material(permittivity=EPS_CORE)},
+        partial_grid_shape=(None, None, 1),
+        partial_real_position=(0.13 * 50e-9, 0.0, 0.0),
+        placement_order=1,
+        name=f"c{name}",
+    )
+    container, arrays, _, resolved, _ = fdtdx.place_objects([volume, core], config, [])
+    scene = build_scene(container.static_material_objects)
+    grid = resolved.resolved_grid
+    inv_eps = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    front = np.zeros((3, *inv_eps.shape[1:]), dtype=np.int32)
+    with pytest.raises(ValueError, match="9-component"):
+        smooth_inverse_permittivity_on_yee_pixels(
+            scene=scene,
+            grid=grid,
+            front_material=front,
+            front_owner=front,
+            inv_permittivities=inv_eps,
+            supersample=4,
+            full_tensor=True,
+        )
+
+
 def test_yee_smooth_rejects_symmetry():
     config = _config(40e-9, "yee_smooth", symmetry=(1, 0, 0))
     volume = _volume((8, 8, 8), f"v{_tag()}")
