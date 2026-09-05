@@ -142,7 +142,7 @@ class ExtrudedPolygon(StaticMultiMaterialObject):
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
             ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces. With the
-                extrusion axis listed the caps are dropped and a side wall always wins.
+                extrusion axis listed the caps are dropped and a side wall always wins. See :meth:`~fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` for the rule that decides which axes are listed.
 
         Returns:
             np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.

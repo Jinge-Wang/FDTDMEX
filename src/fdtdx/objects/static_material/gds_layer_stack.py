@@ -395,7 +395,7 @@ class GDSLayerObject(StaticMultiMaterialObject):
 
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
-            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces. See :meth:`~fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` for the rule that decides which axes are listed.
 
         Returns:
             np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.

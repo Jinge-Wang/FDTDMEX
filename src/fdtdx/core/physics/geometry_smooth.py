@@ -98,6 +98,10 @@ def invariant_axes(grid: RectilinearGrid) -> tuple[int, ...]:
     fdtdx's 2-D convention is one cell with periodic boundaries on the third axis. A pixel must not
     resolve such an axis: doing so would put its corners outside the one-cell-thick objects and
     report a spurious second material everywhere.
+
+    Half of the ``ignore_axes`` rule stated in full at
+    :meth:`fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` (the other half
+    is :func:`_spanning_axes`). This half is exact, not a heuristic.
     """
     return tuple(axis for axis in range(3) if grid.shape[axis] <= 1)
 
@@ -133,6 +137,17 @@ def pixel_axis_bounds(
         else:
             widths = np.diff(edges)
             previous = np.concatenate([widths[:1], widths[:-1]])
+            # Deliberate deviation from the M2 spec at i = 0. The spec asks for the *mirrored* dual
+            # pixel [e[0] - w[0]/2, e[0] + w[0]/2], matching curl.py:31, which prepends widths[:1] so
+            # the backward difference at the min edge divides by the full width w[0]. Here the box is
+            # clipped to the domain instead, so the boundary pixel is only w[0]/2 wide -- half the
+            # control volume the update actually integrates over. pixel_corner_coordinates clips its
+            # probe corners the same way, so candidate detection and fill fraction stay consistent
+            # with each other; the cost is that a material interface falling inside the first cell of
+            # an axis would be smoothed over half the correct box. Every case in cases/ puts PML and a
+            # spatially uniform background there, so no interface is ever that close to the boundary.
+            # A scene with a real interface one cell from a non-PML (e.g. Bloch) boundary would need
+            # the mirrored box and a background fill outside the domain.
             lower = np.clip(edges[:-1] - 0.5 * previous, edges[0], None)
             upper = edges[:-1] + 0.5 * widths
             bounds.append((lower, upper))
@@ -464,7 +479,13 @@ def _isotropic_permittivity(scene: Scene) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _spanning_axes(entry, grid: RectilinearGrid) -> tuple[int, ...]:
-    """Axes on which an entry covers the whole domain, so its "caps" are the domain boundary."""
+    """Axes on which an entry covers the whole domain, so its "caps" are the domain boundary.
+
+    Half of the ``ignore_axes`` rule stated in full at
+    :meth:`fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` (the other half
+    is :func:`invariant_axes`). This half is a heuristic: an object that genuinely ends at the
+    domain boundary and also has a real face there loses that face.
+    """
     edges = [np.asarray(grid.edges(axis), dtype=float) for axis in range(3)]
     spanning = []
     for axis in range(3):

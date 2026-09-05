@@ -192,7 +192,8 @@ class UniformMaterialObject(OrderableObject):
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
             ignore_axes (tuple[int, ...]): Axes whose faces are not physical surfaces (an axis the
-                simulation is invariant along, or one the object spans the whole domain on).
+                simulation is invariant along, or one the object spans the whole domain on). See
+                :meth:`StaticMultiMaterialObject.normal_at` for the rule that decides which.
 
         Returns:
             np.ndarray: Array of shape ``(..., 3)``; zero where no surface is available.
@@ -286,12 +287,35 @@ class StaticMultiMaterialObject(OrderableObject, ABC):
         Where nothing can be decided (a degenerate shape, a point equidistant from two surfaces) the
         zero vector is returned and the caller keeps the point sample.
 
+        **The ignore_axes rule** (defined here; this is its only normative statement, every
+        implementation below follows it). An axis is passed in ``ignore_axes`` when a face
+        perpendicular to it is not a physical interface the blend should see. The loader
+        (:func:`fdtdx.core.physics.geometry_smooth.smooth_inverse_permittivity_on_yee_pixels`) marks
+        an axis for exactly two reasons:
+
+        1. **Invariant axis** — the simulation resolves it with a single cell
+           (:func:`fdtdx.core.physics.geometry_smooth.invariant_axes`). fdtdx's 2-D convention is one
+           cell with periodic boundaries on the third axis, so the object's extent along it is a
+           modelling artifact, not a surface. Without the rule every pixel of a 2-D scene reports the
+           out-of-plane cap as its nearest face and the whole cross-section gets a z normal.
+        2. **Domain-spanning axis** — the object covers the full domain on that axis
+           (:func:`fdtdx.core.physics.geometry_smooth._spanning_axes`), so its "caps" coincide with
+           the domain boundary and are the simulation's edge rather than a material interface. A
+           strip waveguide drawn the full length of the domain otherwise returns an x normal at
+           every pixel of its cross-section.
+
+        Rule 1 is exact. Rule 2 is a heuristic, and this is where it can be wrong: an object that
+        genuinely ends at the domain boundary *and* has a real face there loses that face, and its
+        interface pixels fall back to the next-nearest surface or to the point sample. Neither Meep
+        nor libctl has this rule — it is fdtdx's own, forced by fdtdx's 2-D convention. No case in
+        ``cases/`` places a real material face on the domain boundary.
+
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres, on the
                 simulation grid's own axes.
-            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces — an axis
-                the simulation is invariant along (a single-cell 2-D axis), or one on which this
-                object spans the whole domain, so that its "caps" are the domain boundary.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces, per the
+                rule above. An implementation must return no normal component along such an axis and
+                must not let a face perpendicular to it win the nearest-surface competition.
 
         Returns:
             np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.

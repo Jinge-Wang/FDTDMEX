@@ -109,7 +109,7 @@ class Sphere(StaticMultiMaterialObject):
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
             ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces; the
-                corresponding normal components are dropped before normalisation.
+                corresponding normal components are dropped before normalisation. See :meth:`~fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` for the rule that decides which axes are listed.
 
         Returns:
             np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero at the centre.
