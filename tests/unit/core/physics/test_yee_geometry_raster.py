@@ -640,3 +640,39 @@ def test_sphere_contains_matches_the_ellipsoid_equation():
     radii = np.array([200e-9, 200e-9, 120e-9])
     expected = (((points - center) / radii) ** 2).sum(axis=-1) < 1.0
     np.testing.assert_array_equal(placed.contains(points), expected)
+
+
+# ---------------------------------------------------------------------------
+# Ties: faces exactly on lattice points
+# ---------------------------------------------------------------------------
+
+
+def test_faces_on_lattice_points_are_half_open_for_every_component():
+    """A 500 nm square on a 25 nm grid, one cell thick, has faces exactly on lattice points.
+
+    Every component must count exactly 20 samples across the square, and the components sampled on
+    the z edge plane (E_x, E_y) must see the one-cell-thick object at all, independent of how the
+    float32 grid edges round against the float64 metric shadow (the 2-D ring case lost its whole
+    waveguide at 25 nm before the tie rule).
+    """
+    d = 25e-9
+    name = _tag()
+    volume = _volume((40, 40, 1), f"vol_{name}")
+    core = ExtrudedPolygon(
+        axis=2,
+        vertices=_rectangle(500e-9, 500e-9),
+        material_name="core",
+        materials={"core": Material(permittivity=EPS_CORE)},
+        partial_real_position=(0.0, 0.0, 0.0),
+        name=f"sq_{name}",
+    )
+    object.__setattr__(core, "partial_real_shape", (*core.partial_real_shape[:2], d))
+    _, arrays, _, _, _ = fdtdx.place_objects([volume, core], _config(d, "yee"), [])
+    assert _num_components(arrays) == 3
+    for component in range(3):
+        mask = _core_mask(arrays, component)
+        assert mask.any(), f"component {component} does not see the one-cell-thick object"
+        along_x = int(mask[:, mask.shape[1] // 2, 0].sum())
+        along_y = int(mask[mask.shape[0] // 2, :, 0].sum())
+        assert along_x == 20, f"component {component}: {along_x} samples across x, expected 20"
+        assert along_y == 20, f"component {component}: {along_y} samples across y, expected 20"

@@ -219,6 +219,25 @@ def build_scene(static_objects: Sequence[SimulationObject]) -> Scene:
     return Scene(materials=materials, entries=entries, background_index=background_index)
 
 
+#: Fraction of the smallest cell width by which every sample point is shifted before the containment
+#: tests. A shape face that lands exactly on a lattice point (a 500 nm box on a 25 nm grid, or a 2-D
+#: object whose extrusion is one cell thick) would otherwise be decided by the float32 rounding of the
+#: grid edges against the float64 metric shadow, differently at every resolution. Shifting the points by
+#: +tol on every axis makes every face half-open in the same direction: a point on a lower face is inside,
+#: a point on an upper face is outside, for boxes, slabs and polygon edges alike. 1e-3 of a cell is far
+#: above the float32 coordinate error (about 1e-7 relative) and far below anything physical.
+_TIE_NUDGE_FRACTION = 1e-3
+
+
+def _nudge_off_ties(coords: tuple[np.ndarray, np.ndarray, np.ndarray]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Shift the lattice coordinates by a fixed fraction of the smallest cell width (see above)."""
+    widths = [np.min(np.diff(c)) for c in coords if c.size > 1]
+    if not widths:
+        return coords
+    tol = _TIE_NUDGE_FRACTION * float(min(widths))
+    return tuple(np.asarray(c, dtype=float) + tol for c in coords)  # type: ignore[return-value]
+
+
 def _axis_window(coords: np.ndarray, lower: float, upper: float) -> tuple[int, int]:
     """Index range of the lattice samples that fall in the half-open metric interval."""
     start = int(np.searchsorted(coords, lower, side="left"))
@@ -256,6 +275,7 @@ def front_material_indices(
     """
     shape = (coords[0].size, coords[1].size, coords[2].size)
     front = np.full(shape, scene.background_index, dtype=np.int32)
+    coords = _nudge_off_ties(coords)
 
     for entry in scene.entries:
         windows = [_axis_window(coords[axis], entry.bounds[axis][0], entry.bounds[axis][1]) for axis in range(3)]
