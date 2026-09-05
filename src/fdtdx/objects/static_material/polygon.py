@@ -4,12 +4,13 @@ import gdstk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from matplotlib.path import Path
 
 from fdtdx.core.axis import get_transverse_axes
 from fdtdx.core.grid import polygon_to_mask, polygon_to_mask_at_points
 from fdtdx.core.jax.pytrees import autoinit, frozen_field
 from fdtdx.materials import compute_ordered_names
-from fdtdx.objects.static_material.static import StaticMultiMaterialObject
+from fdtdx.objects.static_material.static import StaticMultiMaterialObject, points_in_metric_slab
 
 
 @autoinit
@@ -105,6 +106,31 @@ class ExtrudedPolygon(StaticMultiMaterialObject):
         )
 
         return mask
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Continuous point-in-shape test: the polygon cross-section, extruded over the metric extent.
+
+        The vertices are already centred on the object's bounding-box centre, so they are compared
+        against the point offsets from :attr:`metric_center`, and the extrusion runs over the
+        object's metric extent along ``axis``.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        bounds = self.metric_bounds
+        center = self.metric_center
+        inside = points_in_metric_slab(pts[..., self.axis], bounds[self.axis][0], bounds[self.axis][1])
+        if not inside.any():
+            return inside
+        local_h = pts[..., self.horizontal_axis] - center[self.horizontal_axis]
+        local_v = pts[..., self.vertical_axis] - center[self.vertical_axis]
+        query = np.column_stack((local_h.ravel(), local_v.ravel()))
+        in_plane = Path(np.asarray(self.vertices)).contains_points(query).reshape(local_h.shape)
+        return inside & in_plane
 
     def get_material_mapping(
         self,

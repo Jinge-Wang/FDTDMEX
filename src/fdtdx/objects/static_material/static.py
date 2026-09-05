@@ -6,8 +6,25 @@ import numpy as np
 
 from fdtdx.colors import XKCD_LIGHT_GREY, Color
 from fdtdx.core.jax.pytrees import autoinit, field, frozen_field
-from fdtdx.materials import Material
+from fdtdx.materials import Material, compute_ordered_names
 from fdtdx.objects.object import OrderableObject
+
+
+def points_in_metric_slab(coordinate: np.ndarray, lower: float, upper: float) -> np.ndarray:
+    """Half-open ``[lower, upper)`` membership test for one axis of a metric point set.
+
+    Half-open on purpose: two objects that share a face (a substrate top and a waveguide bottom)
+    must not both claim the sample sitting exactly on that face.
+
+    Args:
+        coordinate (np.ndarray): Coordinates along one axis, in metres.
+        lower (float): Lower bound in metres.
+        upper (float): Upper bound in metres.
+
+    Returns:
+        np.ndarray: Boolean array of the same shape as ``coordinate``.
+    """
+    return (coordinate >= lower) & (coordinate < upper)
 
 
 @autoinit
@@ -17,6 +34,25 @@ class UniformMaterialObject(OrderableObject):
 
     #: the color object
     color: Color | None = frozen_field(default=XKCD_LIGHT_GREY)
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Test which metric points lie inside this object's continuous box.
+
+        The box is the object's :attr:`~fdtdx.objects.object.SimulationObject.metric_bounds`, i.e.
+        the extent it was placed with before rounding to whole cells, not the rounded box.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        bounds = self.metric_bounds
+        inside = np.ones(pts.shape[:-1], dtype=bool)
+        for axis in range(3):
+            inside &= points_in_metric_slab(pts[..., axis], bounds[axis][0], bounds[axis][1])
+        return inside
 
 
 @autoinit
@@ -48,6 +84,54 @@ class StaticMultiMaterialObject(OrderableObject, ABC):
     #: interfaces (slanted sidewalls, diagonal edges) but ~3x heavier per step and forces the anisotropic
     #: update kernel. Ignored when ``subpixel_smoothing`` is False.
     subpixel_full_tensor: bool = frozen_field(default=False)
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Test which metric points lie inside this object's continuous shape.
+
+        This is the continuous counterpart of :meth:`get_voxel_mask_for_shape`: it answers the same
+        question — is this location material? — but at an arbitrary point in metres rather than at a
+        cell centre of the object's rounded box. It is what ``material_sampling="yee"`` queries at
+        every Yee component position.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres, on the
+                simulation grid's own axes.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement contains(); it cannot be used with material_sampling='yee'."
+        )
+
+    def material_at(self, points: np.ndarray) -> np.ndarray:
+        """Local material index (into ``compute_ordered_names(self.materials)``) at each point.
+
+        Every concrete object in the tree today carries one material over its whole shape, so the
+        default returns that constant. Objects whose material varies in space override this.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Integer array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        return np.full(pts.shape[:-1], self.constant_material_index(), dtype=np.int32)
+
+    def constant_material_index(self) -> int:
+        """Index of this object's single material in its own ordered material list.
+
+        Returns:
+            int: Position of ``self.material_name`` in ``compute_ordered_names(self.materials)``.
+
+        Raises:
+            NotImplementedError: If the object has no single ``material_name``.
+        """
+        name = getattr(self, "material_name", None)
+        if name is None:
+            raise NotImplementedError(f"{type(self).__name__} has no single material_name; override material_at().")
+        return compute_ordered_names(self.materials).index(name)
 
     @abstractmethod
     def get_voxel_mask_for_shape(self) -> jax.Array:

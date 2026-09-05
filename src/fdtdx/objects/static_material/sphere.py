@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from fdtdx.core.jax.pytrees import autoinit, frozen_field
 from fdtdx.materials import compute_ordered_names
@@ -80,6 +81,27 @@ class Sphere(StaticMultiMaterialObject):
         mask = (x_term + y_term + z_term) < 1
 
         return mask
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Continuous point-in-shape test: the ellipsoid centred on the object's metric centre.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        radii = (
+            self.radius_x if self.radius_x is not None else self.radius,
+            self.radius_y if self.radius_y is not None else self.radius,
+            self.radius_z if self.radius_z is not None else self.radius,
+        )
+        total = np.zeros(pts.shape[:-1], dtype=float)
+        for axis in range(3):
+            total = total + ((pts[..., axis] - center[axis]) / radii[axis]) ** 2
+        return total < 1.0
 
     def get_material_mapping(
         self,

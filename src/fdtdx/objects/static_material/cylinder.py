@@ -1,10 +1,11 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from fdtdx.core.axis import get_transverse_axes
 from fdtdx.core.jax.pytrees import autoinit, frozen_field
 from fdtdx.materials import compute_ordered_names
-from fdtdx.objects.static_material.static import StaticMultiMaterialObject
+from fdtdx.objects.static_material.static import StaticMultiMaterialObject, points_in_metric_slab
 
 
 @autoinit
@@ -78,6 +79,24 @@ class Cylinder(StaticMultiMaterialObject):
         mask = (grid**2).sum(axis=-1) < 1
         mask = jnp.expand_dims(mask, axis=self.axis)
         return mask
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Continuous point-in-shape test: a disk of ``self.radius`` extruded over the metric extent.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        bounds = self.metric_bounds
+        center = self.metric_center
+        inside = points_in_metric_slab(pts[..., self.axis], bounds[self.axis][0], bounds[self.axis][1])
+        radial = (pts[..., self.horizontal_axis] - center[self.horizontal_axis]) ** 2 + (
+            pts[..., self.vertical_axis] - center[self.vertical_axis]
+        ) ** 2
+        return inside & (radial < self.radius**2)
 
     def get_material_mapping(
         self,
