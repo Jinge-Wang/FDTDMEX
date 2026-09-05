@@ -97,8 +97,29 @@ what `src/fdtdx/mlx/` assumes:
 
 ## Current sync state
 
-`mlx-fork` is current with upstream `main` @ **`65e0fd4`** (reconciled 2026-07-09).
+`mlx-fork` is current with upstream `main` @ **`9ac6395`** (reconciled 2026-09-04).
 **Update this one line on each reconcile** — completed syncs don't need a full write-up.
+
+`65e0fd4 → 9ac6395` (31 commits, 2026-07-08 → 2026-08-24). Text merge: 6 conflicts, all in hand-owned
+files (`linear_polarization.py` took upstream's `_gauss_profile_2d` refactor, which carries the same
+non-square Gaussian fix as the fork's #19; `modes.py` kept tidy3d optional and added upstream's `loguru`
+import; `pyproject.toml` kept the fork layout with upstream's `ty==0.0.66` and explicit ruff `select`;
+`CLAUDE.md` / `README.md` / `SKILL.md` kept both sides). `uv.lock` regenerated. Behavioral work:
+**#407 TFSF metric on non-uniform grids** broke the non-uniform parity tests (15.8 % on E) and was
+ported into `mlx/source_freeze.py::_tfsf_plan` (backward-stencil factor on the E-side correction,
+forward-stencil on the H-side, both 1.0 on uniform grids). New JAX-fallback gates in
+`backend/dispatch.py`: `config.symmetry` (mirror halo lives in the JAX curl), `PhasorDetector`
+subclasses (`PhasorPoyntingFluxDetector`, `ClosedSurfacePhasorPoyntingFluxDetector`),
+`PhasorDetector(apodization=...)` and `dft_subsample != 1`. `TFSFPlaneSourceRegion`,
+`ClosedSurfacePoyntingFluxDetector` and custom-reference mode detectors already fall back through the
+type whitelist; the CCPR gate (`dispersive_c4`) is dead upstream (#439) and harmless. Native mode
+solver: upstream's new backward-mode and symmetry tests exposed that its eigenvectors carried an
+arbitrary global phase; `mode_backend/solve.py` now makes the largest transverse-E entry real and
+positive (tidy3d's convention), which also fixed a 0.5 % amplitude deviation on the magnetic-wall
+symmetry projection test. `compute_mode_symmetry_reduced` gained the `mode_backend` passthrough;
+the two upstream tests that mock the tidy3d wrapper pin `mode_backend="tidy3d"` (fork precedent).
+Contract surfaces: `ArrayContainer` / `FieldState` field names unchanged. Parity gate green with
+the Metal kernel on and off.
 
 `e5351a4 → 65e0fd4` (15 commits) was a non-trivial engine sync, not a doc-only one. Text merge was
 near-clean (2 conflicts: `conversion/json.py` array serialization #393 → took upstream's canonical
