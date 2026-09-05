@@ -19,7 +19,9 @@ from fdtdx.core.grid import UniformGrid
 from fdtdx.core.physics.geometry_raster import yee_lattice_coordinates
 from fdtdx.materials import Material
 from fdtdx.objects.static_material.cylinder import Cylinder
+from fdtdx.objects.static_material.gds_layer_stack import GDSLayerObject
 from fdtdx.objects.static_material.polygon import ExtrudedPolygon
+from fdtdx.objects.static_material.sphere import Sphere
 from fdtdx.objects.static_material.static import SimulationVolume, UniformMaterialObject
 
 EPS_CORE = 12.1104
@@ -541,3 +543,100 @@ def test_mrm_bus_width_and_gap_survive_the_grid(d):
         assert box_width == pytest.approx(480e-9, rel=1e-5)
     if d == 32e-9:
         assert box_width == pytest.approx(512e-9, rel=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# GDS layers and spheres
+# ---------------------------------------------------------------------------
+
+
+def _gds_layer_scene(d: float, sampling: str, z_base: float, thickness: float, sidewall_angle: float = 90.0):
+    """One square GDS polygon extruded along z, placed by a metric z_base margin."""
+    name = _tag()
+    volume = _volume((20, 20, 20), f"vol_{name}")
+    square = np.array([[-250e-9, -250e-9], [250e-9, -250e-9], [250e-9, 250e-9], [-250e-9, 250e-9]])
+    layer = GDSLayerObject(
+        polygons=[square],
+        gds_center=(0.0, 0.0),
+        material_name="core",
+        materials={"core": Material(permittivity=EPS_CORE)},
+        axis=2,
+        thickness=thickness,
+        sidewall_angle=sidewall_angle,
+        reference_plane="bottom",
+        partial_real_shape=(None, None, thickness),
+        name=f"gds_{name}",
+    )
+    constraints = [
+        layer.place_relative_to(volume, axes=(2,), own_positions=(-1.0,), other_positions=(-1.0,), margins=(z_base,)),
+        layer.size_relative_to(volume, axes=(0, 1), other_axes=(0, 1)),
+    ]
+    return fdtdx.place_objects([volume, layer], _config(d, sampling), constraints)
+
+
+def test_gds_layer_keeps_its_metric_thickness_and_base():
+    """The layer spans [z_base, z_base + thickness) in metres, not the rounded cell count."""
+    d = 40e-9
+    z_base, thickness = 130e-9, 220e-9
+    objects, arrays, _, config, _ = _gds_layer_scene(d, "yee", z_base, thickness)
+    placed = next(o for o in objects.objects if o.name.startswith("gds_"))
+    edges_z = np.asarray(config.resolved_grid.edges(2), dtype=float)
+
+    assert placed.metric_bounds[2][0] == pytest.approx(edges_z[0] + z_base)
+    assert placed.metric_extent[2] == pytest.approx(thickness)
+
+    # E_x samples z at the nodes; every node inside [z_base, z_base + thickness) must be core.
+    nodes_z = edges_z[:-1]
+    expected = (nodes_z >= edges_z[0] + z_base) & (nodes_z < edges_z[0] + z_base + thickness)
+    got = _core_mask(arrays, 0)[10, 10, :]
+    np.testing.assert_array_equal(got, expected)
+
+
+def test_gds_layer_contains_follows_the_sidewall_taper():
+    """A sidewall angle below 90 degrees narrows the footprint with height, continuously."""
+    d = 40e-9
+    z_base, thickness = 130e-9, 400e-9
+    objects, _, _, _, _ = _gds_layer_scene(d, "yee", z_base, thickness, sidewall_angle=75.0)
+    layer = next(o for o in objects.objects if o.name.startswith("gds_"))
+    center = layer.metric_center
+    z_lower = layer.metric_bounds[2][0]
+
+    line = np.linspace(-400e-9, 400e-9, 801)
+
+    def half_width(height: float) -> float:
+        points = np.stack([center[0] + line, np.full_like(line, center[1]), np.full_like(line, height)], axis=-1)
+        inside = layer.contains(points)
+        return float(line[inside].max())
+
+    tan = float(np.tan(np.deg2rad(90.0 - 75.0)))
+    bottom = half_width(z_lower + 0.05 * thickness)
+    top = half_width(z_lower + 0.95 * thickness)
+    # offset(z) = (z - z_base) * tan(90deg - angle), measured from the bottom reference face.
+    assert bottom == pytest.approx(250e-9 - 0.05 * thickness * tan, abs=2e-9)
+    assert top == pytest.approx(250e-9 - 0.95 * thickness * tan, abs=2e-9)
+    assert top < bottom - 50e-9, "a 75 degree sidewall must erode the footprint towards the top"
+
+
+def test_sphere_contains_matches_the_ellipsoid_equation():
+    """The continuous ellipsoid test agrees with the analytic form at the object's metric centre."""
+    d = 40e-9
+    name = _tag()
+    volume = _volume((20, 20, 20), f"vol_{name}")
+    sphere = Sphere(
+        radius=200e-9,
+        radius_z=120e-9,
+        material_name="core",
+        materials={"core": Material(permittivity=EPS_CORE)},
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=1,
+        name=f"sph_{name}",
+    )
+    objects, _, _, _, _ = fdtdx.place_objects([volume, sphere], _config(d, "yee"), [])
+    placed = next(o for o in objects.objects if o.name == sphere.name)
+    center = np.asarray(placed.metric_center)
+
+    rng = np.random.default_rng(3)
+    points = center + rng.uniform(-300e-9, 300e-9, size=(500, 3))
+    radii = np.array([200e-9, 200e-9, 120e-9])
+    expected = (((points - center) / radii) ** 2).sum(axis=-1) < 1.0
+    np.testing.assert_array_equal(placed.contains(points), expected)
