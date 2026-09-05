@@ -77,6 +77,8 @@ The bulk kernel runs at the floor, but on a *monitored* run the full `run_fdtd` 
 
 Region-interpolation + gating are exact (parity-tested against the JAX oracle with `FDTDMEX_DFT_STRIDE=1`); subsampling is exact within the oversampling margin (physics-tested). **Result on the reference workload: 1478 s → 377 s (3.9×)** with no observable physics change (resonance dip 1307.1 nm both, extinction depth 0.302 both, max normalized-transmission Δ across the 18-λ spectrum 0.0000, on-resonance `|E|²` map rel-L2 1e-4). `profile_engine.py --detector phasor` measures the residual per-step recording cost.
 
+That A/B was measured before the Gaussian-plane-source fix (upstream fdtdx #418), so its absolute physics numbers are the pre-fix ones; the wall-time comparison is unaffected because both sides ran the same source. Re-running the same script on 2026-09-04 with the fix gives **381 s** (unchanged wall) at the same resonance dip, **1307.1 nm**, with the extinction depth now **0.12** instead of 0.302.
+
 ## Apple-Silicon ceilings
 
 The equal-traffic Metal:CPU ratio is factor (a) above — multiply by up to ~4x (factor b) for the full custom-kernel ceiling. The *ratio* over CPU is ~constant because Apple scales CPU and GPU bandwidth together, except where bandwidth outruns the CPU ceiling (M4 Max, Ultra); a bigger chip's decisive wins are **absolute throughput** (∝ BW) and **capacity** (RAM → domains a discrete GPU can't hold). Max-N is a rough isotropic estimate (~50 B/cell double-buffered, 70% working set); all numbers are model estimates anchored to one M4 Pro measurement.

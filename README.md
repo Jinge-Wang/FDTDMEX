@@ -165,23 +165,23 @@ print(arrays.detector_states["T"])   # transmitted flux vs time
 |---|---|
 | ![setup](examples/ring_mrm_oband/figures/setup.png) | ![mode](examples/ring_mrm_oband/figures/mode.png) |
 
-**Mesh convergence and cold resonance.** The through-port `T(λ)` is read as a standing-wave-immune **net-Poynting two-run** ratio — a broadband **Gaussian** source + **phasor monitors**, which keeps the run on Metal. Refining the mesh 40 → 20 nm tracks the resonance and loaded Q (left); the 20 nm cold spectrum (right) gives `λ_res ≈ 1305 nm`, loaded `Q ≈ 125`, `FSR ≈ 23 nm`:
+**Mesh convergence and cold resonance.** The through-port `T(λ)` is read as a standing-wave-immune **net-Poynting two-run** ratio — a broadband **Gaussian** source + **phasor monitors**, which keeps the run on Metal. Refining the mesh 40 → 20 nm tracks the resonance and loaded Q (left); the 20 nm cold spectrum (right) has a flat 1.00 baseline with two shallow notches one FSR apart, giving `λ_res = 1300.4 nm`, loaded `Q ≈ 780`, `FSR ≈ 23.3 nm` (regenerated 2026-09-04 with the corrected Gaussian plane source, upstream fdtdx #418):
 
 | Mesh convergence 40 → 20 nm | Cold through-port spectrum |
 |---|---|
 | ![convergence](examples/ring_mrm_oband/figures/convergence.png) | ![cold spectrum](examples/ring_mrm_oband/figures/cold_spectrum.png) |
 
-**Coupling control and electro-optic tuning.** Sweeping the bus–ring gap traces the coupling regime. This lossy compact ring is **under-coupled across the whole sweep**, so the extinction ratio is deepest at the *smallest* (100 nm operating) gap, **ER ≈ 8.5 dB**, and falls as the gap widens (left) — the example README works through the all-pass `T_min = (a−t)²/(1−a·t)²` physics. A Soref–Bennett free-carrier perturbation gives the static electro-optic resonance **red-shift, ≈ 62 pm/V** (right):
+**Coupling control and electro-optic tuning.** Sweeping the bus–ring gap traces the coupling regime. This ring is weakly coupled and **under-coupled across the whole sweep** (`κ² = 2.7 %` at the smallest gap against a round-trip amplitude `a ≈ 0.80`), so the extinction ratio is deepest at the *smallest* (100 nm operating) gap, **ER = 1.53 dB**, and falls to ~0 dB by 420 nm (left) — the example README works through the all-pass `T_min = (a−t)²/(1−a·t)²` physics. A Soref–Bennett free-carrier perturbation gives the static electro-optic resonance **red-shift, 61.6 pm/V** (right); it is computed from the mode, not the FDTD run, so the source fix left it unchanged:
 
 | Extinction ratio vs gap | Static EO tuning (Soref–Bennett) |
 |---|---|
 | ![gap sweep](examples/ring_mrm_oband/figures/gap_sweep.png) | ![EO response](examples/ring_mrm_oband/figures/eo_response.png) |
 
-**Trapped resonant field (operating gap).** At the 100 nm operating gap, `|E|²` at the silicon-core mid-plane shows light **circulating inside the ring** on resonance versus **passing straight to the through port** off resonance:
+**Trapped resonant field (operating gap).** At the 100 nm operating gap, `|E|²` at the silicon-core mid-plane shows light **circulating inside the ring** on resonance (1307.1 nm) versus **passing straight to the through port** off resonance (1312.2 nm); the bus stays bright in both, because on resonance the ring takes only ~12 % of the through-port power:
 
 ![field maps at the 100 nm operating gap](examples/ring_mrm_oband/figures/field_maps_100nm.png)
 
-See the example [README](examples/ring_mrm_oband/README.md) to run it (~1–1.5 h at 20 nm for the entire sweep after the monitor-recording optimization; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
+See the example [README](examples/ring_mrm_oband/README.md) to run it (78 min at 20 nm for the entire sweep on an M4 Pro, measured 2026-09-04 after the monitor-recording optimization; `MRM_FAST=1` for a quick coarse smoke). For a complementary workflow centred on **interactive 3-D setup, mode-expansion S-parameters, and the portable HDF5 hand-off**, see [`examples/ring_resonator_demo/`](examples/ring_resonator_demo/).
 
 ## Relationship to upstream
 
