@@ -311,6 +311,39 @@ def test_metric_shadow_records_the_request_and_the_report_records_both():
     assert rows[0]["size_source"] == "partial_real_shape"
 
 
+def test_the_logged_placement_report_only_lists_objects_whose_extent_moved():
+    """The INFO table is the exceptions, not an inventory: an exactly-placed object is not in it."""
+    from fdtdx.fdtd.metric_shadow import format_placement_report
+
+    d = 40e-9
+    name = _tag()
+    volume = _volume((20, 20, 4), f"vol_{name}")
+    exact = UniformMaterialObject(
+        material=Material(permittivity=EPS_CORE),
+        partial_real_shape=(480e-9, 480e-9, 160e-9),  # 12 x 12 x 4 whole cells
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=1,
+        name=f"exact_{name}",
+    )
+    rounded = UniformMaterialObject(
+        material=Material(permittivity=EPS_CORE),
+        partial_real_shape=(500e-9, 480e-9, 160e-9),  # 12.5 cells on x -> rounded
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=2,
+        name=f"rounded_{name}",
+    )
+    _, _, _, _, info = fdtdx.place_objects([volume, exact, rounded], _config(d, "yee"), [])
+
+    rows = info["placement_report"]
+    # Every object and axis is in the machine-readable rows...
+    assert {r["name"] for r in rows} >= {volume.name, exact.name, rounded.name}
+    # ...but only the object whose extent actually moved reaches the logged table.
+    table = format_placement_report(rows)
+    assert rounded.name in table
+    assert exact.name not in table
+    assert volume.name not in table
+
+
 def test_metric_shadow_follows_a_position_constraint_in_metres():
     """A layer placed by a metric margin sits at that exact metric coordinate, not at a cell edge."""
     d = 40e-9
@@ -390,7 +423,9 @@ def test_yee_mode_forces_the_diagonal_component_tiers():
         placement_order=1,
         name=f"lossy_{name}",
     )
-    _, yee_arrays, _, _, info = fdtdx.place_objects([volume, lossy], _config(d, "yee"), [])
+    _, yee_arrays, _, _, info = fdtdx.place_objects(
+        [volume, lossy], _config(d, "yee", yee_sampling_diagnostics=True), []
+    )
     assert yee_arrays.inv_permittivities.shape[0] == 3
     assert yee_arrays.electric_conductivity.shape[0] == 3
     assert info["yee_sampling_difference"]["num_differing_E"] > 0
@@ -424,6 +459,58 @@ def test_yee_mode_rejects_subpixel_smoothing():
 def test_material_sampling_is_validated():
     with pytest.raises(ValueError, match="material_sampling"):
         SimulationConfig(time=1e-15, grid=UniformGrid(spacing=40e-9), material_sampling="nearest")
+
+
+def test_the_sampling_predicates_cover_both_yee_modes():
+    """One helper, not a string literal: ``"yee_smooth"`` must answer yes to the sampling question.
+
+    Comparing ``material_sampling == "yee"`` literally is the bug that took the ring case down when
+    ``"yee_smooth"`` landed — the source gates silently excluded it. These are the predicates that
+    replaced every such comparison.
+    """
+    expected = {
+        "box": (False, False),
+        "yee": (True, False),
+        "yee_smooth": (True, True),
+    }
+    for mode, (sampling, smoothing) in expected.items():
+        config = _config(40e-9, mode)
+        assert config.uses_yee_material_sampling is sampling, mode
+        assert config.uses_yee_smoothing is smoothing, mode
+
+
+def test_the_box_difference_diagnostic_is_off_by_default(monkeypatch):
+    """The second, box-mode rasterisation only runs when it is asked for."""
+    from fdtdx.config import YEE_DIAGNOSTICS_ENV_VAR
+
+    monkeypatch.delenv(YEE_DIAGNOSTICS_ENV_VAR, raising=False)
+    name = _tag()
+    volume = _volume((10, 10, 4), f"vol_{name}")
+    core = UniformMaterialObject(
+        material=Material(permittivity=EPS_CORE),
+        partial_real_shape=(220e-9, 220e-9, 160e-9),
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=1,
+        name=f"core_{name}",
+    )
+    _, _, _, _, info = fdtdx.place_objects([volume, core], _config(40e-9, "yee"), [])
+    difference = info["yee_sampling_difference"]
+    assert difference["box_difference_reported"] is False
+    assert "num_differing_E" not in difference
+
+    monkeypatch.setenv(YEE_DIAGNOSTICS_ENV_VAR, "1")
+    name = _tag()
+    volume = _volume((10, 10, 4), f"vol_{name}")
+    core = UniformMaterialObject(
+        material=Material(permittivity=EPS_CORE),
+        partial_real_shape=(220e-9, 220e-9, 160e-9),
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=1,
+        name=f"core_{name}",
+    )
+    _, _, _, _, info = fdtdx.place_objects([volume, core], _config(40e-9, "yee"), [])
+    assert info["yee_sampling_difference"]["box_difference_reported"] is True
+    assert info["yee_sampling_difference"]["num_differing_E"] > 0
 
 
 # ---------------------------------------------------------------------------

@@ -1545,6 +1545,12 @@ def test_init_arrays_unknown_static_material_type_raises(mock_create_matrix):
     config.grid = UniformGrid(spacing=1.0)
     config.resolve_grid.return_value = RectilinearGrid.uniform(shape=(2, 2, 2), spacing=1.0)
     config.uniform_spacing.return_value = 1.0
+    # The sampling-mode predicates are properties on the real config, so a spec'd Mock auto-creates
+    # them as truthy Mocks. Pin them to the legacy box path, which is what this test exercises.
+    config.material_sampling = "box"
+    config.uses_yee_material_sampling = False
+    config.uses_yee_smoothing = False
+    config.yee_sampling_diagnostics_enabled = False
 
     objects = Mock(spec=ObjectContainer)
     objects.volume = Mock()
