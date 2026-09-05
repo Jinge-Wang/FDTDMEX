@@ -223,11 +223,11 @@ def place_objects(
     if grid.shape != volume_shape:
         raise ValueError(f"Configured grid shape {grid.shape} does not match simulation volume shape {volume_shape}.")
 
-    if config.material_sampling == "yee" and config.has_symmetry:
+    if config.material_sampling in ("yee", "yee_smooth") and config.has_symmetry:
         raise NotImplementedError(
-            "material_sampling='yee' (Stage A per-Yee-point material sampling) does not support "
-            "config.symmetry yet: a per-component lattice does not mirror like a cell-centred one. "
-            "Use material_sampling='box' or drop the symmetry."
+            f"material_sampling={config.material_sampling!r} (per-Yee-point material sampling) does not "
+            "support config.symmetry yet: a per-component lattice does not mirror like a cell-centred "
+            "one. Use material_sampling='box' or drop the symmetry."
         )
 
     # Step 5b: Metric shadow of the same solve. Every object keeps the continuous extent and
@@ -683,18 +683,26 @@ def _init_arrays(
     # no longer represent an interface cell: force every property up to at least the diagonal
     # (3-component) tier. A genuinely full-tensor material or oriented dispersion can still push it
     # to 9 further down. The 3-component tier keeps the Metal block-hybrid kernel eligible.
-    yee_sampling = config.material_sampling == "yee"
+    yee_sampling = config.material_sampling in ("yee", "yee_smooth")
+    yee_smoothing = config.material_sampling == "yee_smooth"
     if yee_sampling:
-        if subpixel_permittivity:
+        if subpixel_permittivity and not yee_smoothing:
             raise NotImplementedError(
-                "material_sampling='yee' (Stage A per-Yee-point sampling) cannot be combined with "
-                "subpixel_smoothing=True; the Farjadpour fill-fraction blend is Stage B."
+                "material_sampling='yee' (per-Yee-point point sampling) cannot be combined with "
+                "subpixel_smoothing=True; use material_sampling='yee_smooth' instead, which smooths "
+                "every object's interfaces on the Yee pixels."
+            )
+        if subpixel_permittivity and yee_smoothing:
+            raise NotImplementedError(
+                "material_sampling='yee_smooth' already smooths every interface on the Yee pixels; "
+                "the per-object subpixel_smoothing=True flag is redundant and its cell-centred blend "
+                "would fight the per-component one. Drop subpixel_smoothing from the objects."
             )
         isotropic_permittivity = False
         isotropic_permeability = False
         isotropic_electric_conductivity = False
         isotropic_magnetic_conductivity = False
-        diagonally_anisotropic_permittivity = True
+        diagonally_anisotropic_permittivity = not (yee_smoothing and config.yee_smooth_full_tensor)
         diagonally_anisotropic_permeability = True
         diagonally_anisotropic_electric_conductivity = True
         diagonally_anisotropic_magnetic_conductivity = True
@@ -881,6 +889,9 @@ def _init_arrays(
             num_disp_coupling_components=num_disp_coupling_components,
             conductivity_spacing=conductivity_spacing,
             time_step_duration=config.time_step_duration,
+            smooth=yee_smoothing,
+            supersample=config.yee_smooth_supersample,
+            full_tensor=config.yee_smooth_full_tensor,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
         full_index = (slice(None), slice(None), slice(None), slice(None))

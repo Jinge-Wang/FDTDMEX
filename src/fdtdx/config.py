@@ -120,7 +120,26 @@ class SimulationConfig(TreeClass):
     #: highest-priority object that contains that point. Priority is the order in which objects are
     #: written today (``placement_order`` ascending, later wins), with the simulation volume as the
     #: background. Devices, sources, detectors and PML keep their integer boxes in both modes.
-    material_sampling: Literal["box", "yee"] = frozen_field(default="box")
+    #: ``"yee_smooth"`` is ``"yee"`` plus a Kottke/Farjadpour sub-pixel post-pass: at every pixel
+    #: where exactly two materials meet, the point sample is replaced by the effective inverse
+    #: permittivity of that pixel (harmonic mean along the interface normal, arithmetic mean in the
+    #: interface plane), which removes the first-order staircasing error. Uniform pixels and pixels
+    #: holding three or more materials keep their point sample; conductivity and dispersion are never
+    #: averaged. Note that ``"yee_smooth"`` is not bit-identical to ``"box"`` with object-level
+    #: ``subpixel_smoothing`` for tilted interfaces: it takes the diagonal of the *inverse* effective
+    #: tensor, which is the entry the elementwise update applies to ``E_c``.
+    material_sampling: Literal["box", "yee", "yee_smooth"] = frozen_field(default="box")
+
+    #: Samples per axis used by ``material_sampling="yee_smooth"`` for a pixel fill fraction or an
+    #: interface normal that the object's shape cannot answer analytically (a sphere, a tapered
+    #: sidewall). Boxes, cylinders and polygon extrusions are exact and never use it.
+    yee_smooth_supersample: int = frozen_field(default=8)
+
+    #: Keep the off-diagonal Kottke terms under ``material_sampling="yee_smooth"``, allocating the
+    #: full 9-component inverse permittivity tensor. More accurate for tilted interfaces and
+    #: identical to the default diagonal tier for axis-aligned ones, but it costs the Metal
+    #: block-hybrid kernel wherever the tilted pixels are scattered.
+    yee_smooth_full_tensor: bool = frozen_field(default=False)
 
     #: Optional configuration for gradient computation.
     gradient_config: GradientConfig | None = field(default=None)
@@ -128,8 +147,13 @@ class SimulationConfig(TreeClass):
     def __post_init__(self):
         from jax import extend
 
-        if self.material_sampling not in ("box", "yee"):
-            raise ValueError(f"config.material_sampling must be 'box' or 'yee', got {self.material_sampling!r}")
+        if self.material_sampling not in ("box", "yee", "yee_smooth"):
+            raise ValueError(
+                f"config.material_sampling must be 'box', 'yee' or 'yee_smooth', got {self.material_sampling!r}"
+            )
+
+        if self.yee_smooth_supersample < 1:
+            raise ValueError(f"config.yee_smooth_supersample must be >= 1, got {self.yee_smooth_supersample}")
 
         if len(self.symmetry) != 3 or any(s not in (-1, 0, 1) for s in self.symmetry):
             raise ValueError(

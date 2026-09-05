@@ -273,8 +273,32 @@ def front_material_indices(
         np.ndarray: ``int32`` array of shape ``(len(x), len(y), len(z))`` with global material
         indices.
     """
+    return front_indices(scene, coords)[0]
+
+
+def front_indices(
+    scene: Scene,
+    coords: tuple[np.ndarray, np.ndarray, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Resolve both the material and the winning object at every lattice point.
+
+    Same pass as :func:`front_material_indices`, which is a thin wrapper over this. The second
+    output is the winning entry's position in ``scene.entries`` (its priority), which the sub-pixel
+    smoothing step needs to know *which shape* bounds the material inside a pixel — a material index
+    alone does not identify an object.
+
+    Args:
+        scene (Scene): The scene from :func:`build_scene`.
+        coords (tuple): The three 1-D lattice coordinate arrays.
+
+    Returns:
+        tuple: ``(material_index, entry_index)``, both ``int32`` of shape
+        ``(len(x), len(y), len(z))``. Points claimed by no object carry the background material and
+        entry ``-1``.
+    """
     shape = (coords[0].size, coords[1].size, coords[2].size)
     front = np.full(shape, scene.background_index, dtype=np.int32)
+    owner = np.full(shape, -1, dtype=np.int32)
     coords = _nudge_off_ties(coords)
 
     for entry in scene.entries:
@@ -296,7 +320,8 @@ def front_material_indices(
             target = (slice(begin, end), slice(windows[1][0], windows[1][1]), slice(windows[2][0], windows[2][1]))
             values = _entry_material_at(entry, block)
             front[target] = np.where(mask, values, front[target])
-    return front
+            owner[target] = np.where(mask, np.int32(entry.priority), owner[target])
+    return front, owner
 
 
 def box_mode_material_indices(
@@ -418,6 +443,9 @@ def load_scene_on_yee_lattices(
     num_disp_coupling_components: int,
     conductivity_spacing: float | None,
     time_step_duration: float,
+    smooth: bool = False,
+    supersample: int = 8,
+    full_tensor: bool = False,
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -434,6 +462,12 @@ def load_scene_on_yee_lattices(
         num_disp_coupling_components (int): Component count of ``c3`` (3 or 9).
         conductivity_spacing (float | None): Scale factor applied to conductivities.
         time_step_duration (float): Simulation time step, for the dispersive recurrence.
+        smooth (bool): Replace the point sample by the Kottke blend at two-material pixels
+            (``material_sampling="yee_smooth"``). Conductivity and dispersion stay point-sampled.
+        supersample (int): Samples per axis used for a fill fraction or a normal that no shape can
+            answer analytically.
+        full_tensor (bool): Write the whole Kottke row per component instead of its diagonal entry.
+            Only meaningful together with ``smooth`` and ``num_perm_components == 9``.
 
     Returns:
         YeeSceneArrays: The host-side arrays plus the front-material index arrays.
@@ -443,10 +477,9 @@ def load_scene_on_yee_lattices(
 
     need_H = num_permeability_components is not None or num_magnetic_cond_components is not None
 
-    front_E = np.stack(
-        [front_material_indices(scene, yee_lattice_coordinates(grid, "E", c)) for c in range(3)],
-        axis=0,
-    )
+    resolved_E = [front_indices(scene, yee_lattice_coordinates(grid, "E", c)) for c in range(3)]
+    front_E = np.stack([r[0] for r in resolved_E], axis=0)
+    owner_E = np.stack([r[1] for r in resolved_E], axis=0)
     front_H = None
     if need_H:
         front_H = np.stack(
@@ -470,6 +503,19 @@ def load_scene_on_yee_lattices(
         num_perm_components,
         invert=True,
     )
+    if smooth:
+        from fdtdx.core.physics.geometry_smooth import smooth_inverse_permittivity_on_yee_pixels
+
+        inv_permittivities, smoothing_stats = smooth_inverse_permittivity_on_yee_pixels(
+            scene=scene,
+            grid=grid,
+            front_material=front_E,
+            front_owner=owner_E,
+            inv_permittivities=inv_permittivities,
+            supersample=supersample,
+            full_tensor=full_tensor and num_perm_components == 9,
+        )
+        difference["smoothing"] = smoothing_stats.as_dict()
 
     inv_permeabilities = None
     if num_permeability_components is not None:
