@@ -98,6 +98,69 @@ class Cylinder(StaticMultiMaterialObject):
         ) ** 2
         return inside & (radial < self.radius**2)
 
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward normal of the nearest cylinder surface: the barrel or one of the two caps.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces. With the
+                extrusion axis listed the caps are dropped and the barrel always wins, which is what
+                a 2-D (single-cell) simulation needs.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.
+        """
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        extent = self.metric_extent
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        rad_h = pts[..., h_axis] - center[h_axis]
+        rad_v = pts[..., v_axis] - center[v_axis]
+        prad = np.sqrt(rad_h**2 + rad_v**2)
+        proj = pts[..., self.axis] - center[self.axis]
+        half = 0.5 * extent[self.axis]
+
+        normal = np.zeros(pts.shape, dtype=float)
+        radial_ok = prad > 0.0
+        radial_dist = np.abs(prad - self.radius)
+        if self.axis in ignore_axes:
+            axial = np.zeros(prad.shape, dtype=bool)
+        else:
+            cap_dist = np.abs(np.abs(proj) - half)
+            axial = (np.abs(proj) > half) | (cap_dist < radial_dist) | ~radial_ok
+        sign = np.where(np.sign(proj) == 0.0, 1.0, np.sign(proj))
+        normal[..., self.axis] = np.where(axial, sign, 0.0)
+        safe = np.where(radial_ok, prad, 1.0)
+        normal[..., h_axis] = np.where(axial | ~radial_ok, 0.0, rad_h / safe)
+        normal[..., v_axis] = np.where(axial | ~radial_ok, 0.0, rad_v / safe)
+        return normal
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact circle-rectangle overlap in plane times the extrusion overlap along ``axis``."""
+        from fdtdx.core.physics.geometry_smooth import circle_rectangle_area
+        from fdtdx.objects.static_material.static import interval_overlap_fraction
+
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        if np.any(upper[..., h_axis] <= lower[..., h_axis]) or np.any(upper[..., v_axis] <= lower[..., v_axis]):
+            return None
+        center = self.metric_center
+        bounds = self.metric_bounds
+        area = circle_rectangle_area(
+            lower[..., h_axis] - center[h_axis],
+            upper[..., h_axis] - center[h_axis],
+            lower[..., v_axis] - center[v_axis],
+            upper[..., v_axis] - center[v_axis],
+            self.radius,
+        )
+        rect = (upper[..., h_axis] - lower[..., h_axis]) * (upper[..., v_axis] - lower[..., v_axis])
+        in_plane = area / rect
+        along = interval_overlap_fraction(
+            lower[..., self.axis], upper[..., self.axis], bounds[self.axis][0], bounds[self.axis][1]
+        )
+        return np.clip(in_plane * along, 0.0, 1.0)
+
     def get_material_mapping(
         self,
     ) -> jax.Array:

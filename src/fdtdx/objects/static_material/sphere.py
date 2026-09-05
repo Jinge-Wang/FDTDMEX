@@ -103,6 +103,33 @@ class Sphere(StaticMultiMaterialObject):
             total = total + ((pts[..., axis] - center[axis]) / radii[axis]) ** 2
         return total < 1.0
 
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward normal of the ellipsoid: the gradient ``(p_i - C_i) / r_i^2`` of its level set.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces; the
+                corresponding normal components are dropped before normalisation.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero at the centre.
+        """
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        radii = (
+            self.radius_x if self.radius_x is not None else self.radius,
+            self.radius_y if self.radius_y is not None else self.radius,
+            self.radius_z if self.radius_z is not None else self.radius,
+        )
+        grad = np.zeros(pts.shape, dtype=float)
+        for axis in range(3):
+            if axis in ignore_axes:
+                continue
+            grad[..., axis] = (pts[..., axis] - center[axis]) / radii[axis] ** 2
+        norm = np.linalg.norm(grad, axis=-1)
+        safe = norm > 0.0
+        return np.where(safe[..., None], grad / np.where(safe, norm, 1.0)[..., None], 0.0)
+
     def get_material_mapping(
         self,
     ) -> jax.Array:

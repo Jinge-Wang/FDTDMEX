@@ -24,6 +24,8 @@ from fdtdx.objects.sources.mode import ModePlaneSource
 from fdtdx.objects.static_material.static import (
     SimulationVolume,
     StaticMultiMaterialObject,
+    interval_overlap_fraction,
+    nearest_polygon_edge_normal,
     points_in_metric_slab,
 )
 
@@ -370,6 +372,111 @@ class GDSLayerObject(StaticMultiMaterialObject):
                 continue
             result[selected] = _points_in_polygons(polygons, query_h[selected], query_v[selected])
         return result
+
+    def _layer_z_bounds(self) -> tuple[float, float, float]:
+        """Metric ``(z_lo, z_hi, z_ref)`` of the layer, from the continuous lower face."""
+        z_lo = self.metric_bounds[self.axis][0]
+        z_hi = z_lo + self.thickness
+        if self.reference_plane == "bottom":
+            z_ref = z_lo
+        elif self.reference_plane == "top":
+            z_ref = z_hi
+        else:
+            z_ref = 0.5 * (z_lo + z_hi)
+        return z_lo, z_hi, z_ref
+
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward normal of the nearest surface: a side wall or one of the two extrusion faces.
+
+        The side wall is taken on the polygon set offset to the sample's own height, so the normal
+        and the fill fraction see the same wall. A non-vertical ``sidewall_angle`` tilts the wall, and
+        the normal tilts with it: with ``t = tan(90deg - sidewall_angle)`` the outward normal of the
+        wall is ``(n_h, n_v, t)`` normalised, which reduces to the vertical wall at ``t = 0``.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.
+
+        Raises:
+            ValueError: If ``self.axis != 2``.
+        """
+        if self.axis != 2:
+            raise ValueError(f"GDSLayerObject.normal_at only supports axis=2 (z-extrusion); got axis={self.axis}.")
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        query_h = pts[..., h_axis] - center[h_axis] + self.gds_center[0]
+        query_v = pts[..., v_axis] - center[v_axis] + self.gds_center[1]
+        z_lo, z_hi, z_ref = self._layer_z_bounds()
+        z = pts[..., self.axis]
+        tan = float(np.tan(np.deg2rad(90.0 - self.sidewall_angle)))
+
+        edge_normal = np.zeros((*pts.shape[:-1], 2), dtype=float)
+        edge_distance = np.full(pts.shape[:-1], np.inf)
+        polygons = list(self.polygons)
+        if not polygons:
+            return np.zeros(pts.shape, dtype=float)
+        if abs(tan) < 1e-15:
+            edge_normal, edge_distance = nearest_polygon_edge_normal(polygons, query_h, query_v)
+        else:
+            for height in np.unique(z):
+                selected = z == height
+                offset = (float(height) - z_ref) * tan
+                shifted = _offset_polygons(polygons, offset) if abs(offset) > 1e-15 else polygons
+                if not shifted:
+                    continue
+                local_normal, local_distance = nearest_polygon_edge_normal(
+                    shifted, query_h[selected], query_v[selected]
+                )
+                edge_normal[selected] = local_normal
+                edge_distance[selected] = local_distance
+
+        cap_distance = np.minimum(np.abs(z - z_lo), np.abs(z - z_hi))
+        if self.axis in ignore_axes:
+            cap_wins = np.zeros(cap_distance.shape, dtype=bool)
+        else:
+            cap_wins = cap_distance < edge_distance
+        normal = np.zeros(pts.shape, dtype=float)
+        cap_sign = np.where(np.abs(z - z_hi) <= np.abs(z - z_lo), 1.0, -1.0)
+        normal[..., self.axis] = np.where(cap_wins, cap_sign, tan)
+        normal[..., h_axis] = np.where(cap_wins, 0.0, edge_normal[..., 0])
+        normal[..., v_axis] = np.where(cap_wins, 0.0, edge_normal[..., 1])
+        length = np.linalg.norm(normal, axis=-1)
+        safe = length > 0.0
+        return np.where(safe[..., None], normal / np.where(safe, length, 1.0)[..., None], 0.0)
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact polygon-rectangle overlap times the z overlap, for a vertical sidewall only.
+
+        A tapered wall has no separable exact form here, so it returns ``None`` and the caller
+        super-samples :meth:`contains` instead.
+        """
+        from fdtdx.core.physics.geometry_smooth import polygons_rectangle_area
+
+        if self.axis != 2 or self.sidewall_angle != 90.0 or not self.polygons:
+            return None
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        if np.any(upper[..., h_axis] <= lower[..., h_axis]) or np.any(upper[..., v_axis] <= lower[..., v_axis]):
+            return None
+        center = self.metric_center
+        shift_h = center[h_axis] - self.gds_center[0]
+        shift_v = center[v_axis] - self.gds_center[1]
+        area = polygons_rectangle_area(
+            [np.asarray(poly, dtype=float) for poly in self.polygons],
+            lower[..., h_axis] - shift_h,
+            upper[..., h_axis] - shift_h,
+            lower[..., v_axis] - shift_v,
+            upper[..., v_axis] - shift_v,
+        )
+        rect = (upper[..., h_axis] - lower[..., h_axis]) * (upper[..., v_axis] - lower[..., v_axis])
+        z_lo, z_hi, _ = self._layer_z_bounds()
+        along = interval_overlap_fraction(lower[..., self.axis], upper[..., self.axis], z_lo, z_hi)
+        return np.clip(area / rect * along, 0.0, 1.0)
 
     def get_material_mapping(self) -> jax.Array:
         """Return an integer array filled with the index of ``material_name`` in the sorted material list.

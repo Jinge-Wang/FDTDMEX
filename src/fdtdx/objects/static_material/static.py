@@ -27,6 +27,138 @@ def points_in_metric_slab(coordinate: np.ndarray, lower: float, upper: float) ->
     return (coordinate >= lower) & (coordinate < upper)
 
 
+def interval_overlap_fraction(
+    lower: np.ndarray,
+    upper: np.ndarray,
+    obj_lower: float,
+    obj_upper: float,
+) -> np.ndarray:
+    """Fraction of each interval ``[lower, upper]`` covered by ``[obj_lower, obj_upper)``.
+
+    A degenerate interval (``upper <= lower``) stands for a sample point rather than a box side —
+    an axis the simulation is invariant along — and returns the half-open membership of ``lower``.
+
+    Args:
+        lower (np.ndarray): Lower interval bounds in metres.
+        upper (np.ndarray): Upper interval bounds in metres, same shape as ``lower``.
+        obj_lower (float): Object's lower bound on this axis, in metres.
+        obj_upper (float): Object's upper bound on this axis, in metres.
+
+    Returns:
+        np.ndarray: Fractions in ``[0, 1]``, same shape as ``lower``.
+    """
+    lower = np.asarray(lower, dtype=float)
+    upper = np.asarray(upper, dtype=float)
+    width = upper - lower
+    overlap = np.clip(np.minimum(upper, obj_upper) - np.maximum(lower, obj_lower), 0.0, None)
+    point = ((lower >= obj_lower) & (lower < obj_upper)).astype(float)
+    return np.where(width > 0.0, overlap / np.where(width > 0.0, width, 1.0), point)
+
+
+def _oriented_polygon_edges(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Edge start points, edge vectors and outward unit normals of one closed 2-D polygon.
+
+    The outward direction is fixed from the polygon's own signed area, so a clockwise and a
+    counter-clockwise listing of the same shape give the same outward normals.
+
+    Args:
+        vertices (np.ndarray): ``(N, 2)`` vertex array; the polygon is closed implicitly.
+
+    Returns:
+        tuple: ``(starts, edges, normals)``, each ``(N, 2)``.
+    """
+    verts = np.asarray(vertices, dtype=float)
+    if verts.shape[0] > 1 and np.allclose(verts[0], verts[-1]):
+        verts = verts[:-1]
+    starts = verts
+    ends = np.roll(verts, -1, axis=0)
+    edges = ends - starts
+    signed_area = 0.5 * float(np.sum(starts[:, 0] * ends[:, 1] - ends[:, 0] * starts[:, 1]))
+    # For a counter-clockwise listing (positive area) the outward normal of edge (dx, dy) is
+    # (dy, -dx); a clockwise listing flips it.
+    normals = np.stack((edges[:, 1], -edges[:, 0]), axis=-1)
+    if signed_area < 0.0:
+        normals = -normals
+    length = np.linalg.norm(normals, axis=-1)
+    safe = length > 0.0
+    normals = normals / np.where(safe, length, 1.0)[:, None]
+    return starts, edges, normals
+
+
+def nearest_polygon_edge_normal(
+    polygons: list[np.ndarray],
+    query_h: np.ndarray,
+    query_v: np.ndarray,
+    chunk: int = 200_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Outward unit normal of the nearest polygon edge, and the distance to it.
+
+    This is the in-plane half of libctl's nearest-surface rule for a prism: every side is a
+    candidate surface and the closest one wins. The returned normal is signed outward; only
+    ``n n^T`` is used downstream, so the sign is a convenience rather than a requirement.
+
+    Args:
+        polygons (list[np.ndarray]): One or more ``(N, 2)`` vertex arrays.
+        query_h (np.ndarray): Horizontal query coordinates, any shape.
+        query_v (np.ndarray): Vertical query coordinates, same shape as ``query_h``.
+        chunk (int): Maximum number of point-edge pairs evaluated at once.
+
+    Returns:
+        tuple: ``(normals, distances)`` with ``normals`` of shape ``query_h.shape + (2,)``.
+    """
+    shape = np.asarray(query_h).shape
+    points = np.stack((np.asarray(query_h, dtype=float).ravel(), np.asarray(query_v, dtype=float).ravel()), axis=-1)
+    best_dist = np.full(points.shape[0], np.inf)
+    best_normal = np.zeros((points.shape[0], 2), dtype=float)
+    for polygon in polygons:
+        starts, edges, normals = _oriented_polygon_edges(polygon)
+        if starts.shape[0] == 0:
+            continue
+        length_sq = np.sum(edges**2, axis=-1)
+        length_sq = np.where(length_sq > 0.0, length_sq, 1.0)
+        step = max(1, chunk // max(1, starts.shape[0]))
+        for begin in range(0, points.shape[0], step):
+            block = points[begin : begin + step]
+            rel = block[:, None, :] - starts[None, :, :]
+            t = np.clip(np.sum(rel * edges[None, :, :], axis=-1) / length_sq[None, :], 0.0, 1.0)
+            closest = rel - t[..., None] * edges[None, :, :]
+            dist = np.linalg.norm(closest, axis=-1)
+            idx = np.argmin(dist, axis=-1)
+            local = dist[np.arange(block.shape[0]), idx]
+            better = local < best_dist[begin : begin + step]
+            best_dist[begin : begin + step] = np.where(better, local, best_dist[begin : begin + step])
+            best_normal[begin : begin + step] = np.where(
+                better[:, None], normals[idx], best_normal[begin : begin + step]
+            )
+    return best_normal.reshape(*shape, 2), best_dist.reshape(shape)
+
+
+def _box_face_normal(
+    points: np.ndarray,
+    center: tuple[float, float, float],
+    half: tuple[float, float, float],
+    ignore_axes: tuple[int, ...],
+) -> np.ndarray:
+    """Outward normal of the nearest face of an axis-aligned box, libctl's block rule."""
+    pts = np.asarray(points, dtype=float)
+    distances = []
+    for axis in range(3):
+        d = np.abs(np.abs(pts[..., axis] - center[axis]) - half[axis])
+        distances.append(np.full(pts.shape[:-1], np.inf) if axis in ignore_axes else d)
+    stacked = np.stack(distances, axis=-1)
+    normal = np.zeros(pts.shape, dtype=float)
+    if not np.isfinite(stacked).any():
+        return normal
+    winner = np.argmin(stacked, axis=-1)
+    for axis in range(3):
+        if axis in ignore_axes:
+            continue
+        sign = np.sign(pts[..., axis] - center[axis])
+        sign = np.where(sign == 0.0, 1.0, sign)
+        normal[..., axis] = np.where(winner == axis, sign, 0.0)
+    return normal
+
+
 @autoinit
 class UniformMaterialObject(OrderableObject):
     #: the material object
@@ -53,6 +185,42 @@ class UniformMaterialObject(OrderableObject):
         for axis in range(3):
             inside &= points_in_metric_slab(pts[..., axis], bounds[axis][0], bounds[axis][1])
         return inside
+
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward unit normal of the nearest face of the object's continuous box.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose faces are not physical surfaces (an axis the
+                simulation is invariant along, or one the object spans the whole domain on).
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)``; zero where no surface is available.
+        """
+        bounds = self.metric_bounds
+        center = self.metric_center
+        half = tuple(0.5 * (bounds[a][1] - bounds[a][0]) for a in range(3))
+        return _box_face_normal(points, center, half, ignore_axes)
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact fraction of each axis-aligned box ``[lower, upper]`` covered by this object.
+
+        Args:
+            lower (np.ndarray): ``(..., 3)`` lower box corners in metres.
+            upper (np.ndarray): ``(..., 3)`` upper box corners in metres.
+
+        Returns:
+            np.ndarray | None: Fractions of shape ``lower.shape[:-1]``.
+        """
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        bounds = self.metric_bounds
+        fraction = np.ones(lower.shape[:-1], dtype=float)
+        for axis in range(3):
+            fraction = fraction * interval_overlap_fraction(
+                lower[..., axis], upper[..., axis], bounds[axis][0], bounds[axis][1]
+            )
+        return fraction
 
 
 @autoinit
@@ -103,6 +271,52 @@ class StaticMultiMaterialObject(OrderableObject, ABC):
         raise NotImplementedError(
             f"{type(self).__name__} does not implement contains(); it cannot be used with material_sampling='yee'."
         )
+
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward unit normal of the nearest surface element of this object's continuous shape.
+
+        This is the analytic counterpart of a fill-fraction gradient: the surface normal is read off
+        the shape itself, not off a raster, so it carries no cell-size-dependent angular error. That
+        matters for ``material_sampling="yee_smooth"``, where the effective inverse permittivity
+        depends on ``n n^T`` linearly: an angular error that does not shrink with the cell size caps
+        the achievable convergence order at one.
+
+        The rule is nearest-surface, the same one libctl uses for its analytic primitives: at a point
+        near a cap-and-wall junction the returned normal is the closer of the two adjoining faces.
+        Where nothing can be decided (a degenerate shape, a point equidistant from two surfaces) the
+        zero vector is returned and the caller keeps the point sample.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres, on the
+                simulation grid's own axes.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces — an axis
+                the simulation is invariant along (a single-cell 2-D axis), or one on which this
+                object spans the whole domain, so that its "caps" are the domain boundary.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement normal_at(); it cannot be used with "
+            "material_sampling='yee_smooth'."
+        )
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact fraction of each axis-aligned box ``[lower, upper]`` covered by this object.
+
+        Returning ``None`` means "no analytic overlap available"; the caller then super-samples
+        :meth:`contains` inside the box instead. A degenerate axis (``upper == lower``) stands for an
+        axis the simulation is invariant along and contributes a membership test rather than a
+        length ratio.
+
+        Args:
+            lower (np.ndarray): ``(..., 3)`` lower box corners in metres.
+            upper (np.ndarray): ``(..., 3)`` upper box corners in metres.
+
+        Returns:
+            np.ndarray | None: Fractions in ``[0, 1]`` of shape ``lower.shape[:-1]``, or ``None``.
+        """
+        return None
 
     def material_at(self, points: np.ndarray) -> np.ndarray:
         """Local material index (into ``compute_ordered_names(self.materials)``) at each point.
