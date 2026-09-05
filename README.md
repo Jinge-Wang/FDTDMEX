@@ -71,6 +71,13 @@ uv sync --extra viz          # + plotly / pyvista / trame
 uv sync --extra "io,mcp"     # + the HDF5 hand-off seam and the MCP discovery server
 ```
 
+For GPU acceleration install the matching JAX build (as upstream fdtdx recommends):
+```bash
+uv pip install "jax[cuda13]"        # NVIDIA GPUs
+uv pip install "jax[rocm7-local]"   # AMD GPUs
+uv pip install "jax[tpu]"           # TPUs
+```
+
 ## MCP discovery server
 
 `fdtdmex-mcp` is a stdio [MCP](https://modelcontextprotocol.io) server that lets an agentic

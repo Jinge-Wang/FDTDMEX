@@ -112,7 +112,7 @@ Note the asymmetry: sigma_E multiplied by eta0, sigma_H divided by eta0.
 P_p^(n+1) = c1_p * P_p^n + c2_p * P_p^(n-1) + c3_p * E^n
 E        += inv_eps * sum_p (P_p^n - P_p^(n+1))
 ```
-`P` is stored normalized as `P/eps_0`, so it has the same units as `E` and no eta0 factor enters. The reverse-time update in `update_E_reverse` inverts this recurrence (`c2 ~ -1` in the physical regime keeps the inversion numerically stable).
+`P` is stored normalized as `P/eps_0`, so it has the same units as `E` and no eta0 factor enters. There is no reverse-time counterpart: dispersive simulations are **checkpointed-only** (see Gradient Strategies).
 
 ## Material System
 
@@ -148,16 +148,19 @@ c1 = (2 − ω₀²·dt²) / (1 + γ·dt/2)
 c2 = −(1 − γ·dt/2) / (1 + γ·dt/2)
 c3 =  (K·dt²)      / (1 + γ·dt/2)
 ```
-Stability needs `γ·dt < 2`; physically `γ·dt ≪ 1`, so `c2 ≈ −1` and the reverse-time inversion in `update_E_reverse` is well-conditioned.
+Stability (forward Jury bound) needs `ω₀·dt < 2`; `γ·dt` is unconstrained (`|c2| < 1` for any `γ·dt > 0`).
+
+**Per-axis (diagonally anisotropic) dispersion:** every pole parameter accepts a scalar or a per-axis 3-tuple `(x, y, z)` — e.g. `DrudePole(plasma_frequency=(wp, 0.0, 0.0), damping=g)` for a hyperbolic medium metallic only along x. The canonical pole accessors are `omega_0_axes`/`gamma_axes`/`coupling_sq_axes` (the scalar `omega_0` etc. raise for per-axis poles). `compute_pole_coefficients_per_axis` returns `(n_poles, 3)` coefficient arrays; `DispersionModel.susceptibility_axes(omega)` gives per-axis χ. Static negative ε is unconditionally unstable in FDTD — hyperbolic/metallic behavior must come from poles with ε∞ ≥ 1 (`Material.__init__` warns otherwise).
+
+**Oriented (off-diagonal) dispersion:** a pole may carry an `orientation` unit vector — a single 1D oscillator along `u` with coupling tensor `K u uᵀ` (scalar parameters only). `DispersionModel.rotated(R)` (3x3 matrix or Euler angles) converts a per-axis model into oriented poles for tilted crystals (signed axis permutations stay per-axis; pole count can grow up to 3x otherwise). `compute_pole_coefficients_tensor` returns c1/c2 `(n, 3)` + c3 `(n, 9)`; `susceptibility_tensor(omega)`/`permittivity_tensor` give the 3x3 χ/ε. Oriented dispersion forces the 9-component ε tier (fully anisotropic kernel, which carries its own ADE block with Yee-averaged off-diagonal coupling).
 
 **ArrayContainer fields** (all `None` unless any object is dispersive):
 - `dispersive_P_curr`, `dispersive_P_prev` — shape `(num_poles, 3, Nx, Ny, Nz)`, field-dtype (complex if `use_complex_fields`). Not differentiable (state-only; `None` cotangent in both gradient paths).
-- `dispersive_c1`, `dispersive_c2`, `dispersive_c3` — shape `(num_poles, 1, Nx, Ny, Nz)` (middle axis broadcasts over field components). Config dtype. Differentiable: cotangents flow through them in both the reversible and checkpointed paths.
-- `dispersive_inv_c2` — cached `1/c2`, closure-captured and `stop_gradient`'d so gradients flow through `c2` only and don't double-count.
+- `dispersive_c1`, `dispersive_c2`, `dispersive_c3` — shape `(num_poles, C, Nx, Ny, Nz)`. For `c1`/`c2`, `C = 1` when all dispersion is isotropic (middle axis broadcasts over field components) or `C = 3` for per-axis dispersion (gated by `ObjectContainer.all_objects_isotropic_dispersion`). The coupling `c3` additionally widens to `C = 9` (row-major 3x3 tensor per pole) when any pole is oriented (gated by `ObjectContainer.all_objects_axis_aligned_dispersion`). Config dtype. Differentiable: cotangents flow through them on the checkpointed path.
 
 **Leading pole axis size:** `objects.max_num_dispersive_poles` — the max pole count across all `UniformMaterialObject`, `Device`, `StaticMultiMaterialObject`. Materials with fewer poles get zero-padded slots, so non-dispersive cells automatically contribute zero. `UniformMaterialObject` always writes the full zero-padded coefficient stack into its `grid_slice`, so a non-dispersive object placed over a dispersive one cleanly clears stale coefficients.
 
-**Restriction:** Dispersive materials cannot currently be combined with fully anisotropic (off-diagonal) permittivity tensors — `_init_arrays` raises `NotImplementedError`. Isotropic and diagonally anisotropic ε are both fine.
+**Restriction:** *Any* dispersive material supports only the `checkpointed` gradient method. `reversible` raises `NotImplementedError` at three layers — `place_objects`, `reversible_fdtd`/`run_fdtd`, and `update_E_reverse` (so the public `full_backward`/`backward` API raises too, gradients or not). Dispersion combined with fully anisotropic (off-diagonal) ε/σ tensors or oriented poles additionally runs through the fully anisotropic update path.
 
 **Devices with dispersive materials:** `apply_params` interpolates ADE coefficients the same way it interpolates `inv_permittivities` — linearly between the two bracketing materials for `CONTINUOUS` output, straight-through-estimator for `DISCRETE`. This is not equivalent to interpolating the pole *parameters*, but it keeps gradients smooth for inverse design.
 
@@ -207,7 +210,7 @@ bound_dict, constraint_list = fdtdx.boundary_objects_from_config(bound_cfg, volu
 
 ## Simulation Symmetry
 
-Mirror-symmetry exploitation: build the **full** model, set `config.symmetry`, and fdtdx runs the reduced half/quarter/octant internally (up to 8x less memory/compute), then you unfold results back to the full domain. Implemented in `src/fdtdx/fdtd/symmetry.py`; the FDTD time loop is untouched (the symmetry plane is just an added PEC/PMC wall object).
+Mirror-symmetry exploitation: build the **full** model, set `config.symmetry`, and fdtdx runs the reduced half/quarter/octant internally (up to 8× less memory/compute), then you unfold results back to the full domain. Implemented in `src/fdtdx/fdtd/symmetry.py`; the FDTD time loop is untouched (an electric plane is just an added PEC wall object, a magnetic one nothing at all — see below).
 
 **Encoding** — `symmetry: tuple[int, int, int]` on `SimulationConfig`, order `(x, y, z)`:
 - `0` = no symmetry on this axis
@@ -216,11 +219,16 @@ Mirror-symmetry exploitation: build the **full** model, set `config.symmetry`, a
 
 Distinct from manually placing PEC/PMC via `BoundaryConfig` (that still works unchanged); `config.symmetry` is the additive auto-reduce path.
 
+**Where each plane sits** (this is the key asymmetry between the two wall types, and it sets both the wall handling and the unfold map):
+- An **electric** plane sits *on* the reduced domain's min edge — the tangential `E` samples live there and the odd symmetry makes them vanish, so it is a PEC face and gets a `PerfectElectricConductor` wall object.
+- A **magnetic** plane sits *half a cell below* the min edge. Sources and materials are rasterized per cell, so the discrete problem is mirror symmetric about the tangential-`H` node one cell out, where tangential `H` vanishes — already supplied by the zero halo of the field padding. It gets **no wall object**: a `PerfectMagneticConductor` there would zero tangential `H` one cell *inside* the domain, imposing the condition half a cell off the plane (a clean first-order-wrong answer, ~4e-02 field error at 50 nm).
+- Detectors touching an **electric** plane need the mirror in their co-location halo (`pad_fields_with_symmetry_mirror` in `fdtd/update.py`), or the plane row records exactly *half* the field. Magnetic planes want no halo there.
+
 **Requirements / behavior:**
 - Each symmetric axis **must resolve to an even cell count** (else `place_objects` raises `ValueError`) — guarantees an exact split and cell-for-cell unfold.
-- The **upper half is kept** so the plane lands at the reduced domain's min edge (matching the mode solver's "wall at min edge" convention). Objects are clipped to that half during `place_objects`; centered objects keep their upper half, objects entirely in the discarded half are dropped (with a warning).
-- The min-side boundary on each symmetric axis is replaced by the PEC/PMC wall; the far (max) side keeps whatever the user set (use PML there, not periodic).
-- `ModePlaneSource` / `ModeOverlapDetector` get their mode-solver `symmetry` 2-tuple **auto-derived** (PMC→1, PEC/none→0 on the two transverse axes) unless explicitly set.
+- The **upper half is kept** so the plane lands at the reduced domain's min edge. Objects are clipped to that half during `place_objects`; centered objects keep their upper half, objects entirely in the discarded half are dropped (with a warning).
+- The min-side boundary on each symmetric axis is dropped; the far (max) side keeps whatever the user set (use PML there, not periodic — the halo *behind* the symmetry plane is set by the mirror and never by wrapping to the far side, and `place_objects` warns if a periodic/Bloch boundary survives on a symmetric axis).
+- `ModePlaneSource` / `ModeOverlapDetector` solve the mode on the **mirrored full cross-section** and restrict it to the kept half (`compute_mode_symmetry_reduced`), rather than using the mode solver's own symmetric solve — the solver samples materials on its staggered grid while FDTDX writes one cell-centred ε array per component, so a symmetric solve on the reduced cross-section shifts `neff` at first order in Δ. Their mode-solver `symmetry` 2-tuple is **not** auto-derived and is ignored (with a warning) under `config.symmetry`.
 - The user must place objects symmetrically about the center plane — asymmetric models are warned about but not corrected (true of every FDTD symmetry feature).
 
 **Usage:**
@@ -242,13 +250,14 @@ E_full = fdtdx.unfold_fields(arrays.fields.E, config.symmetry, "E")  # (3, Nx, N
 
 **Unfold helpers** (`fdtdx.unfold_fields`, `fdtdx.unfold_detector_states`, `fdtdx.unfold_source_mode`, `fdtdx.unfold_array`):
 - `unfold_fields(field, symmetry, field_type)` — reconstruct a full `(3, Nx, Ny, Nz)` E/H array via per-component parity mirror. The general escape hatch — derive any quantity from the full fields.
+- **Mirror index map** (`mirror_pairs_on_plane` in `core/physics/symmetry.py`, the single source of truth): across an **electric** plane, components sampled *on* it (tangential `E`, normal `H`) pair as `m±j` — the plane row is its own mirror — while half-cell-offset components mirror one-to-one; across a **magnetic** plane *every* component mirrors one-to-one (plain flip), because the plane is half a cell out. Applying one convention to both axes is wrong on one of them (~8e-02 vs ~1e-02 interior error).
 - `unfold_detector_states(arrays, objects, config)` — pure post-processing that rebuilds each detector's full-domain output from its stored reduced output + parity (no in-loop cost, no flags). Spatial outputs are mirrored per component; `reduce_volume` sums/means are rescaled per component (even doubles/keeps, **odd vanishes**); `as_slices` energy planes are mirrored in-plane.
 - `unfold_source_mode(source, config)` → `(E_full, H_full)` — reconstruct the full-domain mode profile a `ModePlaneSource` *injects* (its solved-on-the-reduced-cross-section `_E`/`_H`). Unfolds only the transverse axes (the propagation axis is never a symmetry plane). Run `apply_params` first. For the fields *recorded during the run*, prefer a detector on the source plane + `unfold_detector_states`.
 - **Guardrails:** unfolding a non-symmetric model (`symmetry=(0,0,0)`) raises `ValueError`; `place_objects` warns that results are on the reduced domain until unfolded.
 - **Not unfoldable:** `DiffractiveDetector` raises `NotImplementedError` (its diffraction-order basis depends on domain size — unfold the fields and recompute instead).
 - **Mode-overlap S-params** are already correct on the reduced domain (source + detector share the reduced plane), so they need no unfolding.
 
-**Mode sources are fully wired:** under symmetry, a `ModePlaneSource`'s cross-section is clipped to the reduced grid, its mode-solver `symmetry` 2-tuple is auto-derived from `config.symmetry`, and `compute_mode` solves/injects the half/quarter mode with the matching PEC/PMC wall. Use `unfold_source_mode` to inspect the reconstructed full profile.
+**Mode sources are fully wired:** under symmetry, a `ModePlaneSource`'s cross-section is clipped to the reduced grid, and `compute_mode_symmetry_reduced` mirrors that cross-section back to the full one, solves there, projects onto the walls' parity subspace and restricts — reproducing the full-domain mode (`neff` to ~1e-7 at every resolution) instead of the solver's own symmetric solve. A wall type the selected mode cannot support raises. Amplitudes follow the "unit power through the plane it occupies" convention, so the reduced profile is `√(2^k)` larger than the restriction of the full-domain mode — to within a few percent at coarse resolution, because the discrete mode's flux does not split exactly evenly between the halves (first order in Δ; see the docstring for measured numbers). Use `unfold_source_mode` to inspect the reconstructed full profile.
 
 **Gradient note:** the differentiable simulation runs on the reduced domain (correct and cheaper); unfolding is a post-hoc step on the output arrays.
 
@@ -259,8 +268,8 @@ E_full = fdtdx.unfold_fields(arrays.fields.E, config.symmetry, "E")  # (3, Nx, N
 - O(1) field memory, O(T) boundary memory (PML interfaces only)
 - Uses `@jax.custom_vjp` — forward pass runs simulation recording boundaries, backward pass reconstructs fields in reverse
 - Requires a `Recorder` with optional compression modules (e.g., `DtypeConversion(dtype=jnp.bfloat16)`)
-- Differentiable primals: `inv_permittivities`, `inv_permeabilities`, and (when present) `dispersive_c1/c2/c3`. Conductivity arrays and `dispersive_inv_c2` are closure-captured non-primals; `dispersive_P_curr/prev` thread through as state-only primals with `None` cotangent.
-- Dispersive reverse update: the ADE recurrence `P^(n+1) = c1·P^n + c2·P^(n-1) + c3·E^n` is algebraically inverted to recover `P^(n-1)` (see `update_E_reverse`). For lossy + dispersive + conductive cells the reverse E update subtracts `inv_eps * sum(P^n − P^(n+1))` before dividing by the loss factor.
+- Differentiable primals: `inv_permittivities`, `inv_permeabilities`. Conductivity arrays are closure-captured non-primals.
+- **Rejects dispersive materials** (`NotImplementedError`) — reversing the ADE polarization recurrence is under active development. Lossy (conductive) materials are supported; `num_checkpoints_reversible` bounds the reverse-reconstruction drift they cause.
 
 **Checkpointed FDTD** (`method="checkpointed"`):
 - Standard gradient checkpointing via `eqxi.while_loop(kind="checkpointed")`
@@ -420,9 +429,11 @@ assert jnp.all(jnp.isfinite(grads))
 - **Inverse storage**: Material arrays store `1/epsilon` and `1/mu`, not epsilon and mu directly. For dispersive materials, `Material.permittivity` represents ε∞ only — the full ε(ω) must be reconstructed via the dispersion model.
 - **Detector timing**: Detectors only record at timesteps where their `OnOffSwitch` is active. Check `switch` configuration if data appears missing.
 - **donate_argnames**: When JIT-compiling simulation functions, use `donate_argnames=["arrays"]` to allow JAX to reuse array memory.
-- **Dispersive + full anisotropic**: Not supported — `_init_arrays` raises `NotImplementedError`. Use diagonal anisotropy if you need directional ε alongside dispersion.
+- **Dispersion needs `method="checkpointed"`**: every dispersive gradient path raises under `reversible` (which is the *default* `GradientConfig` method — set it explicitly). Dispersion + full anisotropic is supported via the fully anisotropic kernel. Oriented poles force the 9-component ε tier for the whole simulation — memory and per-step cost grow accordingly; prefer per-axis poles when the optical axes align with the grid.
+- **Complex full tensors**: `Material.from_complex_permittivity` accepts flat 9-tuples / nested 3x3 complex tensors — real parts → ε tensor, imaginary parts → σ tensor (exact at one frequency). `from_refractive_index` rejects tensors (matrix vs elementwise square ambiguity).
 - **Dispersive pole count is max'd globally**: The `num_poles` leading axis size = `objects.max_num_dispersive_poles`. Adding one 3-pole material allocates 3 pole slots for every dispersive cell in the sim; non-dispersive cells still have their `c1/c2/c3` set to zero (ADE term vanishes) but consume array memory.
 - **Dispersive source impedance**: Inside a dispersive medium, never use ε∞ as the source's effective permittivity — call `effective_inv_permittivity` at ω_c. Broadband pulses additionally need the `_temporal_H_filter` path to avoid TFSF leakage at off-carrier frequencies.
 - **Stacking objects with mixed dispersion**: `UniformMaterialObject` always writes a full zero-padded pole-coefficient stack into its `grid_slice`, so placing a non-dispersive object over a dispersive one cleanly overwrites stale coefficients. Rely on this rather than assuming "no dispersion = leave coefficients alone".
 - **Symmetry results look wrong / are half-size**: with `config.symmetry` set, `run_fdtd` returns *reduced-domain* arrays — you must call `fdtdx.unfold_detector_states` / `fdtdx.unfold_fields` to get full-domain results (see Simulation Symmetry). `place_objects` warns about this. Unfolding a non-symmetric model raises.
 - **Symmetry needs even cells + symmetric model**: each symmetric axis must resolve to an even cell count (`place_objects` raises otherwise), and the user's full model must actually be mirror-symmetric about the center plane — asymmetric objects are only warned about. Use PML (not periodic) on the far side of a symmetric axis.
+- **Symmetry wall type follows the polarization, and the two types are not mirror images of each other**: PEC where `E` is normal to the plane, PMC where it is tangential (a wrong choice is warned about, not corrected — the reduced run then faithfully simulates a field with the wrong parity). Only the electric type is a wall object; the magnetic one is a plane half a cell outside the domain carried by the zero halo. Anything that mirrors across a plane (unfold maps, mode parity projection) must branch on the wall type, never on the Yee offsets alone.

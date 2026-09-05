@@ -1,3 +1,5 @@
+from typing import Literal
+
 import jax
 import jax.numpy as jnp
 
@@ -5,6 +7,8 @@ from fdtdx.config import SimulationConfig
 from fdtdx.constants import eta0
 from fdtdx.core.misc import expand_to_3x3, pad_fields
 from fdtdx.core.physics.curl import curl_E, curl_H, interpolate_fields
+from fdtdx.core.physics.symmetry import field_component_parity, mirror_pairs_on_plane
+from fdtdx.core.switch import OnOffSwitch
 from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
 from fdtdx.fdtd.misc import (
     add_boundary_interfaces,
@@ -14,7 +18,12 @@ from fdtdx.fdtd.misc import (
     compute_anisotropic_update_matrices,
     compute_anisotropic_update_matrices_reverse,
 )
-from fdtdx.objects.detectors.detector import Detector
+from fdtdx.objects.detectors.detector import Detector, DetectorState
+
+
+def _source_uses_default_always_on_switch(source) -> bool:
+    switch = getattr(source, "switch", None)
+    return isinstance(switch, OnOffSwitch) and switch.is_default_always_on
 
 
 def get_wrap_padding_axes(objects: ObjectContainer) -> tuple[bool, bool, bool]:
@@ -90,6 +99,13 @@ def pad_fields_for_boundaries(
     Combines wrap/constant padding with boundary-specific corrections
     (e.g. Bloch phase shifts) in a single call.
 
+    On a ``config.symmetry`` axis the *min-side* halo is never wrapped. Reduction drops the min-side
+    periodic/Bloch boundary but keeps the far-side one, so that axis still reports wrap padding — and
+    wrapping would fill the halo behind the symmetry plane with the far side's field, overwriting what
+    the mirror condition needs there (zero for a magnetic plane, the mirrored interior that
+    :func:`pad_fields_with_symmetry_mirror` writes for an electric one). The far-side halo keeps
+    whatever boundary the user placed.
+
     Args:
         fields: Field array of shape (3, Nx, Ny, Nz)
         objects: Container with simulation objects including boundaries
@@ -102,6 +118,11 @@ def pad_fields_for_boundaries(
     """
     periodic_axes = get_wrap_padding_axes(objects)
     padded = pad_fields(fields, periodic_axes)
+    for axis in range(3):
+        if config.symmetry[axis] != 0 and periodic_axes[axis]:
+            index: list[slice] = [slice(None)] * padded.ndim
+            index[axis + 1] = slice(0, 1)
+            padded = padded.at[tuple(index)].set(0)
     boundaries = objects.boundary_objects
     if boundaries:
         volume_shape = objects.volume.grid_shape
@@ -112,6 +133,68 @@ def pad_fields_for_boundaries(
             spacing = config.uniform_spacing()
         for boundary in boundaries:
             padded = boundary.apply_pad_correction(padded, volume_shape, spacing)
+    return padded
+
+
+def pad_fields_with_symmetry_mirror(
+    fields: jax.Array,
+    objects: ObjectContainer,
+    config: SimulationConfig,
+    field_type: Literal["E", "H"],
+) -> jax.Array:
+    """Pad fields, filling the halo of every *electric* ``config.symmetry`` plane with its mirror.
+
+    This exists for the detector co-location stencil of
+    :func:`~fdtdx.core.physics.curl.interpolate_fields`, which is the only consumer of the min-side
+    halo that a symmetry plane can get wrong. That stencil takes a backward half-step average, so for
+    a detector touching the plane it averages the first cell against the halo — and
+    :func:`pad_fields_for_boundaries` puts a zero there, where the true neighbour is the mirror image
+    of the interior. The detector then records exactly *half* the field in the plane row. Each
+    component instead takes the parity-weighted value of its own mirror partner: the neighbouring
+    cell for components sampled half a cell off the plane, the next one in for components sampled on
+    it.
+
+    The field updates do **not** use this: the halo along an axis is only read by the updates of the
+    components tangential to it (an update never differentiates along its own component axis), and on
+    an electric plane those are precisely the components the PEC wall zeroes right afterwards, so the
+    halo value cannot survive.
+
+    Only **electric** symmetry planes get the mirror. A magnetic plane sits half a cell below the
+    reduced domain, so the zero halo already *is* its exact mirror (tangential ``H`` vanishes there);
+    filling it would displace the plane by half a cell. See
+    :func:`~fdtdx.fdtd.symmetry.make_symmetry_walls`. A user-placed PEC/PMC boundary makes no
+    symmetry claim about the structure behind it either, so its halo also stays as it was.
+
+    Args:
+        fields: Field array of shape (3, Nx, Ny, Nz)
+        objects: Container with simulation objects including boundaries
+        config: Simulation configuration
+        field_type: Whether ``fields`` holds the electric or magnetic field
+
+    Returns:
+        Padded fields of shape (3, Nx+2, Ny+2, Nz+2)
+    """
+    padded = pad_fields_for_boundaries(fields, objects, config)
+    for boundary in objects.boundary_objects:
+        if not getattr(boundary, "_is_symmetry_wall", False):
+            continue
+        axis = boundary.axis
+        wall = config.symmetry[axis]
+        if wall != -1:
+            # Unreachable today (only electric planes get a wall object), but the mirror is wrong for
+            # a magnetic plane, so state the restriction here rather than inherit it by accident.
+            continue
+        for component in range(3):
+            parity = field_component_parity(field_type, component, axis, wall)
+            # Padded index 0 is one cell below the domain. Its mirror partner is the domain's first
+            # cell for a half-cell-offset component (padded index 1) and the second one for a
+            # component sampled on the plane itself (padded index 2).
+            source_index = 2 if mirror_pairs_on_plane(field_type, component, axis, wall) else 1
+            target: list[slice] = [slice(None)] * 3
+            source: list[slice] = [slice(None)] * 3
+            target[axis] = slice(0, 1)
+            source[axis] = slice(source_index, source_index + 1)
+            padded = padded.at[component, *target].set(parity * padded[component, *source])
     return padded
 
 
@@ -144,6 +227,30 @@ def get_anisotropic_averaging_widths(
         broadcast_shape[axis] = padded.shape[0]
         widths.append(padded.reshape(broadcast_shape))
     return (widths[0], widths[1], widths[2])
+
+
+def pad_offdiag_coefficients(cij: jax.Array, periodic_axes: tuple[bool, bool, bool]) -> jax.Array:
+    """Coefficient halo for the symmetrized off-diagonal dispersive coupling.
+
+    Matches the boundary semantics of the field halo: wrap on periodic axes so
+    the pair weight across the boundary uses the true neighbor coefficient,
+    edge replication elsewhere (the field halo is zero there, so the halo value
+    is inert). Coefficients carry no Bloch phase. The leading axis is the pole
+    axis; the three trailing axes are spatial.
+
+    Args:
+        cij: Coefficient array of shape ``(num_poles, Nx, Ny, Nz)``.
+        periodic_axes: Which spatial axes use periodic (wrap) boundaries.
+
+    Returns:
+        Padded array of shape ``(num_poles, Nx+2, Ny+2, Nz+2)``.
+    """
+    padded = cij
+    for axis, periodic in enumerate(periodic_axes):
+        pad_width = [(0, 0)] * cij.ndim
+        pad_width[axis + 1] = (1, 1)
+        padded = jnp.pad(padded, pad_width, mode="wrap" if periodic else "edge")
+    return padded
 
 
 def update_E(
@@ -212,33 +319,20 @@ def update_E(
             disp_c1 = arrays.dispersive_c1
             disp_c2 = arrays.dispersive_c2
             disp_c3 = arrays.dispersive_c3
-            disp_c4 = arrays.dispersive_c4
             assert P_prev is not None and disp_c1 is not None and disp_c2 is not None and disp_c3 is not None
-            # disp_c* are (num_poles, 1, Nx, Ny, Nz); arrays.fields.E is (3, Nx, Ny, Nz).
-            # Right-aligned broadcasting produces (num_poles, 3, Nx, Ny, Nz) without
+            # disp_c* are (num_poles, 1|3, Nx, Ny, Nz) — the component axis is 1
+            # (isotropic dispersion, broadcast) or 3 (per-axis anisotropic
+            # dispersion); arrays.fields.E is (3, Nx, Ny, Nz). Right-aligned
+            # broadcasting produces (num_poles, 3, Nx, Ny, Nz) either way without
             # an explicit newaxis — skip the reshape so the HLO stays flat.
-            # P_hat is the explicit part of the recurrence (independent of E^{n+1}).
             P_hat = disp_c1 * P_curr + disp_c2 * P_prev + disp_c3 * arrays.fields.E
-            delta_hat = jnp.sum(P_curr - P_hat, axis=0)
-            E = E + inv_eps * delta_hat
-            if disp_c4 is not None:
-                # CCPR: the polarization couples to E^{n+1} through c4. Fold the
-                # per-cell D_kappa = inv_eps*sum(c4) into the implicit divide
-                # (alongside the conductivity loss factor), then reconstruct the
-                # full P^{n+1} = P_hat + c4*E^{n+1} once E^{n+1} is known.
-                divisor = 1 + inv_eps * jnp.sum(disp_c4, axis=0)
-                if sigma_E is not None:
-                    divisor = divisor + c * sigma_E * eta0 * inv_eps / 2
-                E = E / divisor
-                P_new = P_hat + disp_c4 * E
-                arrays = arrays.aset("fields->dispersive_P_prev", P_curr)
-                arrays = arrays.aset("fields->dispersive_P_curr", P_new)
-            else:
-                arrays = arrays.aset("fields->dispersive_P_prev", P_curr)
-                arrays = arrays.aset("fields->dispersive_P_curr", P_hat)
-                if sigma_E is not None:
-                    # lossy update formula. Noop for conductivity = 0; see Schneider 3.12
-                    E = E / (1 + c * sigma_E * eta0 * inv_eps / 2)
+            delta = jnp.sum(P_curr - P_hat, axis=0)
+            E = E + inv_eps * delta
+            arrays = arrays.aset("fields->dispersive_P_prev", P_curr)
+            arrays = arrays.aset("fields->dispersive_P_curr", P_hat)
+            if sigma_E is not None:
+                # lossy update formula. Noop for conductivity = 0; see Schneider 3.12
+                E = E / (1 + c * sigma_E * eta0 * inv_eps / 2)
         elif sigma_E is not None:
             # update formula for lossy material. Simplifies to Noop for conductivity = 0
             # for details see Schneider, chapter 3.12
@@ -253,9 +347,8 @@ def update_E(
         # E^(n+1) = A @ E^(n) + B @ curl(H^(n+1/2))
         A, B = compute_anisotropic_update_matrices(inv_eps, sigma_E, c, eta0)
 
-        # We need to pad the fields and curl to account for ghost cells when computing the averages
+        # We need to pad the fields to account for ghost cells when computing the averages
         E_pad = pad_fields_for_boundaries(arrays.fields.E, objects, config)
-        curl_pad = pad_fields_for_boundaries(curl, objects, config)
 
         # Spacing weights for the off-diagonal average (None on a uniform grid).
         aniso_widths = get_anisotropic_averaging_widths(config)
@@ -278,6 +371,71 @@ def update_E(
         Ez_y_avg = avg_anisotropic_E_component(
             E_pad, component=2, location=1, aniso_widths=aniso_widths
         )  # calc Ez at location of Ey
+
+        # Dispersive (ADE) correction. Same recurrence as the diagonal branch,
+        # except the field coupling may be a full 3x3 tensor per pole (oriented
+        # poles): each off-diagonal entry multiplies the neighboring E component
+        # averaged to the target component's Yee location. The polarization term
+        # delta enters the E update exactly like the curl (both are currents on
+        # the RHS of Ampere's law): since B = c * M1^-1 @ inv_eps, folding
+        # curl += delta / c before the curl averages yields M1^-1 @ inv_eps @ delta
+        # including its off-diagonal spatial averaging — no extra solve needed.
+        if arrays.fields.dispersive_P_curr is not None:
+            P_curr = arrays.fields.dispersive_P_curr
+            P_prev = arrays.fields.dispersive_P_prev
+            disp_c1 = arrays.dispersive_c1
+            disp_c2 = arrays.dispersive_c2
+            disp_c3 = arrays.dispersive_c3
+            assert P_prev is not None and disp_c1 is not None and disp_c2 is not None and disp_c3 is not None
+            if disp_c3.shape[1] == 9:
+                # E at each row's Yee location: diagonal entries use the local
+                # component, off-diagonal entries the averaged neighbor with
+                # symmetrized pair weights restricted to material cells,
+                #   w(r, s) = stencil(r, s) * (c(r) m(s) + m(r) c(s)) / 2,  m = (c != 0),
+                # so the coupling blocks stay mutual adjoints where c varies.
+                # Plain c(r) * avg(E) couples boundary cells to vacuum neighbors
+                # that do not couple back, and the resulting non-normal operator
+                # amplifies boundary modes of media with off-diagonal coupling and
+                # mixed-sign permittivity. Uniform c reduces to the plain form.
+
+                def _avg_offdiag(arr_pad: jax.Array, component: int, location: int):
+                    # mirrors avg_anisotropic_E_component with the leading pole
+                    # axis offsetting the spatial axes by one
+                    la, ca = location + 1, component + 1
+                    return (
+                        arr_pad
+                        + jnp.roll(arr_pad, -1, axis=la)
+                        + jnp.roll(arr_pad, 1, axis=ca)
+                        + jnp.roll(arr_pad, (-1, 1), axis=(la, ca))
+                    )[:, 1:-1, 1:-1, 1:-1] / 4
+
+                # Initialization rejects oriented poles on non-uniform grids, so
+                # the uniform 4-point stencil is always valid here.
+                periodic_axes = get_wrap_padding_axes(objects)
+                rows = []
+                for i in range(3):
+                    row = disp_c3[:, 3 * i + i] * arrays.fields.E[i]
+                    for j in range(3):
+                        if j == i:
+                            continue
+                        cij = disp_c3[:, 3 * i + j]
+                        cij_pad = pad_offdiag_coefficients(cij, periodic_axes)
+                        mask_pad = (cij_pad != 0.0).astype(cij.dtype)
+                        row = row + 0.5 * (
+                            cij * _avg_offdiag(mask_pad * E_pad[j], component=j, location=i)
+                            + (cij != 0.0) * _avg_offdiag(cij_pad * E_pad[j], component=j, location=i)
+                        )
+                    rows.append(row)
+                coupling = jnp.stack(rows, axis=1)
+            else:
+                coupling = disp_c3 * arrays.fields.E
+            P_hat = disp_c1 * P_curr + disp_c2 * P_prev + coupling
+            delta = jnp.sum(P_curr - P_hat, axis=0)
+            curl = curl + delta / c
+            arrays = arrays.aset("fields->dispersive_P_prev", P_curr)
+            arrays = arrays.aset("fields->dispersive_P_curr", P_hat)
+
+        curl_pad = pad_fields_for_boundaries(curl, objects, config)
         curlHx_y_avg = avg_anisotropic_E_component(
             curl_pad, component=0, location=1, aniso_widths=aniso_widths
         )  # calc curl(H)x at location of Ey
@@ -317,6 +475,15 @@ def update_E(
         E = jnp.stack((Ex, Ey, Ez), axis=0)
 
     for source in objects.sources:
+        if _source_uses_default_always_on_switch(source):
+            E = source.update_E(
+                E=E,
+                inv_permittivities=arrays.inv_permittivities,
+                inv_permeabilities=arrays.inv_permeabilities,
+                time_step=time_step,
+                inverse=False,
+            )
+            continue
 
         def _update():
             adj_time_step = source.adjust_time_step_by_on_off(time_step)
@@ -359,9 +526,29 @@ def update_E_reverse(
 
     Returns:
         ArrayContainer: Updated ArrayContainer with reversed E field values
+
+    Raises:
+        NotImplementedError: If the simulation contains dispersive materials. The ADE
+            polarization state has no supported time reversal, so neither this update
+            nor the ``full_backward`` / ``backward`` API can reconstruct it.
     """
+    if arrays.fields.dispersive_P_curr is not None:
+        raise NotImplementedError(
+            "Dispersive time-reversible gradient computation under active development. "
+            "Use GradientConfig(method='checkpointed') instead."
+        )
+
     E = arrays.fields.E
     for source in objects.sources:
+        if _source_uses_default_always_on_switch(source):
+            E = source.update_E(
+                E,
+                inv_permittivities=arrays.inv_permittivities,
+                inv_permeabilities=arrays.inv_permeabilities,
+                time_step=time_step,
+                inverse=True,
+            )
+            continue
 
         def _update():
             adj_time_step = source.adjust_time_step_by_on_off(time_step)
@@ -397,47 +584,12 @@ def update_E_reverse(
 
     if not inv_eps_is_full_tensor and not sigma_E_is_full_tensor:
         # Isotropic and diagonal anisotropic case
-        # Capture E^{n+1} (post source-inverse, pre field-recovery) — the CCPR
-        # polarization inversion below needs it for the c4*E^{n+1} term. For the
-        # E-recovery itself the c4/D_kappa contributions cancel exactly, so that
-        # formula is unchanged from the non-CCPR case.
-        E_np1 = E
         factor = 1
         if sigma_E is not None:
             E = E * (1 + c * sigma_E * eta0 * inv_eps / 2)
             factor = 1 - c * sigma_E * eta0 * inv_eps / 2
 
-        # Dispersive (ADE) reverse correction. At reverse time, arrays.fields.dispersive_P_curr
-        # holds P^(n+1) and arrays.fields.dispersive_P_prev holds P^n. The forward update added
-        # inv_eps * sum(P^n - P^(n+1)) inside the lossy factor; subtract it here to
-        # recover E^n. Non-dispersive cells (all zero arrays) contribute zero.
-        if arrays.fields.dispersive_P_curr is not None:
-            P_curr_r = arrays.fields.dispersive_P_curr
-            P_prev_r = arrays.fields.dispersive_P_prev
-            disp_c1_r = arrays.dispersive_c1
-            disp_c3_r = arrays.dispersive_c3
-            disp_c4_r = arrays.dispersive_c4
-            disp_inv_c2_r = arrays.dispersive_inv_c2
-            assert (
-                P_prev_r is not None and disp_c1_r is not None and disp_c3_r is not None and disp_inv_c2_r is not None
-            )
-            delta_sum = jnp.sum(P_prev_r - P_curr_r, axis=0)
-            E = (E - c * curl * inv_eps - inv_eps * delta_sum) / factor
-            # Invert the polarization recurrence:
-            # P^(n+1) = c1 * P^n + c2 * P^(n-1) + c3 * E^n + c4 * E^(n+1)
-            # =>  P^(n-1) = (P^(n+1) - c1 * P^n - c3 * E^n - c4 * E^(n+1)) / c2
-            # Using precomputed inv_c2 (with non-dispersive cells zeroed) replaces
-            # a per-step jnp.where + division with a single multiply. Non-dispersive
-            # cells have inv_c2 = 0 and P_curr = P_prev = 0, so the product is zero.
-            # E is now the recovered E^n; the c4 term (CCPR only) uses E^(n+1).
-            P_prev_new = P_curr_r - disp_c1_r * P_prev_r - disp_c3_r * E
-            if disp_c4_r is not None:
-                P_prev_new = P_prev_new - disp_c4_r * E_np1
-            P_prev_new = P_prev_new * disp_inv_c2_r
-            arrays = arrays.aset("fields->dispersive_P_curr", P_prev_r)
-            arrays = arrays.aset("fields->dispersive_P_prev", P_prev_new)
-        else:
-            E = (E - c * curl * inv_eps) / factor
+        E = (E - c * curl * inv_eps) / factor
 
     else:
         # Full anisotropic case: expand inv_eps and sigma_E to (3, 3, Nx, Ny, Nz)
@@ -653,6 +805,15 @@ def update_H(
         H = jnp.stack((Hx, Hy, Hz), axis=0)
 
     for source in objects.sources:
+        if _source_uses_default_always_on_switch(source):
+            H = source.update_H(
+                H=H,
+                inv_permittivities=arrays.inv_permittivities,
+                inv_permeabilities=arrays.inv_permeabilities,
+                time_step=time_step + 0.5,
+                inverse=False,
+            )
+            continue
 
         def _update():
             adj_time_step = source.adjust_time_step_by_on_off(time_step)
@@ -698,6 +859,15 @@ def update_H_reverse(
     """
     H = arrays.fields.H
     for source in objects.sources:
+        if _source_uses_default_always_on_switch(source):
+            H = source.update_H(
+                H,
+                inv_permittivities=arrays.inv_permittivities,
+                inv_permeabilities=arrays.inv_permeabilities,
+                time_step=time_step + 0.5,
+                inverse=True,
+            )
+            continue
 
         def _update():
             adj_time_step = source.adjust_time_step_by_on_off(time_step)
@@ -820,6 +990,36 @@ def update_H_reverse(
     return arrays
 
 
+def _check_updated_state_layout(detector: Detector, old: DetectorState, new: DetectorState) -> None:
+    """Checks that a detector update kept the layout of its initialized state.
+
+    A mismatch usually means the update sliced `self.grid_slice` on fields that were already
+    restricted to the detector region (double slicing).
+
+    Args:
+        detector (Detector): Detector whose state was updated.
+        old (DetectorState): Detector state before the update.
+        new (DetectorState): Detector state returned by the update.
+
+    Raises:
+        Exception: If the updated state has different keys, shapes or dtypes than before.
+    """
+    problems = [f"state keys changed from {sorted(old)} to {sorted(new)}"] if set(old) != set(new) else []
+    problems += [
+        f"'{k}' expected shape {jnp.shape(old[k])} / dtype {jnp.result_type(old[k])}, "
+        f"got {jnp.shape(new[k])} / {jnp.result_type(new[k])}"
+        for k in old
+        if k in new and (jnp.shape(old[k]) != jnp.shape(new[k]) or jnp.result_type(old[k]) != jnp.result_type(new[k]))
+    ]
+    if problems:
+        raise Exception(
+            f"Detector '{detector.name}': update() returned a state that does not match its initialized "
+            f"layout: {'; '.join(problems)}. Note that fields and materials are passed to Detector.update() "
+            "already restricted to the detector's grid_slice, so slicing self.grid_slice inside update() "
+            "(double slicing) is the most common cause."
+        )
+
+
 def update_detector_states(
     time_step: jax.Array,
     arrays: ArrayContainer,
@@ -830,10 +1030,10 @@ def update_detector_states(
 ) -> ArrayContainer:
     """Updates detector states based on current field values.
 
-    Handles field interpolation for accurate detector measurements. By default,
-    interpolation is disabled for performance during optimization, but can be
-    enabled for final evaluation. Interpolation is needed due to the staggered
-    nature of E and H fields on the Yee grid.
+    Handles field interpolation for accurate detector measurements. Interpolation
+    is enabled by default, but can be disabled per detector for performance during
+    optimization. Interpolation is needed due to the staggered nature of E and H
+    fields on the Yee grid.
 
     Args:
         time_step (jax.Array): Current simulation time step
@@ -844,34 +1044,76 @@ def update_detector_states(
 
     Returns:
         ArrayContainer: Updated ArrayContainer with new detector states
+
+    Notes:
+        Each detector receives fields and materials already restricted to its `grid_slice`. Since
+        the interpolation stencil only reaches the neighboring cell, a strictly interior detector
+        is interpolated over its region plus a one-cell halo; the full-domain interpolation is
+        only built as a shared fallback for detectors touching a domain edge, where the boundary
+        padding matters.
     """
-    E_pad = pad_fields_for_boundaries(arrays.fields.E, objects, config)
-    H_avg_pad = pad_fields_for_boundaries((H_prev + arrays.fields.H) / 2, objects, config)
-    interpolated_E, interpolated_H = interpolate_fields(
-        E_pad=E_pad,
-        H_pad=H_avg_pad,
-        config=config,
-    )
-
-    def helper_fn(E_input, H_input, detector: Detector):
-        return detector.update(
-            time_step=time_step,
-            E=E_input,
-            H=H_input,
-            state=arrays.detector_states[detector.name],
-            inv_permittivity=arrays.inv_permittivities,
-            inv_permeability=arrays.inv_permeabilities,
-        )
-
     state = arrays.detector_states
     to_update = objects.backward_detectors if inverse else objects.forward_detectors
+    if not to_update:
+        return arrays
+
+    grid_shape = objects.volume.grid_shape
+
+    def is_interior(detector: Detector) -> bool:
+        # The co-location stencil reads domain indices [s-1 .. e]; interior iff that stays in-bounds.
+        return all(s >= 1 and e <= grid_shape[a] - 1 for a, (s, e) in enumerate(detector.grid_slice_tuple))
+
+    # The full-domain interpolation is only needed for exact detectors whose stencil reaches a domain edge.
+    full = None
+    if any(d.exact_interpolation and not is_interior(d) for d in to_update):
+        full = interpolate_fields(
+            E_pad=pad_fields_with_symmetry_mirror(arrays.fields.E, objects, config, "E"),
+            H_pad=pad_fields_with_symmetry_mirror((H_prev + arrays.fields.H) / 2, objects, config, "H"),
+            config=config,
+        )
+
+    def helper_fn(E: jax.Array, H: jax.Array, H_prev: jax.Array, detector: Detector) -> DetectorState:
+        gs = detector.grid_slice
+        if not detector.exact_interpolation:
+            E_reg, H_reg = E[:, *gs], H[:, *gs]
+        elif is_interior(detector):
+            block = (slice(None), *(slice(s - 1, e + 1) for (s, e) in detector.grid_slice_tuple))
+            H_avg = (H_prev[block] + H[block]) / 2
+            E_reg, H_reg = interpolate_fields(E[block], H_avg, config=config, region_slice=detector.grid_slice_tuple)
+        else:
+            assert full is not None  # built above whenever an edge-touching exact detector exists
+            E_reg, H_reg = full[0][:, *gs], full[1][:, *gs]
+        # inv_permeabilities is a plain scalar when all materials are non-magnetic.
+        inv_mu = arrays.inv_permeabilities
+        try:
+            new_state = detector.update(
+                time_step=time_step,
+                E=E_reg,
+                H=H_reg,
+                state=state[detector.name],
+                inv_permittivity=arrays.inv_permittivities[:, *gs],
+                inv_permeability=inv_mu[:, *gs] if isinstance(inv_mu, jax.Array) and inv_mu.ndim > 0 else inv_mu,
+            )
+        except Exception as e:
+            raise Exception(
+                f"Detector '{detector.name}': update() raised while recording (see exception above). Fields "
+                "and materials are passed to Detector.update() already restricted to the detector's "
+                "grid_slice, so slicing self.grid_slice inside update() (double slicing) is a common cause "
+                "of shape errors here."
+            ) from e
+        _check_updated_state_layout(detector, state[detector.name], new_state)
+        return new_state
+
     for d in to_update:
+        # E already lives at the detector's integer time step; H lives at half steps, so exact
+        # detectors time-center H as (H_prev + H) / 2 on their region inside the branch.
         state[d.name] = jax.lax.cond(
             d._is_on_at_time_step_arr[time_step],
             helper_fn,
-            lambda e, h, _: state[d.name],
-            interpolated_E if d.exact_interpolation else arrays.fields.E,
-            interpolated_H if d.exact_interpolation else arrays.fields.H,
+            lambda e, h, h_prev, detector: state[detector.name],
+            arrays.fields.E,
+            arrays.fields.H,
+            H_prev,
             d,
         )
     arrays = arrays.aset("detector_states", state)

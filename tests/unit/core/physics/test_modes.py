@@ -1,5 +1,6 @@
 from unittest.mock import patch
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -8,6 +9,7 @@ from fdtdx.core.physics.modes import (
     ModeTupleType,
     compute_mode,
     compute_mode_polarization_fraction,
+    compute_mode_symmetry_reduced,
     sort_modes,
     tidy3d_mode_computation_wrapper,
 )
@@ -631,6 +633,119 @@ class TestAnisotropicModeComputation:
         assert perm_passed.shape[0] == 9
 
 
+class TestBackwardModePhaseConvention:
+    """Regression tests for the spurious global ±i phase on backward ("-") modes (tidy3d >= 2.9).
+
+    "+" and "-" modes must share the same phase convention exactly.
+    """
+
+    frequency = 3e8 / 1.55e-6
+    resolution = 100e-9
+
+    def _strip_waveguide_inv_eps(self, num_components: int):
+        """Strip waveguide cross-section, propagation along x (axis 0)."""
+        shape = (num_components, 1, 20, 15)
+        eps = np.ones(shape)
+        core = (slice(None), slice(None), slice(7, 13), slice(6, 10))
+        if num_components == 1:
+            eps[core] = 3.48**2
+        elif num_components == 3:
+            eps[0][core[1:]] = 3.48**2
+            eps[1][core[1:]] = 3.40**2
+            eps[2][core[1:]] = 3.45**2
+        elif num_components == 9:
+            # symmetric (reciprocal) tensor with off-diagonal xy coupling;
+            # inv_permittivities holds the INVERSE tensor, so build eps first
+            eps_full = np.tile(np.eye(3).reshape(9, 1, 1, 1), (1, *shape[1:]))
+            eps_mat = np.array(
+                [
+                    [3.48**2, 0.3, 0.0],
+                    [0.3, 3.40**2, 0.0],
+                    [0.0, 0.0, 3.45**2],
+                ]
+            )
+            inv_mat = np.linalg.inv(eps_mat)
+            for i in range(9):
+                eps_full[i][core[1:]] = inv_mat.reshape(9)[i]
+            return jnp.asarray(eps_full)
+        return jnp.asarray(1.0 / eps)
+
+    def _compute_both_directions(self, inv_eps):
+        results = {}
+        for direction in ["+", "-"]:
+            E, H, neff = compute_mode(
+                frequency=self.frequency,
+                inv_permittivities=inv_eps,
+                inv_permeabilities=1.0,
+                resolution=self.resolution,
+                direction=direction,
+                mode_index=0,
+            )
+            results[direction] = (np.asarray(E), np.asarray(H), complex(neff))
+        return results
+
+    def _assert_backward_is_reciprocity_transform(self, results, propagation_axis=0):
+        Ep, Hp, neff_p = results["+"]
+        Em, Hm, neff_m = results["-"]
+
+        assert neff_m == pytest.approx(neff_p, rel=1e-6)
+
+        # reciprocity transform in the physical frame: longitudinal E and
+        # transverse H flip sign, transverse E and longitudinal H are unchanged
+        expected_E = Ep.copy()
+        expected_E[propagation_axis] *= -1
+        expected_H = -Hp.copy()
+        expected_H[propagation_axis] *= -1
+
+        scale = np.abs(Ep).max()
+        np.testing.assert_allclose(Em, expected_E, atol=1e-5 * scale)
+        np.testing.assert_allclose(Hm, expected_H, atol=1e-5 * np.abs(Hp).max())
+
+        # real Poynting flux must be -1 (normalized) along the propagation axis
+        S = np.cross(np.conj(Em), Hm, axisa=0, axisb=0, axisc=0)
+        flux = 0.5 * np.real(S[propagation_axis]).sum()
+        assert flux == pytest.approx(-1.0, abs=1e-3)
+
+        # lossless mode: transverse E of the backward mode must be purely real
+        # (the ±i bug made it purely imaginary)
+        transverse = [ax for ax in range(3) if ax != propagation_axis]
+        max_trans = max(np.abs(Em[ax]).max() for ax in transverse)
+        for ax in transverse:
+            assert np.abs(Em[ax].imag).max() <= 1e-5 * max_trans
+
+    def test_backward_mode_isotropic(self):
+        """Isotropic (diagonal solver path): '-' equals reciprocity transform of '+'."""
+        results = self._compute_both_directions(self._strip_waveguide_inv_eps(1))
+        self._assert_backward_is_reciprocity_transform(results)
+
+    def test_backward_mode_diagonal_anisotropic(self):
+        """Diagonal anisotropic (3 components): '-' equals reciprocity transform of '+'."""
+        results = self._compute_both_directions(self._strip_waveguide_inv_eps(3))
+        self._assert_backward_is_reciprocity_transform(results)
+
+    def test_backward_mode_symmetric_tensorial(self):
+        """Symmetric tensorial eps (9 components, reciprocal): tensorial solver path."""
+        try:
+            results = self._compute_both_directions(self._strip_waveguide_inv_eps(9))
+        except Exception as e:  # tidy3d raises inside a jax.pure_callback (JaxRuntimeError)
+            if "tensorial mode solver" in str(e):
+                pytest.skip("tensorial mode solver requires tidy3d-extras")
+            raise
+        self._assert_backward_is_reciprocity_transform(results)
+
+    def test_backward_mode_non_reciprocal_raises(self):
+        """Asymmetric (non-reciprocal) eps tensor: '-' is not supported and must raise."""
+        eps = np.tile(np.eye(3).reshape(9, 1, 1), (1, 20, 15))
+        eps[1] = 0.3  # eps_xy != eps_yx
+        with pytest.raises(NotImplementedError, match="reciprocity"):
+            tidy3d_mode_computation_wrapper(
+                frequency=self.frequency,
+                permittivity_cross_section=eps,
+                coords=[np.arange(21) * 0.1, np.arange(16) * 0.1],
+                direction="-",
+            )
+
+
 class TestTidy3DModeComputationWrapper:
     """Test the tidy3d_mode_computation_wrapper function."""
 
@@ -841,3 +956,72 @@ class TestComputeModeBendPassthrough:
         kwargs = mock_wrapper.call_args.kwargs
         expected = (0.5 * 5 * resolution / 1e-6, 0.5 * 6 * resolution / 1e-6)
         assert kwargs["plane_center"] == pytest.approx(expected)
+
+
+class TestComputeModeSymmetryReduced:
+    """The symmetry-reduced route: mirror the cross-section, solve, project, restrict."""
+
+    def _make_mock_mode(self, shape):
+        return ModeTupleType(
+            neff=1.5 + 0.1j,
+            Ex=np.ones(shape, dtype=np.complex64),
+            Ey=np.ones(shape, dtype=np.complex64),
+            Ez=np.ones(shape, dtype=np.complex64),
+            Hx=np.ones(shape, dtype=np.complex64),
+            Hy=np.ones(shape, dtype=np.complex64),
+            Hz=np.ones(shape, dtype=np.complex64),
+        )
+
+    def _kwargs(self, **overrides):
+        # x-propagation (singleton at dim 1), 4 x 3 transverse cells.
+        kwargs = dict(
+            mirrored_axes=(2,),
+            walls={2: 1},
+            frequency=2e14,
+            inv_permittivities=jnp.ones((1, 1, 4, 3)),
+            inv_permeabilities=1.0,
+            resolution=1e-8,
+            object_name="modesrc",
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_bend_about_a_mirrored_axis_raises(self):
+        # The conformal bend transform scales the index linearly across bend_axis, so the mirrored
+        # cross-section is not symmetric about a plane normal to it and the reduced run cannot
+        # represent the mode. Rejected before any solve.
+        with pytest.raises(ValueError, match="bends about the z-axis"):
+            compute_mode_symmetry_reduced(**self._kwargs(bend_radius=5e-6, bend_axis=2))
+
+    @patch("fdtdx.core.physics.modes.tidy3d_mode_computation_wrapper")
+    @patch("fdtdx.core.physics.modes.normalize_by_poynting_flux")
+    def test_bend_about_the_other_transverse_axis_is_allowed(self, mock_normalize, mock_wrapper):
+        # A bend leaves the axis it does not bend about mirror-symmetric, so mirroring that one is
+        # consistent: the pair (mirror z, bend y) is fine, unlike (mirror z, bend z) above.
+        mock_wrapper.return_value = [self._make_mock_mode((4, 6))]
+        mock_normalize.side_effect = lambda E, H, axis, area_weights=None: (E, H)
+
+        mode_E, mode_H, _neff = compute_mode_symmetry_reduced(**self._kwargs(bend_radius=5e-6, bend_axis=1))
+
+        assert mode_E.shape == (3, 1, 4, 3)  # solved on the mirrored plane, restricted to the kept half
+        assert mode_H.shape == (3, 1, 4, 3)
+
+    @patch("fdtdx.core.physics.modes.tidy3d_mode_computation_wrapper")
+    @patch("fdtdx.core.physics.modes.normalize_by_poynting_flux")
+    def test_survives_jit(self, mock_normalize, mock_wrapper):
+        # A mode source or mode-overlap detector overlapping a Device solves its mode inside
+        # apply_params, which callers trace. The parity residual must therefore not be concretized:
+        # its diagnostics are skipped under tracing instead.
+        mock_wrapper.return_value = [self._make_mock_mode((4, 6))]
+        mock_normalize.side_effect = lambda E, H, axis, area_weights=None: (E, H)
+
+        def traced(inv_permittivities):
+            mode_E, _mode_H, _neff = compute_mode_symmetry_reduced(
+                **self._kwargs(inv_permittivities=inv_permittivities)
+            )
+            return mode_E
+
+        eager = traced(jnp.ones((1, 1, 4, 3)))
+        jitted = jax.jit(traced)(jnp.ones((1, 1, 4, 3)))
+        assert jitted.shape == eager.shape
+        assert jnp.allclose(jitted, eager)
