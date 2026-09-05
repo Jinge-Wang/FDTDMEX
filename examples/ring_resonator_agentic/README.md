@@ -57,3 +57,10 @@ RING_BACKEND=mock python ring_resonator_agentic.py   # fast GPU-free pipeline ch
 ```
 
 Coarse `RES` / short `SETTLE` keep the real solve feasible; raise `SETTLE` for sharper resonances.
+
+Run on 2026-09-04 (M4 Pro, `Backend.MLX`, 22 s end to end) it prints
+`λ0 = 1305.00 nm, T_min = 0.857, FWHM = 5.00 nm, Q ≈ 261` at the 120 nm gap. Like `ring_mrm_oband`,
+this example excites with a `GaussianPlaneSource` on a non-square (1.2 × 0.5 µm) plane, so its numbers
+changed with the corrected source (upstream fdtdx #418); at this coarse grid and short settle they are
+a pipeline check, not a converged device result. The run leaves the config bundle and a `jobs/` folder
+in this directory — delete them when you are done.

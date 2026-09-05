@@ -449,11 +449,11 @@ jobs = os.path.join(project, "jobs")
 job = run_simulation_from_hdf5(bundle, jobs, backend="mock", name="ring-cold")
 print("launched (non-blocking):", job.run_id, "→", os.path.relpath(job.job_dir, project))
 
-for _ in range(100):
+for _ in range(600):                      # up to 60 s: the child is a fresh interpreter, not instant
     status = json.loads(job.status_path.read_text())
     if status["status"] in ("completed", "failed"):
         break
-    time.sleep(0.05)
+    time.sleep(0.1)
 print("final status:", status["status"], "| results:", os.path.exists(job.results_path))
 print("mock postproc:", sim_postproc(job.results_path)["backend"])
 
