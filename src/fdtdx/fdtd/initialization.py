@@ -17,6 +17,7 @@ from fdtdx.core.jax.sharding import (
     sharding_preserving_set,
 )
 from fdtdx.core.jax.ste import straight_through_estimator
+from fdtdx.core.physics.geometry_raster import load_scene_on_yee_lattices
 from fdtdx.dispersion import compute_pole_coefficients_tensor
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer
 from fdtdx.fdtd.metric_shadow import (
@@ -678,6 +679,26 @@ def _init_arrays(
         isotropic_permittivity = False
         diagonally_anisotropic_permittivity = not subpixel_full_tensor
 
+    # Per-Yee-point sampling makes a cell's material component-dependent, so a 1-component array can
+    # no longer represent an interface cell: force every property up to at least the diagonal
+    # (3-component) tier. A genuinely full-tensor material or oriented dispersion can still push it
+    # to 9 further down. The 3-component tier keeps the Metal block-hybrid kernel eligible.
+    yee_sampling = config.material_sampling == "yee"
+    if yee_sampling:
+        if subpixel_permittivity:
+            raise NotImplementedError(
+                "material_sampling='yee' (Stage A per-Yee-point sampling) cannot be combined with "
+                "subpixel_smoothing=True; the Farjadpour fill-fraction blend is Stage B."
+            )
+        isotropic_permittivity = False
+        isotropic_permeability = False
+        isotropic_electric_conductivity = False
+        isotropic_magnetic_conductivity = False
+        diagonally_anisotropic_permittivity = True
+        diagonally_anisotropic_permeability = True
+        diagonally_anisotropic_electric_conductivity = True
+        diagonally_anisotropic_magnetic_conductivity = True
+
     # Dispersion tiers. The recurrence coefficients c1/c2 carry 1 (isotropic,
     # broadcast) or 3 (per-axis) components; the field coupling c3
     # additionally widens to 9 (row-major 3x3 tensor per pole) when any pole is
@@ -700,7 +721,7 @@ def _init_arrays(
             "Use GradientConfig(method='checkpointed') instead."
         )
 
-    num_disp_components = 1 if objects.all_objects_isotropic_dispersion else 3
+    num_disp_components = 1 if (objects.all_objects_isotropic_dispersion and not yee_sampling) else 3
     axis_aligned_dispersion = objects.all_objects_axis_aligned_dispersion
     num_disp_coupling_components = num_disp_components if axis_aligned_dispersion else 9
     tensor_dispersion_path = num_dispersive_poles > 0 and (
@@ -844,7 +865,55 @@ def _init_arrays(
         key=lambda o: o.placement_order,
     )
     info = {}
-    for o in sorted_obj:
+    if yee_sampling:
+        scene_arrays = load_scene_on_yee_lattices(
+            static_objects=objects.static_material_objects,
+            grid=grid,
+            volume_shape=volume_shape,
+            num_perm_components=num_perm_components,
+            num_permeability_components=(
+                num_permeability_components if isinstance(inv_permeabilities, jax.Array) else None
+            ),
+            num_electric_cond_components=(num_electric_cond_components if electric_conductivity is not None else None),
+            num_magnetic_cond_components=(num_magnetic_cond_components if magnetic_conductivity is not None else None),
+            num_dispersive_poles=num_dispersive_poles,
+            num_disp_components=num_disp_components,
+            num_disp_coupling_components=num_disp_coupling_components,
+            conductivity_spacing=conductivity_spacing,
+            time_step_duration=config.time_step_duration,
+        )
+        info["yee_sampling_difference"] = scene_arrays.sampling_difference
+        full_index = (slice(None), slice(None), slice(None), slice(None))
+        inv_permittivities = sharding_preserving_set(
+            inv_permittivities, full_index, jnp.asarray(scene_arrays.inv_permittivities, dtype=config.dtype)
+        )
+        if scene_arrays.inv_permeabilities is not None:
+            inv_permeabilities = sharding_preserving_set(
+                inv_permeabilities, full_index, jnp.asarray(scene_arrays.inv_permeabilities, dtype=config.dtype)
+            )
+        if scene_arrays.electric_conductivity is not None:
+            electric_conductivity = sharding_preserving_set(
+                electric_conductivity, full_index, jnp.asarray(scene_arrays.electric_conductivity, dtype=config.dtype)
+            )
+        if scene_arrays.magnetic_conductivity is not None:
+            magnetic_conductivity = sharding_preserving_set(
+                magnetic_conductivity, full_index, jnp.asarray(scene_arrays.magnetic_conductivity, dtype=config.dtype)
+            )
+        if num_dispersive_poles > 0:
+            disp_index = (slice(None), slice(None), slice(None), slice(None), slice(None))
+            dispersive_c1 = sharding_preserving_set(
+                dispersive_c1, disp_index, jnp.asarray(scene_arrays.dispersive_c1, dtype=config.dtype)
+            )
+            dispersive_c2 = sharding_preserving_set(
+                dispersive_c2, disp_index, jnp.asarray(scene_arrays.dispersive_c2, dtype=config.dtype)
+            )
+            dispersive_c3 = sharding_preserving_set(
+                dispersive_c3, disp_index, jnp.asarray(scene_arrays.dispersive_c3, dtype=config.dtype)
+            )
+    # In yee mode the scene loader has written every static array already; the sequential
+    # per-object write loop below is the box path and must not run.
+    static_write_order = () if yee_sampling else sorted_obj
+    for o in static_write_order:
         if isinstance(o, UniformMaterialObject):
             # Material properties are tuples (εxx, εxy, εxz, εyx, εyy, εyz, εzx, εzy, εzz)
             # Arrays have shape (num_components, Nx, Ny, Nz) where num_components is 1 (isotropic), 3 (diagonally anisotropic), or 9 (fully anisotropic)
