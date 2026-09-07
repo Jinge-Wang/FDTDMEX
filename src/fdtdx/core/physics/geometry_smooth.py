@@ -54,7 +54,7 @@ from fdtdx.core.physics.geometry_raster import (
     _material_signature,
     front_indices,
 )
-from fdtdx.materials import compute_allowed_permittivities
+from fdtdx.materials import compute_allowed_permeabilities, compute_allowed_permittivities
 from fdtdx.objects.static_material.static import SimulationVolume
 
 #: A fill fraction this close to 0 or 1 means the interface misses the pixel; keep the point sample.
@@ -466,16 +466,35 @@ def _material_value_classes(scene: Scene) -> np.ndarray:
     return classes
 
 
-def _isotropic_permittivity(scene: Scene) -> tuple[np.ndarray, np.ndarray]:
-    """Scalar permittivity per global material, and whether that material is isotropic."""
-    table = np.asarray(compute_allowed_permittivities(scene.materials), dtype=float)
+def _property_tensors(scene: Scene, property_kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Scalar value, isotropy flag and full 3x3 tensor of one property, per global material.
+
+    Args:
+        scene (Scene): The scene whose global material list is read.
+        property_kind (str): ``"permittivity"`` or ``"permeability"``.
+
+    Returns:
+        tuple: ``(scalar, isotropic, tensor)`` of shapes ``(M,)``, ``(M,)`` and ``(M, 3, 3)``. The
+        scalar is the ``xx`` entry; it is what the isotropic fast path blends and it is only
+        meaningful where ``isotropic`` is true.
+
+    Raises:
+        ValueError: If ``property_kind`` is not a smoothed property.
+    """
+    if property_kind == "permittivity":
+        raw = compute_allowed_permittivities(scene.materials)
+    elif property_kind == "permeability":
+        raw = compute_allowed_permeabilities(scene.materials)
+    else:
+        raise ValueError(f"property_kind must be 'permittivity' or 'permeability', got {property_kind!r}")
+    table = np.asarray(raw, dtype=float)
     diagonal = table[:, (0, 4, 8)]
     off_diagonal = table[:, (1, 2, 3, 5, 6, 7)]
     scale = np.maximum(np.max(np.abs(diagonal), axis=1), 1.0)
     isotropic = (np.ptp(diagonal, axis=1) <= _ISOTROPY_TOL * scale) & (
         np.max(np.abs(off_diagonal), axis=1) <= _ISOTROPY_TOL * scale
     )
-    return diagonal[:, 0], isotropic
+    return diagonal[:, 0], isotropic, table.reshape(table.shape[0], 3, 3)
 
 
 def _spanning_axes(entry, grid: RectilinearGrid) -> tuple[int, ...]:
@@ -496,6 +515,253 @@ def _spanning_axes(entry, grid: RectilinearGrid) -> tuple[int, ...]:
     return tuple(spanning)
 
 
+def _write_component_entries(
+    target: np.ndarray,
+    cells: tuple[np.ndarray, ...],
+    blend: np.ndarray,
+    component: int,
+    full_tensor: bool,
+) -> None:
+    """Write one component's smoothed entries into the assembled inverse-property array.
+
+    The single place a smoothed value reaches the material array. Meep evaluates the two
+    off-diagonal entries of row ``c`` on a half-cell-shifted control volume
+    (``gv.dV(here - shift1, ...)``) rather than on component ``c``'s own pixel; moving them there is
+    a separate change that replaces this function and nothing else.
+
+    Args:
+        target (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` array, modified in place.
+        cells (tuple): The three index arrays of the pixels being written.
+        blend (np.ndarray): ``(K,)`` diagonal entries or ``(K, 3)`` rows.
+        component (int): Which component's lattice is being written.
+        full_tensor (bool): Whether ``target`` carries 9 components.
+    """
+    if full_tensor:
+        for j in range(3):
+            target[(3 * component + j, *cells)] = blend[:, j]
+    else:
+        target[(component, *cells)] = blend
+
+
+def _smooth_component_lattice(
+    scene: Scene,
+    grid: RectilinearGrid,
+    field: str,
+    component: int,
+    front_material: np.ndarray,
+    front_owner: np.ndarray,
+    classes: np.ndarray,
+    scalar: np.ndarray,
+    isotropic: np.ndarray,
+    target: np.ndarray,
+    full_tensor: bool,
+    supersample: int,
+    stats: SmoothingStats,
+    warned_anisotropic: list[bool],
+) -> None:
+    """Smooth one component's lattice in place: probe, classify, blend, write.
+
+    Args:
+        scene (Scene): The scene from :func:`fdtdx.core.physics.geometry_raster.build_scene`.
+        grid (RectilinearGrid): The resolved simulation grid.
+        field (str): ``"E"`` or ``"H"`` — which Yee lattice this component sits on.
+        component (int): Component index 0, 1 or 2.
+        front_material (np.ndarray): ``(Nx, Ny, Nz)`` point-sampled global material index.
+        front_owner (np.ndarray): ``(Nx, Ny, Nz)`` point-sampled winning entry index.
+        classes (np.ndarray): Material index to value-class map from :func:`_material_value_classes`.
+        scalar (np.ndarray): Per-material scalar property value.
+        isotropic (np.ndarray): Per-material isotropy flag.
+        target (np.ndarray): The inverse-property array, modified in place.
+        full_tensor (bool): Write whole rows instead of the diagonal entry.
+        supersample (int): Samples per axis where no analytic overlap or normal is available.
+        stats (SmoothingStats): Counters, accumulated across components.
+        warned_anisotropic (list): One-element mutable flag, so the warning fires once per pass.
+    """
+    ignore_global = invariant_axes(grid)
+    degenerate_axis = tuple(axis in ignore_global for axis in range(3))
+
+    bounds = pixel_axis_bounds(grid, field, component)
+    corners = pixel_corner_coordinates(grid, field, component)
+    corner_material, corner_owner = front_indices(scene, corners)
+
+    shape = front_material.shape
+    probe_material = [classes[front_material]]
+    probe_owner = [front_owner]
+    for dx in range(2):
+        for dy in range(2):
+            for dz in range(2):
+                index = tuple(
+                    slice(0, 1) if degenerate_axis[axis] else slice(d, d + shape[axis])
+                    for axis, d in enumerate((dx, dy, dz))
+                )
+                probe_material.append(np.broadcast_to(classes[corner_material[index]], shape))
+                probe_owner.append(np.broadcast_to(corner_owner[index], shape))
+    stacked = np.stack(probe_material, axis=0)
+    ordered = np.sort(stacked, axis=0)
+    distinct = 1 + np.count_nonzero(np.diff(ordered, axis=0), axis=0)
+
+    stats.num_pixels += int(np.prod(shape))
+    candidate = distinct == 2
+    stats.num_three_material_fallbacks += int(np.count_nonzero(distinct >= 3))
+    count = int(np.count_nonzero(candidate))
+    stats.num_candidates += count
+    stats.per_component_candidates.append(count)
+    if count == 0:
+        return
+
+    cells = np.nonzero(candidate)
+    probe_classes = stacked[:, candidate]
+    owners = np.stack(probe_owner, axis=0)[:, candidate]
+    low_class = ordered[0][candidate]
+    high_class = ordered[-1][candidate]
+
+    # The owner is the highest-priority object among the nine probes: it is the shape whose
+    # surface bounds the front material inside the pixel, so it supplies both the fill fraction
+    # and the normal. This is fdtdx's write order read as Meep reads its object ids.
+    winner = np.argmax(owners, axis=0)
+    owner_entry = owners[winner, np.arange(count)]
+    owner_class = probe_classes[winner, np.arange(count)]
+    other_class = np.where(owner_class == low_class, high_class, low_class)
+
+    lower = np.stack([bounds[axis][0][cells[axis]] for axis in range(3)], axis=-1)
+    upper = np.stack([bounds[axis][1][cells[axis]] for axis in range(3)], axis=-1)
+    center = 0.5 * (lower + upper)
+
+    fill = np.zeros(count, dtype=float)
+    normal = np.zeros((count, 3), dtype=float)
+    for entry_index in np.unique(owner_entry):
+        if entry_index < 0:
+            continue
+        selected = owner_entry == entry_index
+        entry = scene.entries[int(entry_index)]
+        if isinstance(entry.obj, SimulationVolume):
+            continue
+        fill[selected] = _owner_fill_fraction(
+            entry.obj, lower[selected], upper[selected], supersample, degenerate_axis, stats
+        )
+        ignore = tuple(sorted(set(ignore_global) | set(_spanning_axes(entry, grid))))
+        local = np.asarray(entry.obj.normal_at(center[selected], ignore_axes=ignore), dtype=float)
+        missing = np.linalg.norm(local, axis=-1) <= 0.0
+        if missing.any():
+            stats.num_gradient_normal_fallbacks += int(np.count_nonzero(missing))
+            subset = np.nonzero(selected)[0][missing]
+            local[missing] = _gradient_normal_from_fill(
+                entry.obj, lower[subset], upper[subset], supersample, degenerate_axis
+            )
+        for axis in ignore_global:
+            local[:, axis] = 0.0
+        length = np.linalg.norm(local, axis=-1)
+        safe = length > 0.0
+        normal[selected] = np.where(safe[:, None], local / np.where(safe, length, 1.0)[:, None], 0.0)
+
+    value_hi = scalar[owner_class]
+    value_lo = scalar[other_class]
+
+    usable = np.ones(count, dtype=bool)
+    both_isotropic = isotropic[owner_class] & isotropic[other_class]
+    stats.num_anisotropic_skips += int(np.count_nonzero(~both_isotropic))
+    if not both_isotropic.all() and not warned_anisotropic[0]:
+        warnings.warn(
+            "material_sampling='yee_smooth' met an anisotropic material at an interface pixel. "
+            "The Kottke blend implemented here assumes both sides are locally isotropic, so those "
+            "pixels keep their point sample.",
+            UserWarning,
+            stacklevel=2,
+        )
+        warned_anisotropic[0] = True
+    usable &= both_isotropic
+
+    positive = (value_hi > 0.0) & (value_lo > 0.0)
+    stats.num_metal_skips += int(np.count_nonzero(~positive))
+    usable &= positive
+
+    degenerate_fill = (fill <= _FILL_EPS) | (fill >= 1.0 - _FILL_EPS)
+    stats.num_degenerate_fill_fallbacks += int(np.count_nonzero(degenerate_fill))
+    usable &= ~degenerate_fill
+
+    zero_normal = np.linalg.norm(normal, axis=-1) <= 0.0
+    stats.num_zero_normal_fallbacks += int(np.count_nonzero(zero_normal))
+    usable &= ~zero_normal
+
+    if not usable.any():
+        return
+    written = tuple(axis_cells[usable] for axis_cells in cells)
+    arithmetic = fill[usable] * value_hi[usable] + (1.0 - fill[usable]) * value_lo[usable]
+    harmonic = fill[usable] / value_hi[usable] + (1.0 - fill[usable]) / value_lo[usable]
+    blend = kottke_inverse_permittivity(normal[usable], arithmetic, harmonic, component, full_tensor)
+    _write_component_entries(target, written, blend, component, full_tensor)
+    stats.num_smoothed += int(np.count_nonzero(usable))
+
+
+def smooth_property_on_yee_pixels(
+    scene: Scene,
+    grid: RectilinearGrid,
+    field: str,
+    property_kind: str,
+    front_material: np.ndarray,
+    front_owner: np.ndarray,
+    inverse_property: np.ndarray,
+    supersample: int,
+    full_tensor: bool,
+) -> tuple[np.ndarray, SmoothingStats]:
+    """Overwrite the point-sampled inverse property at every two-material Yee pixel with its blend.
+
+    One pass over the three lattices of one field. The pixel rule, the nine-probe candidate test,
+    the fill fraction, the normal and the blend are identical for ``"E"``/permittivity and
+    ``"H"``/permeability; only the lattice the pixels sit on and the material table differ.
+
+    Args:
+        scene (Scene): The scene from :func:`fdtdx.core.physics.geometry_raster.build_scene`.
+        grid (RectilinearGrid): The resolved simulation grid.
+        field (str): ``"E"`` or ``"H"``.
+        property_kind (str): ``"permittivity"`` or ``"permeability"``.
+        front_material (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled global material index.
+        front_owner (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled winning entry index.
+        inverse_property (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` point-sampled inverse property,
+            modified in place and returned.
+        supersample (int): Samples per axis where no analytic overlap or normal is available.
+        full_tensor (bool): Write the full Kottke row instead of the diagonal entry. Must match the
+            array's own tier: a 9-component array is always written as rows, because entry ``(c, c)``
+            of a row-major 3x3 sits at index ``4*c``, not at ``c``.
+
+    Returns:
+        tuple: ``(inverse_property, stats)``.
+
+    Raises:
+        ValueError: If ``full_tensor`` disagrees with the array's component count.
+    """
+    expected = 9 if full_tensor else 3
+    if inverse_property.shape[0] != expected:
+        raise ValueError(
+            f"full_tensor={full_tensor} needs a {expected}-component inverse {property_kind} array, "
+            f"got {inverse_property.shape[0]}."
+        )
+    stats = SmoothingStats()
+    classes = _material_value_classes(scene)
+    scalar, isotropic, _ = _property_tensors(scene, property_kind)
+    warned_anisotropic = [False]
+
+    for component in range(3):
+        _smooth_component_lattice(
+            scene=scene,
+            grid=grid,
+            field=field,
+            component=component,
+            front_material=front_material[component],
+            front_owner=front_owner[component],
+            classes=classes,
+            scalar=scalar,
+            isotropic=isotropic,
+            target=inverse_property,
+            full_tensor=full_tensor,
+            supersample=supersample,
+            stats=stats,
+            warned_anisotropic=warned_anisotropic,
+        )
+
+    return inverse_property, stats
+
+
 def smooth_inverse_permittivity_on_yee_pixels(
     scene: Scene,
     grid: RectilinearGrid,
@@ -505,154 +771,15 @@ def smooth_inverse_permittivity_on_yee_pixels(
     supersample: int,
     full_tensor: bool,
 ) -> tuple[np.ndarray, SmoothingStats]:
-    """Overwrite the point-sampled permittivity at every two-material Yee pixel with its blend.
-
-    Args:
-        scene (Scene): The scene from :func:`fdtdx.core.physics.geometry_raster.build_scene`.
-        grid (RectilinearGrid): The resolved simulation grid.
-        front_material (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled global material index.
-        front_owner (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled winning entry index.
-        inv_permittivities (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` point-sampled inverse permittivity,
-            modified in place and returned.
-        supersample (int): Samples per axis where no analytic overlap or normal is available.
-        full_tensor (bool): Write the full Kottke row instead of the diagonal entry. Must match the
-            array's own tier: a 9-component array is always written as rows, because entry ``(c, c)``
-            of a row-major 3x3 sits at index ``4*c``, not at ``c``.
-
-    Returns:
-        tuple: ``(inv_permittivities, stats)``.
-
-    Raises:
-        ValueError: If ``full_tensor`` disagrees with the array's component count.
-    """
-    expected = 9 if full_tensor else 3
-    if inv_permittivities.shape[0] != expected:
-        raise ValueError(
-            f"full_tensor={full_tensor} needs a {expected}-component inverse permittivity array, "
-            f"got {inv_permittivities.shape[0]}."
-        )
-    stats = SmoothingStats()
-    classes = _material_value_classes(scene)
-    permittivity, isotropic = _isotropic_permittivity(scene)
-    ignore_global = invariant_axes(grid)
-    degenerate_axis = tuple(axis in ignore_global for axis in range(3))
-    warned_anisotropic = False
-
-    for component in range(3):
-        bounds = pixel_axis_bounds(grid, "E", component)
-        corners = pixel_corner_coordinates(grid, "E", component)
-        corner_material, corner_owner = front_indices(scene, corners)
-
-        shape = front_material.shape[1:]
-        probe_material = [classes[front_material[component]]]
-        probe_owner = [front_owner[component]]
-        for dx in range(2):
-            for dy in range(2):
-                for dz in range(2):
-                    index = tuple(
-                        slice(0, 1) if degenerate_axis[axis] else slice(d, d + shape[axis])
-                        for axis, d in enumerate((dx, dy, dz))
-                    )
-                    probe_material.append(np.broadcast_to(classes[corner_material[index]], shape))
-                    probe_owner.append(np.broadcast_to(corner_owner[index], shape))
-        stacked = np.stack(probe_material, axis=0)
-        ordered = np.sort(stacked, axis=0)
-        distinct = 1 + np.count_nonzero(np.diff(ordered, axis=0), axis=0)
-
-        stats.num_pixels += int(np.prod(shape))
-        candidate = distinct == 2
-        stats.num_three_material_fallbacks += int(np.count_nonzero(distinct >= 3))
-        count = int(np.count_nonzero(candidate))
-        stats.num_candidates += count
-        stats.per_component_candidates.append(count)
-        if count == 0:
-            continue
-
-        cells = np.nonzero(candidate)
-        probe_classes = stacked[:, candidate]
-        owners = np.stack(probe_owner, axis=0)[:, candidate]
-        low_class = ordered[0][candidate]
-        high_class = ordered[-1][candidate]
-
-        # The owner is the highest-priority object among the nine probes: it is the shape whose
-        # surface bounds the front material inside the pixel, so it supplies both the fill fraction
-        # and the normal. This is fdtdx's write order read as Meep reads its object ids.
-        winner = np.argmax(owners, axis=0)
-        owner_entry = owners[winner, np.arange(count)]
-        owner_class = probe_classes[winner, np.arange(count)]
-        other_class = np.where(owner_class == low_class, high_class, low_class)
-
-        lower = np.stack([bounds[axis][0][cells[axis]] for axis in range(3)], axis=-1)
-        upper = np.stack([bounds[axis][1][cells[axis]] for axis in range(3)], axis=-1)
-        center = 0.5 * (lower + upper)
-
-        fill = np.zeros(count, dtype=float)
-        normal = np.zeros((count, 3), dtype=float)
-        for entry_index in np.unique(owner_entry):
-            if entry_index < 0:
-                continue
-            selected = owner_entry == entry_index
-            entry = scene.entries[int(entry_index)]
-            if isinstance(entry.obj, SimulationVolume):
-                continue
-            fill[selected] = _owner_fill_fraction(
-                entry.obj, lower[selected], upper[selected], supersample, degenerate_axis, stats
-            )
-            ignore = tuple(sorted(set(ignore_global) | set(_spanning_axes(entry, grid))))
-            local = np.asarray(entry.obj.normal_at(center[selected], ignore_axes=ignore), dtype=float)
-            missing = np.linalg.norm(local, axis=-1) <= 0.0
-            if missing.any():
-                stats.num_gradient_normal_fallbacks += int(np.count_nonzero(missing))
-                subset = np.nonzero(selected)[0][missing]
-                local[missing] = _gradient_normal_from_fill(
-                    entry.obj, lower[subset], upper[subset], supersample, degenerate_axis
-                )
-            for axis in ignore_global:
-                local[:, axis] = 0.0
-            length = np.linalg.norm(local, axis=-1)
-            safe = length > 0.0
-            normal[selected] = np.where(safe[:, None], local / np.where(safe, length, 1.0)[:, None], 0.0)
-
-        eps_hi = permittivity[owner_class]
-        eps_lo = permittivity[other_class]
-
-        usable = np.ones(count, dtype=bool)
-        both_isotropic = isotropic[owner_class] & isotropic[other_class]
-        stats.num_anisotropic_skips += int(np.count_nonzero(~both_isotropic))
-        if not both_isotropic.all() and not warned_anisotropic:
-            warnings.warn(
-                "material_sampling='yee_smooth' met an anisotropic material at an interface pixel. "
-                "The Kottke blend implemented here assumes both sides are locally isotropic, so those "
-                "pixels keep their point sample.",
-                UserWarning,
-                stacklevel=2,
-            )
-            warned_anisotropic = True
-        usable &= both_isotropic
-
-        positive = (eps_hi > 0.0) & (eps_lo > 0.0)
-        stats.num_metal_skips += int(np.count_nonzero(~positive))
-        usable &= positive
-
-        degenerate_fill = (fill <= _FILL_EPS) | (fill >= 1.0 - _FILL_EPS)
-        stats.num_degenerate_fill_fallbacks += int(np.count_nonzero(degenerate_fill))
-        usable &= ~degenerate_fill
-
-        zero_normal = np.linalg.norm(normal, axis=-1) <= 0.0
-        stats.num_zero_normal_fallbacks += int(np.count_nonzero(zero_normal))
-        usable &= ~zero_normal
-
-        if not usable.any():
-            continue
-        target = tuple(axis_cells[usable] for axis_cells in cells)
-        arithmetic = fill[usable] * eps_hi[usable] + (1.0 - fill[usable]) * eps_lo[usable]
-        harmonic = fill[usable] / eps_hi[usable] + (1.0 - fill[usable]) / eps_lo[usable]
-        blend = kottke_inverse_permittivity(normal[usable], arithmetic, harmonic, component, full_tensor)
-        if full_tensor:
-            for j in range(3):
-                inv_permittivities[(3 * component + j, *target)] = blend[:, j]
-        else:
-            inv_permittivities[(component, *target)] = blend
-        stats.num_smoothed += int(np.count_nonzero(usable))
-
-    return inv_permittivities, stats
+    """Smooth the permittivity on the three E lattices; see :func:`smooth_property_on_yee_pixels`."""
+    return smooth_property_on_yee_pixels(
+        scene=scene,
+        grid=grid,
+        field="E",
+        property_kind="permittivity",
+        front_material=front_material,
+        front_owner=front_owner,
+        inverse_property=inv_permittivities,
+        supersample=supersample,
+        full_tensor=full_tensor,
+    )
