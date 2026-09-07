@@ -4,12 +4,23 @@ Stage A (:mod:`fdtdx.core.physics.geometry_raster`) puts the exact continuous ge
 but still samples it at a single point per field component, so an interface is staircased and the
 error is first order in the cell size. This module removes that first-order term.
 
-**The pixel.** Every E component owns a box centred on its own sample point: the primal cell on the
+**The pixel.** Every component owns a box centred on its own sample point: the primal cell on the
 axes where the component sits at a cell centre, and the dual cell on the axes where it sits at an
-edge. That is not a free choice — the dual width ``0.5*(w[i-1] + w[i])`` is the metric the backward
-difference already divides by when it produces a quantity at ``e_a[i]``
+edge. For E that is not a free choice — the dual width ``0.5*(w[i-1] + w[i])`` is the metric the
+backward difference already divides by when it produces a quantity at ``e_a[i]``
 (:mod:`fdtdx.core.physics.curl`), so the pixel is the control volume the update integrates over.
-On a uniform grid every pixel is a cube of side ``h`` centred on the sample point.
+For H the argument is different but lands on the same box: ``H_c`` sits at an **edge** on its own
+axis, so the dual cell is the only box centred on the sample point, which is also Meep's rule (one
+cell across, centred on the component's own point). On a uniform grid every pixel is a cube of side
+``h`` centred on the sample point.
+
+**Which properties.** The permittivity on the three E lattices, and the permeability on the three H
+lattices whenever that array exists at all — which is exactly when some material is magnetic, the
+fork's ``all_objects_non_magnetic`` being Meep's ``has_mu``. Conductivity and dispersion stay point
+samples, as they do in Meep. One consequence is worth stating: at a magnetic interface pixel the
+permeability is the blend while the magnetic conductivity is the point sample of whichever material
+won at the H point, so the two can disagree about which side of the interface the pixel is on. The
+electric side has been in that state since sub-pixel smoothing was introduced.
 
 **Which pixels are touched.** The material is probed at the pixel centre and at its eight corners.
 One material: the pixel is uniform and keeps its point sample, bit for bit. Two materials: the pixel
@@ -18,7 +29,7 @@ blend to describe, so the point sample is kept — the feature is under-resolved
 those pixels. The eight corners of every pixel of one component come from a single lattice, so the
 whole probe costs one extra raster pass per component rather than nine point tests per pixel.
 
-**The blend.** With fill fraction ``f`` of the front material in the pixel,
+**The blend, two isotropic materials.** With fill fraction ``f`` of the front material in the pixel,
 
     <eps> = f*eps_hi + (1-f)*eps_lo        <1/eps> = f/eps_hi + (1-f)/eps_lo
 
@@ -29,7 +40,35 @@ and unit interface normal ``n``, the effective *inverse* permittivity tensor is
 i.e. the harmonic mean along the normal and the arithmetic mean in the interface plane. The default
 diagonal tier writes entry ``(c, c)`` of that tensor at component ``c``'s own pixel, which is the
 entry the elementwise update applies to ``E_c``; the optional full-tensor tier writes the whole row
-``c`` into the 9-component layout. Conductivity and dispersion stay point-sampled.
+``c`` into the 9-component layout, and the loader counts the pixels where the diagonal tier had to
+drop a non-zero off-diagonal term.
+
+**The blend, anisotropic materials.** Averaging a tensor entrywise is wrong: the quantity that is
+continuous across the interface is not ``E`` or ``D`` but the mixed vector made of the normal
+component of ``D`` and the two tangential components of ``E``. Kottke's change of variables ``tau``
+is the map onto that vector's conjugate, so ``tau`` of each side, averaged with ``f`` as the weight,
+is the correct mean. Both tensors are rotated so that index 0 is the normal, transformed, averaged
+entrywise, transformed back, inverted and rotated to the lab frame. Six entries each way, no
+iteration; for two multiples of the identity it reduces exactly to the formula above, which is why
+an isotropic scene keeps taking the scalar path and its numbers do not move. The transform divides
+by ``n^T eps n``, so a side that is not positive definite is refused before the transform runs and
+counted with the metals. Meep only checks that in a debug build, so this is stricter than shipped
+Meep rather than parity with it.
+
+**Periodic images.** On an axis carrying a periodic or Bloch boundary an object is also evaluated
+one lattice vector each way, so a shape crossing the face reappears on the other side. The shape is
+never moved: its bounding interval is shifted to window the lattice and the query points are shifted
+back into its own frame, which is what libctl and Meep both do and what fdtdx's absolute shape bounds
+force anyway. A pixel's fill fraction sums over the images that reach it — they are translates by
+whole periods, so they are disjoint and the sum is exact — while the normal comes from the single
+image that won the pixel. Where two images both reach one pixel the object shows two faces with
+opposite normals there, no single-normal blend describes it, and the pixel is counted and left at
+its point sample. The domain-edge pixel of a periodic axis becomes the full mirrored dual box, since
+the material below the first edge is now defined; on a terminated axis it stays clipped, which is a
+knowing deviation from Meep (Meep pads and uses the full box everywhere) taken because extending the
+box past the first edge would evaluate the scene where no simulation volume exists. An axis the
+simulation is invariant along never gets images: fdtdx's 2-D convention is a single periodic cell
+there, and replicating along it would report a spurious second material at every pixel.
 
 **Why the normals are analytic.** The tensor depends on ``n`` linearly through ``n n^T``, so an
 angular error ``delta`` leaves an ``O(h*delta)`` field error. A normal recovered from a fixed-size
@@ -656,9 +695,7 @@ def _material_value_classes(scene: Scene, property_kind: str) -> np.ndarray:
     return classes
 
 
-def _property_tensors(
-    scene: Scene, property_kind: str
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def _property_tensors(scene: Scene, property_kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Scalar value, isotropy flag, symmetrised 3x3 tensor and asymmetry flag, per global material.
 
     fdtdx stores a material property as a general 9-tuple with no symmetry check, while the Kottke
@@ -947,6 +984,9 @@ def _smooth_component_lattice(
 
     # Two images of one object inside one pixel means two surfaces with opposite normals there.
     # That is the three-material pathology in a two-material pixel: count it, keep the point sample.
+    # It needs the object's extent plus the pixel width to exceed the period, so it is confined to a
+    # shape that very nearly fills the domain on a periodic axis; a shape that merely crosses the
+    # seam presents one face per pixel and is blended like any other.
     stats.num_multi_shift_pixels += int(np.count_nonzero(multi_shift))
     usable &= ~multi_shift
 

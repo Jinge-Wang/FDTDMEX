@@ -36,7 +36,16 @@ the scene background.
 
 Stage A is point sampling only. A cell straddling an interface takes whichever material contains its
 component position; there is no fill fraction and no Kottke blend yet, so the geometry is exact but
-the interface is still staircased.
+the interface is still staircased. ``material_sampling="yee_smooth"`` adds the fill-fraction blend
+on top, for the permittivity on the E lattices and for the permeability on the H lattices
+(:mod:`fdtdx.core.physics.geometry_smooth`).
+
+**Periodic axes.** When an axis carries a periodic or Bloch boundary every object is also evaluated
+one lattice vector each way, so a shape crossing that face reappears on the other side. The object
+is never translated: its bounding interval is shifted to window the lattice and the query points are
+shifted back into the object's own frame. An object and its images share one entry and one priority,
+so they cannot outrank each other and the ascending write order is unchanged. An axis the simulation
+is invariant along is excluded, because fdtdx's 2-D convention is a single periodic cell there.
 """
 
 from dataclasses import dataclass
@@ -329,7 +338,7 @@ def shift_code(shift: np.ndarray, periods: tuple[float, float, float]) -> int:
     """Pack a shift as ``9*(mx+1) + 3*(my+1) + (mz+1)``; the identity is :data:`SHIFT_IDENTITY`."""
     code = 0
     for axis in range(3):
-        step = 0 if periods[axis] <= 0.0 else int(round(float(shift[axis]) / periods[axis]))
+        step = 0 if periods[axis] <= 0.0 else round(float(shift[axis]) / periods[axis])
         code = code * 3 + (step + 1)
     return code
 
@@ -624,9 +633,7 @@ def load_scene_on_yee_lattices(
 
     need_H = num_permeability_components is not None or num_magnetic_cond_components is not None
 
-    resolved_E = [
-        front_indices(scene, yee_lattice_coordinates(grid, "E", c), image_axes, periods) for c in range(3)
-    ]
+    resolved_E = [front_indices(scene, yee_lattice_coordinates(grid, "E", c), image_axes, periods) for c in range(3)]
     front_E = np.stack([r[0] for r in resolved_E], axis=0)
     owner_E = np.stack([r[1] for r in resolved_E], axis=0)
     shift_E = np.stack([r[2] for r in resolved_E], axis=0)

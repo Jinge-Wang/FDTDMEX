@@ -310,6 +310,13 @@ class StaticMultiMaterialObject(OrderableObject, ABC):
         nor libctl has this rule — it is fdtdx's own, forced by fdtdx's 2-D convention. No case in
         ``cases/`` places a real material face on the domain boundary.
 
+        Both rules are read in the object's **own** frame, which is what makes them right on a
+        periodic axis too. An object that covers the whole domain there genuinely has no cap, so
+        rule 2 removes one that does not exist. An object that merely *crosses* the periodic seam
+        does not span the domain in its own frame — its bounds stick out of one end — so it keeps
+        its caps, and the loader asks for the normal at the query point translated back into that
+        frame. Nothing here needs to know that the object was replicated.
+
         Args:
             points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres, on the
                 simulation grid's own axes.

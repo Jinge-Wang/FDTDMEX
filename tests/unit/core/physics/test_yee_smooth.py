@@ -1234,9 +1234,7 @@ def test_a_non_positive_definite_tensor_keeps_the_point_sample():
     stats = _smoothing_stats(info)
     assert stats["num_metal_skips"] > 0
     assert stats["num_smoothed"] == 0
-    np.testing.assert_array_equal(
-        np.asarray(point.inv_permittivities), np.asarray(smooth.inv_permittivities)
-    )
+    np.testing.assert_array_equal(np.asarray(point.inv_permittivities), np.asarray(smooth.inv_permittivities))
 
 
 def test_the_dropped_off_diagonal_terms_are_counted():
@@ -1260,9 +1258,7 @@ def test_the_dropped_off_diagonal_terms_are_counted():
         name = _tag()
         config = _config(d, "yee_smooth", yee_smooth_full_tensor=full_tensor)
         volume = _volume((cells, cells, 1), f"v{name}")
-        _, _, _, _, info = fdtdx.place_objects(
-            [volume, Cylinder(name=f"c{name}", **disk_kwargs)], config, []
-        )
+        _, _, _, _, info = fdtdx.place_objects([volume, Cylinder(name=f"c{name}", **disk_kwargs)], config, [])
         dropped[full_tensor] = _smoothing_stats(info)["num_offdiagonal_dropped"]
     assert dropped[False] > 0
     assert dropped[True] == 0
@@ -1284,9 +1280,7 @@ def _periodic_scene(objects_fn, sampling: str, tag: str, shape=(SEAM_N, SEAM_N, 
     if override is None:
         bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(boundary_type="periodic")
     else:
-        bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(
-            boundary_type="pml", thickness=4, override_types=override
-        )
+        bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(boundary_type="pml", thickness=4, override_types=override)
     boundaries, constraints = fdtdx.boundary_objects_from_config(bound_cfg, volume)
     container, arrays, _, resolved, info = fdtdx.place_objects(
         [volume, *objects_fn(tag), *boundaries.values()], config, constraints
@@ -1343,11 +1337,9 @@ def test_cylinder_across_a_bloch_seam_matches_the_centred_cylinder(sampling):
     and the fill fraction inherits it. A wrong image moves the answer by order one, not by 1e-6.
     """
     _, centred, _, centred_info = _periodic_scene(_seam_disk(0.0, 2.4), sampling, _tag())
-    container, seam, _, seam_info = _periodic_scene(
-        _seam_disk(-SEAM_N / 2 * SEAM_D, 2.4), sampling, _tag()
-    )
+    container, seam, _, seam_info = _periodic_scene(_seam_disk(-SEAM_N / 2 * SEAM_D, 2.4), sampling, _tag())
     assert container.periodic_axes == (True, True, True)
-    placed = [o for o in container.object_list if o.name.startswith("c")][0]
+    placed = next(o for o in container.object_list if o.name.startswith("c"))
     volume_bounds = container.volume.metric_bounds
     assert placed.metric_bounds[0][0] < volume_bounds[0][0], "the disk must actually cross the seam"
 
@@ -1451,7 +1443,7 @@ def test_a_seam_pixel_reached_by_two_images_is_counted_not_smoothed():
     assert np.count_nonzero(smoothed != sampled) > 0
 
     grid = resolved.resolved_grid
-    placed = [o for o in container.object_list if o.name.startswith("s")][0]
+    placed = next(o for o in container.object_list if o.name.startswith("s"))
     low, high = placed.metric_bounds[0]
     edges = np.asarray(grid.edges(0), dtype=float)
     period = float(edges[-1] - edges[0])
@@ -1480,7 +1472,7 @@ def test_the_seam_crossing_rim_recovers_the_wrapped_normal():
     _, point, resolved, _ = _periodic_scene(_seam_disk(-SEAM_N / 2 * SEAM_D), "yee", _tag())
     container, smooth, _, _ = _periodic_scene(_seam_disk(-SEAM_N / 2 * SEAM_D), "yee_smooth", _tag())
     grid = resolved.resolved_grid
-    placed = [o for o in container.object_list if o.name.startswith("c")][0]
+    placed = next(o for o in container.object_list if o.name.startswith("c"))
     centre = tuple(0.5 * (b[0] + b[1]) for b in placed.metric_bounds)
     edges = np.asarray(grid.edges(0), dtype=float)
     period = float(edges[-1] - edges[0])

@@ -194,3 +194,96 @@ def test_yee_neff_is_no_further_from_the_reference_than_the_box_path(d, neff_tab
     yee_error = abs(float(np.mean(neff_table[(d, "yee")])) - reference_neff)
     box_error = abs(float(np.mean(neff_table[(d, "box")])) - reference_neff)
     assert yee_error <= box_error + 5e-3
+
+
+# ---------------------------------------------------------------------------
+# The permeability on the H lattices
+# ---------------------------------------------------------------------------
+
+MU_CORE = 2.4
+
+
+def _magnetic_cross_section(d: float, sampling: str, shift: float):
+    """The same strip with a magnetic core, returning the assembled arrays and the loader report."""
+    name = _tag()
+    ny, nz = round(WINDOW_Y / d), round(WINDOW_Z / d)
+    config = SimulationConfig(time=1e-15, grid=UniformGrid(spacing=d), material_sampling=sampling)
+    volume = SimulationVolume(
+        partial_grid_shape=(3, ny, nz),
+        material=Material(permittivity=N_OXIDE**2),
+        name=f"vol_{name}",
+    )
+    half_w, half_t = CORE_WIDTH / 2, CORE_THICKNESS / 2
+    core = ExtrudedPolygon(
+        axis=0,
+        vertices=np.array([[-half_w, -half_t], [half_w, -half_t], [half_w, half_t], [-half_w, half_t]]),
+        material_name="si",
+        materials={"si": Material(permittivity=N_SI**2, permeability=MU_CORE)},
+        partial_grid_shape=(3, None, None),
+        partial_real_position=(0.0, shift, 0.0),
+        placement_order=1,
+        name=f"core_{name}",
+    )
+    _, arrays, _, _, info = fdtdx.place_objects([volume, core], config, [])
+    return arrays, info
+
+
+def test_a_magnetic_core_is_smoothed_on_the_h_lattices():
+    """End to end: a mu = 2.4 core in a mu = 1 cladding loads a smoothed 3-component permeability.
+
+    The interior and the cladding keep their exact point values, the interface cells sit strictly
+    between them, and the point-sampled load of the same scene differs from the smoothed one only
+    where the core's faces cut a cell. The electric side is unaffected: the permittivity arrays of
+    the magnetic and non-magnetic strips are identical, because the permeability contrast is not a
+    permittivity contrast.
+    """
+    d, shift = 32e-9, 0.3 * 32e-9
+    smooth, info = _magnetic_cross_section(d, "yee_smooth", shift)
+    point, point_info = _magnetic_cross_section(d, "yee", shift)
+
+    inv_mu = np.asarray(smooth.inv_permeabilities, dtype=np.float64)
+    assert inv_mu.shape[0] == 3
+    assert "smoothing_H" not in point_info["yee_sampling_difference"]
+    stats = info["yee_sampling_difference"]["smoothing_H"]
+    assert stats["num_smoothed"] > 0
+    assert stats["num_three_material_fallbacks"] == 0
+    assert stats["num_metal_skips"] == 0
+
+    mu = 1.0 / inv_mu
+    assert float(mu.min()) == pytest.approx(1.0, rel=1e-6)
+    assert float(mu.max()) == pytest.approx(MU_CORE, rel=1e-6)
+    between = (mu > 1.0 + 1e-6) & (mu < MU_CORE - 1e-6)
+    assert int(between.sum()) > 0
+    assert int(between.sum()) <= stats["num_smoothed"]
+
+    point_mu = np.asarray(point.inv_permeabilities, dtype=np.float64)
+    differing = inv_mu != point_mu
+    assert int(differing.sum()) > 0
+    assert int(differing.sum()) <= stats["num_smoothed"]
+    # Every cell that moved is an interface cell: the point sample there is one of the two extremes.
+    # The comparison is at float32, which is what the arrays are stored in.
+    moved = point_mu[differing]
+    assert np.all((np.abs(moved - 1.0) < 1e-6) | (np.abs(moved - 1.0 / MU_CORE) < 1e-6))
+
+    # The electric side does not notice: the same strip without the magnetic core loads the same
+    # permittivity, because a permeability contrast is not a permittivity contrast.
+    dielectric, _ = _cross_section(d, "yee_smooth", shift)
+    np.testing.assert_array_equal(np.asarray(smooth.inv_permittivities)[:, 0:1, :, :], dielectric)
+
+
+def test_the_magnetic_strip_keeps_its_extent_like_the_dielectric_one():
+    """The smoothed permeability recovers the core's true 500 x 220 nm cross-section, not a raster.
+
+    Read from ``mu_xx`` on the ``H_x`` lattice: summing the recovered fill fraction along one axis
+    and taking the maximum gives the extent along the other, which is the same measurement the
+    permittivity tests above make on the E lattices.
+    """
+    d, shift = 32e-9, 0.3 * 32e-9
+    smooth, _ = _magnetic_cross_section(d, "yee_smooth", shift)
+    mu = 1.0 / np.asarray(smooth.inv_permeabilities, dtype=np.float64)
+    # H_x sits at (e_x, c_y, c_z): primal in y and z, so its pixel tiles the cross-section exactly.
+    fill = np.clip((mu[0, 0] - 1.0) / (MU_CORE - 1.0), 0.0, 1.0)
+    width = float(np.max(fill.sum(axis=0))) * d
+    thickness = float(np.max(fill.sum(axis=1))) * d
+    assert width == pytest.approx(CORE_WIDTH, abs=0.05 * d)
+    assert thickness == pytest.approx(CORE_THICKNESS, abs=0.05 * d)
