@@ -9,7 +9,7 @@ from fdtdx.core.misc import expand_to_3x3, pad_fields
 from fdtdx.core.physics.curl import curl_E, curl_H, interpolate_fields
 from fdtdx.core.physics.symmetry import field_component_parity, mirror_pairs_on_plane
 from fdtdx.core.switch import OnOffSwitch
-from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
+from fdtdx.fdtd.container import ArrayContainer, ObjectContainer, wrap_padding_axes
 from fdtdx.fdtd.misc import (
     add_boundary_interfaces,
     avg_anisotropic_E_component,
@@ -29,8 +29,9 @@ def _source_uses_default_always_on_switch(source) -> bool:
 def get_wrap_padding_axes(objects: ObjectContainer) -> tuple[bool, bool, bool]:
     """Determines which axes should use wrap (periodic) padding.
 
-    Delegates to each boundary's `uses_wrap_padding` property, so no
-    boundary-type-specific logic lives in the update loop.
+    Thin wrapper over :func:`fdtdx.fdtd.container.wrap_padding_axes`, which the container also
+    exposes as ``ObjectContainer.periodic_axes`` for the material loader. Kept under this name
+    because the backend dispatcher, the IO packer, the benchmarks and several tests import it.
 
     Args:
         objects (ObjectContainer): Container with simulation objects including boundaries
@@ -38,11 +39,7 @@ def get_wrap_padding_axes(objects: ObjectContainer) -> tuple[bool, bool, bool]:
     Returns:
         tuple[bool, bool, bool]: Tuple indicating which axes (x,y,z) use wrap padding
     """
-    wrap_axes = [False, False, False]
-    for boundary in objects.boundary_objects:
-        if boundary.uses_wrap_padding:
-            wrap_axes[boundary.axis] = True
-    return tuple(wrap_axes)  # type: ignore
+    return wrap_padding_axes(objects.boundary_objects)
 
 
 def apply_boundary_post_E_update(

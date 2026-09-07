@@ -49,8 +49,12 @@ from fdtdx.core.physics.geometry_raster import (
     _TIE_NUDGE_FRACTION,
     E_OFFSETS,
     H_OFFSETS,
+    SHIFT_IDENTITY,
     Scene,
+    entry_shifts,
     front_indices,
+    grid_periods,
+    unpack_shift_codes,
 )
 from fdtdx.materials import compute_allowed_permeabilities, compute_allowed_permittivities
 from fdtdx.objects.static_material.static import SimulationVolume
@@ -90,6 +94,9 @@ class SmoothingStats:
     num_offdiagonal_dropped: int = 0
     #: Pixels where an input tensor was not symmetric and was symmetrised before the transform.
     num_asymmetric_tensor_pixels: int = 0
+    #: Pixels two periodic images of one object both reach. Counted, not smoothed: the object shows
+    #: two faces with opposite normals inside one pixel, and no single-normal blend describes that.
+    num_multi_shift_pixels: int = 0
     num_supersampled_pixels: int = 0
     per_component_candidates: list[int] = field(default_factory=list)
 
@@ -123,6 +130,7 @@ def pixel_axis_bounds(
     grid: RectilinearGrid,
     field_name: str,
     component: int,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """Per-axis ``(lower, upper)`` arrays of the pixel boxes of one Yee component.
 
@@ -133,6 +141,9 @@ def pixel_axis_bounds(
         grid (RectilinearGrid): The resolved simulation grid.
         field_name (str): ``"E"`` or ``"H"``.
         component (int): Component index 0, 1 or 2.
+        periodic_axes (tuple): Axes whose domain-edge pixel is the full mirrored dual box rather
+            than the clipped half box, because the material below the first edge is defined there:
+            it is the periodic image of the material below the last edge.
 
     Returns:
         list: Three ``(lower, upper)`` pairs of arrays of length ``grid.shape[axis]``.
@@ -159,9 +170,19 @@ def pixel_axis_bounds(
             # with each other; the cost is that a material interface falling inside the first cell of
             # an axis would be smoothed over half the correct box. Every case in cases/ puts PML and a
             # spatially uniform background there, so no interface is ever that close to the boundary.
-            # A scene with a real interface one cell from a non-PML (e.g. Bloch) boundary would need
-            # the mirrored box and a background fill outside the domain.
-            lower = np.clip(edges[:-1] - 0.5 * previous, edges[0], None)
+            # On a *periodic* axis the clip is dropped: the material below e[0] is the periodic
+            # image of the material below e[N], which front_indices now supplies, so the pixel can
+            # be the full dual box the update integrates over. The mirrored half keeps the width
+            # w[0] rather than the wrapped neighbour w[N-1], because the pixel must be the control
+            # volume the update integrates over and curl.py prepends widths[:1] whatever the
+            # boundary; the two differ only on a graded periodic axis, and the real defect is then
+            # in the curl. On a terminated axis the clip stays, which is a knowing deviation from
+            # Meep -- Meep pads and uses the full box on every axis. Extending the box past e[0]
+            # there would evaluate the scene where no SimulationVolume exists, so the loader would
+            # invent a background material for a region that is not part of the simulation.
+            lower = edges[:-1] - 0.5 * previous
+            if not periodic_axes[axis]:
+                lower = np.clip(lower, edges[0], None)
             upper = edges[:-1] + 0.5 * widths
             bounds.append((lower, upper))
     return bounds
@@ -171,6 +192,7 @@ def pixel_corner_coordinates(
     grid: RectilinearGrid,
     field_name: str,
     component: int,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Corner lattice of one component's pixels: one array per axis, ``N_a + 1`` long.
 
@@ -180,9 +202,11 @@ def pixel_corner_coordinates(
     length-1 array (the cell centre), which broadcasts.
 
     The top corner is pulled just inside the domain so that the resolver's tie nudge cannot push it
-    past the upper face of an object that reaches the boundary.
+    past the upper face of an object that reaches the boundary. The bottom corner follows
+    :func:`pixel_axis_bounds`: clipped to the domain on a terminated axis, extended half a cell
+    below the first edge on a periodic one, so candidate detection and fill fraction keep agreeing.
     """
-    bounds = pixel_axis_bounds(grid, field_name, component)
+    bounds = pixel_axis_bounds(grid, field_name, component, periodic_axes)
     ignore = invariant_axes(grid)
     coords = []
     for axis in range(3):
@@ -193,7 +217,8 @@ def pixel_corner_coordinates(
         edges = np.asarray(grid.edges(axis), dtype=float)
         margin = 2.0 * _TIE_NUDGE_FRACTION * float(np.min(np.diff(edges)))
         corner = np.concatenate([lower, upper[-1:]])
-        coords.append(np.clip(corner, edges[0], edges[-1] - margin))
+        floor = None if periodic_axes[axis] else edges[0]
+        coords.append(np.clip(corner, floor, edges[-1] - margin))
     return coords[0], coords[1], coords[2]
 
 
@@ -672,6 +697,26 @@ def _property_tensors(
     return diagonal[:, 0], isotropic, 0.5 * (tensor + np.swapaxes(tensor, -1, -2)), asymmetric
 
 
+def _image_reaches(
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    image: np.ndarray,
+    box_lower: np.ndarray,
+    box_upper: np.ndarray,
+) -> bool:
+    """Whether one periodic image of an object can touch any of the pixel boxes being filled.
+
+    A bounding-box test only, so it can keep an image that turns out to contribute nothing; it can
+    never drop one that does. Its job is to keep an object far from a periodic face on exactly one
+    fill-fraction call, so the supersampling count of a scene without images does not move.
+    """
+    for axis in range(3):
+        if bounds[axis][1] + image[axis] <= float(np.min(box_lower[:, axis])):
+            return False
+        if bounds[axis][0] + image[axis] >= float(np.max(box_upper[:, axis])):
+            return False
+    return True
+
+
 def _spanning_axes(entry, grid: RectilinearGrid) -> tuple[int, ...]:
     """Axes on which an entry covers the whole domain, so its "caps" are the domain boundary.
 
@@ -725,6 +770,9 @@ def _smooth_component_lattice(
     component: int,
     front_material: np.ndarray,
     front_owner: np.ndarray,
+    front_shift: np.ndarray,
+    periodic_axes: tuple[bool, bool, bool],
+    periods: tuple[float, float, float],
     classes: np.ndarray,
     scalar: np.ndarray,
     isotropic: np.ndarray,
@@ -744,6 +792,9 @@ def _smooth_component_lattice(
         component (int): Component index 0, 1 or 2.
         front_material (np.ndarray): ``(Nx, Ny, Nz)`` point-sampled global material index.
         front_owner (np.ndarray): ``(Nx, Ny, Nz)`` point-sampled winning entry index.
+        front_shift (np.ndarray): ``(Nx, Ny, Nz)`` packed code of the winning periodic image.
+        periodic_axes (tuple): Axes that carry periodic images, invariant axes already excluded.
+        periods (tuple): Metric period per axis.
         classes (np.ndarray): Material index to value-class map from :func:`_material_value_classes`.
         scalar (np.ndarray): Per-material scalar property value.
         isotropic (np.ndarray): Per-material isotropy flag.
@@ -757,13 +808,18 @@ def _smooth_component_lattice(
     ignore_global = invariant_axes(grid)
     degenerate_axis = tuple(axis in ignore_global for axis in range(3))
 
-    bounds = pixel_axis_bounds(grid, field, component)
-    corners = pixel_corner_coordinates(grid, field, component)
-    corner_material, corner_owner = front_indices(scene, corners)
+    bounds = pixel_axis_bounds(grid, field, component, periodic_axes)
+    corners = pixel_corner_coordinates(grid, field, component, periodic_axes)
+    corner_material, corner_owner, corner_shift = front_indices(scene, corners, periodic_axes, periods)
 
     shape = front_material.shape
+    # The pixel centre is probe 0, the eight corners follow. np.argmax below returns the first
+    # maximum, so among probes of equal owner priority the centre wins and the corners are ranked
+    # in (dx, dy, dz) order. That is the tie rule: the image that owns the pixel centre supplies the
+    # normal whenever it owns the pixel at all. A pixel two images genuinely share is not smoothed.
     probe_material = [classes[front_material]]
     probe_owner = [front_owner]
+    probe_shift = [front_shift]
     for dx in range(2):
         for dy in range(2):
             for dz in range(2):
@@ -773,6 +829,7 @@ def _smooth_component_lattice(
                 )
                 probe_material.append(np.broadcast_to(classes[corner_material[index]], shape))
                 probe_owner.append(np.broadcast_to(corner_owner[index], shape))
+                probe_shift.append(np.broadcast_to(corner_shift[index], shape))
     stacked = np.stack(probe_material, axis=0)
     ordered = np.sort(stacked, axis=0)
     distinct = 1 + np.count_nonzero(np.diff(ordered, axis=0), axis=0)
@@ -789,6 +846,7 @@ def _smooth_component_lattice(
     cells = np.nonzero(candidate)
     probe_classes = stacked[:, candidate]
     owners = np.stack(probe_owner, axis=0)[:, candidate]
+    probe_shifts = np.stack(probe_shift, axis=0)[:, candidate]
     low_class = ordered[0][candidate]
     high_class = ordered[-1][candidate]
 
@@ -799,6 +857,7 @@ def _smooth_component_lattice(
     owner_entry = owners[winner, np.arange(count)]
     owner_class = probe_classes[winner, np.arange(count)]
     other_class = np.where(owner_class == low_class, high_class, low_class)
+    owner_image = unpack_shift_codes(probe_shifts[winner, np.arange(count)], periods)
 
     lower = np.stack([bounds[axis][0][cells[axis]] for axis in range(3)], axis=-1)
     upper = np.stack([bounds[axis][1][cells[axis]] for axis in range(3)], axis=-1)
@@ -806,6 +865,7 @@ def _smooth_component_lattice(
 
     fill = np.zeros(count, dtype=float)
     normal = np.zeros((count, 3), dtype=float)
+    multi_shift = np.zeros(count, dtype=bool)
     for entry_index in np.unique(owner_entry):
         if entry_index < 0:
             continue
@@ -813,17 +873,49 @@ def _smooth_component_lattice(
         entry = scene.entries[int(entry_index)]
         if isinstance(entry.obj, SimulationVolume):
             continue
-        fill[selected] = _owner_fill_fraction(
-            entry.obj, lower[selected], upper[selected], supersample, degenerate_axis, stats
-        )
+        box_lower, box_upper = lower[selected], upper[selected]
+        # The fill fraction sums over the images that reach this pixel. They are translates of one
+        # shape by whole periods, so they are disjoint and the sum is exact; with no image in range
+        # it collapses to the single term the non-periodic path computes. The candidate set is
+        # pruned against the boxes actually being filled, so an object nowhere near a periodic face
+        # pays nothing and its supersampling count is unchanged.
+        contributions = 0
+        total = np.zeros(box_lower.shape[0], dtype=float)
+        for image in entry_shifts(entry.bounds, periodic_axes, periods):
+            if np.any(image != 0.0) and not _image_reaches(entry.bounds, image, box_lower, box_upper):
+                continue
+            moved = bool(np.any(image != 0.0))
+            part = _owner_fill_fraction(
+                entry.obj,
+                box_lower - image if moved else box_lower,
+                box_upper - image if moved else box_upper,
+                supersample,
+                degenerate_axis,
+                stats,
+            )
+            total += part
+            contributions = contributions + (part > _FILL_EPS).astype(np.int32)
+        fill[selected] = np.clip(total, 0.0, 1.0)
+        multi_shift[selected] = np.asarray(contributions) >= 2
+        # The normal belongs to one surface, and the right one is the surface bounding the front
+        # material at this pixel: the image the winning probe came from. Meep takes it the same way,
+        # in the frame of the object get_front_object returned.
+        image_shift = owner_image[selected]
+        shifted = bool(np.any(image_shift != 0.0))
+        probe_center = center[selected] - image_shift if shifted else center[selected]
         ignore = tuple(sorted(set(ignore_global) | set(_spanning_axes(entry, grid))))
-        local = np.asarray(entry.obj.normal_at(center[selected], ignore_axes=ignore), dtype=float)
+        local = np.asarray(entry.obj.normal_at(probe_center, ignore_axes=ignore), dtype=float)
         missing = np.linalg.norm(local, axis=-1) <= 0.0
         if missing.any():
             stats.num_gradient_normal_fallbacks += int(np.count_nonzero(missing))
             subset = np.nonzero(selected)[0][missing]
+            fallback_shift = owner_image[subset]
             local[missing] = _gradient_normal_from_fill(
-                entry.obj, lower[subset], upper[subset], supersample, degenerate_axis
+                entry.obj,
+                lower[subset] - fallback_shift,
+                upper[subset] - fallback_shift,
+                supersample,
+                degenerate_axis,
             )
         for axis in ignore_global:
             local[:, axis] = 0.0
@@ -852,6 +944,11 @@ def _smooth_component_lattice(
         positive[anisotropic_cells] = smallest > 0.0
     stats.num_metal_skips += int(np.count_nonzero(~positive))
     usable &= positive
+
+    # Two images of one object inside one pixel means two surfaces with opposite normals there.
+    # That is the three-material pathology in a two-material pixel: count it, keep the point sample.
+    stats.num_multi_shift_pixels += int(np.count_nonzero(multi_shift))
+    usable &= ~multi_shift
 
     degenerate_fill = (fill <= _FILL_EPS) | (fill >= 1.0 - _FILL_EPS)
     stats.num_degenerate_fill_fallbacks += int(np.count_nonzero(degenerate_fill))
@@ -919,9 +1016,11 @@ def smooth_property_on_yee_pixels(
     property_kind: str,
     front_material: np.ndarray,
     front_owner: np.ndarray,
+    front_shift: np.ndarray,
     inverse_property: np.ndarray,
     supersample: int,
     full_tensor: bool,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
 ) -> tuple[np.ndarray, SmoothingStats]:
     """Overwrite the point-sampled inverse property at every two-material Yee pixel with its blend.
 
@@ -936,12 +1035,14 @@ def smooth_property_on_yee_pixels(
         property_kind (str): ``"permittivity"`` or ``"permeability"``.
         front_material (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled global material index.
         front_owner (np.ndarray): ``(3, Nx, Ny, Nz)`` point-sampled winning entry index.
+        front_shift (np.ndarray): ``(3, Nx, Ny, Nz)`` packed code of the winning periodic image.
         inverse_property (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` point-sampled inverse property,
             modified in place and returned.
         supersample (int): Samples per axis where no analytic overlap or normal is available.
         full_tensor (bool): Write the full Kottke row instead of the diagonal entry. Must match the
             array's own tier: a 9-component array is always written as rows, because entry ``(c, c)``
             of a row-major 3x3 sits at index ``4*c``, not at ``c``.
+        periodic_axes (tuple): Axes carrying periodic images, invariant axes already excluded.
 
     Returns:
         tuple: ``(inverse_property, stats)``.
@@ -958,6 +1059,7 @@ def smooth_property_on_yee_pixels(
     stats = SmoothingStats()
     classes = _material_value_classes(scene, property_kind)
     scalar, isotropic, tensors, asymmetric = _property_tensors(scene, property_kind)
+    periods = grid_periods(grid)
 
     for component in range(3):
         _smooth_component_lattice(
@@ -967,6 +1069,9 @@ def smooth_property_on_yee_pixels(
             component=component,
             front_material=front_material[component],
             front_owner=front_owner[component],
+            front_shift=front_shift[component],
+            periodic_axes=periodic_axes,
+            periods=periods,
             classes=classes,
             scalar=scalar,
             isotropic=isotropic,
@@ -989,8 +1094,12 @@ def smooth_inverse_permittivity_on_yee_pixels(
     inv_permittivities: np.ndarray,
     supersample: int,
     full_tensor: bool,
+    front_shift: np.ndarray | None = None,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
 ) -> tuple[np.ndarray, SmoothingStats]:
     """Smooth the permittivity on the three E lattices; see :func:`smooth_property_on_yee_pixels`."""
+    if front_shift is None:
+        front_shift = np.full(front_owner.shape, SHIFT_IDENTITY, dtype=np.int8)
     return smooth_property_on_yee_pixels(
         scene=scene,
         grid=grid,
@@ -998,7 +1107,9 @@ def smooth_inverse_permittivity_on_yee_pixels(
         property_kind="permittivity",
         front_material=front_material,
         front_owner=front_owner,
+        front_shift=front_shift,
         inverse_property=inv_permittivities,
         supersample=supersample,
         full_tensor=full_tensor,
+        periodic_axes=periodic_axes,
     )

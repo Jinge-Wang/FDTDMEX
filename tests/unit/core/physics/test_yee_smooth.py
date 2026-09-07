@@ -1266,3 +1266,269 @@ def test_the_dropped_off_diagonal_terms_are_counted():
         dropped[full_tensor] = _smoothing_stats(info)["num_offdiagonal_dropped"]
     assert dropped[False] > 0
     assert dropped[True] == 0
+
+
+# ---------------------------------------------------------------------------
+# (C) Periodic images across a Bloch/periodic face
+# ---------------------------------------------------------------------------
+
+SEAM_D = 25e-9
+SEAM_N = 40
+SEAM_RADIUS = 7.3 * SEAM_D
+
+
+def _periodic_scene(objects_fn, sampling: str, tag: str, shape=(SEAM_N, SEAM_N, 1), override=None, **kwargs):
+    """A fully periodic (or partly periodic) box with whatever ``objects_fn`` puts in it."""
+    config = _config(SEAM_D, sampling, **kwargs)
+    volume = _volume(shape, f"v{tag}")
+    if override is None:
+        bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(boundary_type="periodic")
+    else:
+        bound_cfg = fdtdx.BoundaryConfig.from_uniform_bound(
+            boundary_type="pml", thickness=4, override_types=override
+        )
+    boundaries, constraints = fdtdx.boundary_objects_from_config(bound_cfg, volume)
+    container, arrays, _, resolved, info = fdtdx.place_objects(
+        [volume, *objects_fn(tag), *boundaries.values()], config, constraints
+    )
+    return container, arrays, resolved, info
+
+
+def _seam_disk(offset: float, permeability: float = 1.0):
+    def make(tag):
+        return [
+            Cylinder(
+                axis=2,
+                radius=SEAM_RADIUS,
+                material_name="core",
+                materials={"core": Material(permittivity=EPS_CORE, permeability=permeability)},
+                partial_grid_shape=(None, None, 1),
+                partial_real_position=(offset, 0.0, 0.0),
+                placement_order=1,
+                name=f"c{tag}",
+            )
+        ]
+
+    return make
+
+
+def test_the_invariant_axis_is_excluded_from_the_image_axes():
+    """fdtdx's 2-D convention is a single periodic cell on z; that axis must not gain images.
+
+    Every 2-D case reports a periodic z, so a periodic flag on its own is not enough. This is the
+    guard, tested where it can actually fail rather than through a scene that is insensitive to it.
+    """
+    from fdtdx.core.physics.geometry_raster import periodic_image_axes
+
+    flat = UniformGrid(spacing=SEAM_D).resolve((SEAM_N, SEAM_N, 1))
+    assert periodic_image_axes(flat, (False, False, True)) == (False, False, False)
+    assert periodic_image_axes(flat, (True, True, True)) == (True, True, False)
+    thick = UniformGrid(spacing=SEAM_D).resolve((SEAM_N, SEAM_N, 4))
+    assert periodic_image_axes(thick, (False, False, True)) == (False, False, True)
+
+
+@pytest.mark.parametrize("sampling", ["yee", "yee_smooth"])
+def test_cylinder_across_a_bloch_seam_matches_the_centred_cylinder(sampling):
+    """A disk cut in half by a periodic face is the same disk, rolled — for eps and for mu.
+
+    Scene A puts the disk in the middle of the domain; scene B puts its centre on the ``x`` seam, so
+    the shape genuinely crosses it: the placed metric bounds stick out of the domain by the radius
+    and the missing half has to come back on the other side. With an even cell count the half-domain
+    roll is exact, so the two loads must agree.
+
+    Under ``"yee"`` the arrays are a bijective function of the point-sampled material index and the
+    agreement is bit for bit. Under ``"yee_smooth"`` it is not: the grid stores its edges in the
+    simulation dtype (float32), so the metric distance from a pixel to the object differs between
+    the two placements by up to one float32 ulp of an absolute coordinate — about 2e-6 of a cell —
+    and the fill fraction inherits it. A wrong image moves the answer by order one, not by 1e-6.
+    """
+    _, centred, _, centred_info = _periodic_scene(_seam_disk(0.0, 2.4), sampling, _tag())
+    container, seam, _, seam_info = _periodic_scene(
+        _seam_disk(-SEAM_N / 2 * SEAM_D, 2.4), sampling, _tag()
+    )
+    assert container.periodic_axes == (True, True, True)
+    placed = [o for o in container.object_list if o.name.startswith("c")][0]
+    volume_bounds = container.volume.metric_bounds
+    assert placed.metric_bounds[0][0] < volume_bounds[0][0], "the disk must actually cross the seam"
+
+    for name in ("inv_permittivities", "inv_permeabilities"):
+        rolled = np.roll(np.asarray(getattr(centred, name)), SEAM_N // 2, axis=1)
+        target = np.asarray(getattr(seam, name))
+        if sampling == "yee":
+            np.testing.assert_array_equal(rolled, target)
+        else:
+            np.testing.assert_allclose(rolled, target, rtol=1e-5, atol=0)
+
+    if sampling == "yee_smooth":
+        for key in ("smoothing", "smoothing_H"):
+            assert centred_info["yee_sampling_difference"][key] == seam_info["yee_sampling_difference"][key]
+
+
+def test_the_domain_edge_pixel_on_a_periodic_axis_is_the_full_dual_box():
+    """The clip at cell 0 goes away on a periodic axis, because the material below ``e[0]`` exists."""
+    grid = UniformGrid(spacing=SEAM_D).resolve((SEAM_N, SEAM_N, 1))
+    edges = np.asarray(grid.edges(0), dtype=float)
+    widths = np.diff(edges)
+    periodic = pixel_axis_bounds(grid, "E", 1, (True, False, False))[0]
+    clipped = pixel_axis_bounds(grid, "E", 1, (False, False, False))[0]
+    assert periodic[0][0] == pytest.approx(edges[0] - 0.5 * widths[0], rel=1e-12)
+    assert clipped[0][0] == pytest.approx(edges[0], rel=1e-12)
+    # The mirrored half uses w[0], the width the backward difference divides by, not the wrapped one.
+    assert periodic[1][0] - periodic[0][0] == pytest.approx(widths[0], rel=1e-12)
+    # Every pixel above the first is untouched by the change.
+    np.testing.assert_array_equal(periodic[0][1:], clipped[0][1:])
+    np.testing.assert_array_equal(periodic[1], clipped[1])
+
+
+def test_a_two_d_periodic_axis_gets_no_images():
+    """Loading a standard 2-D scene with and without its derived periodic axes must be identical.
+
+    Self-contained rather than pinned to recorded literals: literals generated after a change lock
+    in whatever the change produced, whereas the pair of loads here compares the feature against its
+    own absence.
+    """
+    from fdtdx.core.physics.geometry_raster import load_scene_on_yee_lattices
+
+    container, _, resolved, _ = _periodic_scene(
+        _seam_disk(0.13 * SEAM_D), "yee_smooth", _tag(), override={"min_z": "periodic", "max_z": "periodic"}
+    )
+    assert container.periodic_axes == (False, False, True)
+
+    def load(periodic_axes):
+        return load_scene_on_yee_lattices(
+            static_objects=container.static_material_objects,
+            grid=resolved.resolved_grid,
+            volume_shape=(SEAM_N, SEAM_N, 1),
+            num_perm_components=3,
+            num_permeability_components=None,
+            num_electric_cond_components=None,
+            num_magnetic_cond_components=None,
+            num_dispersive_poles=0,
+            num_disp_components=3,
+            num_disp_coupling_components=3,
+            conductivity_spacing=None,
+            time_step_duration=1e-17,
+            smooth=True,
+            supersample=8,
+            periodic_axes=periodic_axes,
+        )
+
+    derived = load(container.periodic_axes)
+    disabled = load((False, False, False))
+    np.testing.assert_array_equal(derived.inv_permittivities, disabled.inv_permittivities)
+    np.testing.assert_array_equal(derived.front_E, disabled.front_E)
+    assert derived.sampling_difference["smoothing"] == disabled.sampling_difference["smoothing"]
+
+
+def test_a_seam_pixel_reached_by_two_images_is_counted_not_smoothed():
+    """A pixel two images both reach holds two faces with opposite normals; no blend describes it.
+
+    A slab of extent ``L - w/2`` on a periodic axis leaves a quarter cell of background at each end,
+    so the domain-edge pixel — the full dual box, half a cell either side of the first edge — sees
+    the slab's near face and the wrapped far face at once. That is the only geometry where the fill
+    fraction genuinely needs the sum over images, and it is exactly where the single-normal blend
+    stops being defined.
+    """
+    span = SEAM_N * SEAM_D
+
+    def slab(tag):
+        return [
+            UniformMaterialObject(
+                material=Material(permittivity=EPS_CORE),
+                partial_real_shape=(span - 0.5 * SEAM_D, None, SEAM_D),
+                partial_real_position=(0.0, 0.0, 0.0),
+                placement_order=1,
+                name=f"s{tag}",
+            )
+        ]
+
+    container, arrays, resolved, info = _periodic_scene(slab, "yee_smooth", _tag())
+    _, point, _, _ = _periodic_scene(slab, "yee", _tag())
+    stats = _smoothing_stats(info)
+    assert stats["num_multi_shift_pixels"] > 0
+    smoothed = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    sampled = np.asarray(point.inv_permittivities, dtype=np.float64)
+    assert np.count_nonzero(smoothed != sampled) > 0
+
+    grid = resolved.resolved_grid
+    placed = [o for o in container.object_list if o.name.startswith("s")][0]
+    low, high = placed.metric_bounds[0]
+    edges = np.asarray(grid.edges(0), dtype=float)
+    period = float(edges[-1] - edges[0])
+    found = 0
+    for component in range(3):
+        lower, upper = pixel_axis_bounds(grid, "E", component, container.periodic_axes)[0]
+        reached = sum(
+            (np.minimum(upper, high + image * period) - np.maximum(lower, low + image * period)) > 0.0
+            for image in (-1.0, 0.0, 1.0)
+        )
+        two_images = np.flatnonzero(reached >= 2)
+        found += two_images.size
+        np.testing.assert_array_equal(smoothed[component][two_images], sampled[component][two_images])
+    assert found > 0, "the slab must reach at least one pixel with two of its images"
+
+
+def test_the_seam_crossing_rim_recovers_the_wrapped_normal():
+    """Every smoothed rim pixel matches the fill and the normal of the *wrapped* disk, analytically.
+
+    The counters cannot test this: a cylinder answers ``normal_at`` everywhere, so a normal taken in
+    the wrong image leaves both fallback counters at zero and the test would pass for the wrong
+    reason. Here the expected value is built from the nearest periodic image of the centre, and the
+    same value built from the un-shifted centre is asserted to be wildly different, so the test can
+    only pass if the loader used the right image.
+    """
+    _, point, resolved, _ = _periodic_scene(_seam_disk(-SEAM_N / 2 * SEAM_D), "yee", _tag())
+    container, smooth, _, _ = _periodic_scene(_seam_disk(-SEAM_N / 2 * SEAM_D), "yee_smooth", _tag())
+    grid = resolved.resolved_grid
+    placed = [o for o in container.object_list if o.name.startswith("c")][0]
+    centre = tuple(0.5 * (b[0] + b[1]) for b in placed.metric_bounds)
+    edges = np.asarray(grid.edges(0), dtype=float)
+    period = float(edges[-1] - edges[0])
+
+    bounds = pixel_axis_bounds(grid, "E", 0, container.periodic_axes)
+    x0, x1 = np.meshgrid(bounds[0][0], bounds[1][0], indexing="ij")[0], None
+    x0, y0 = np.meshgrid(bounds[0][0], bounds[1][0], indexing="ij")
+    x1, y1 = np.meshgrid(bounds[0][1], bounds[1][1], indexing="ij")
+    centre_x, centre_y = 0.5 * (x0 + x1), 0.5 * (y0 + y1)
+
+    nearest = None
+    for image in (-1.0, 0.0, 1.0):
+        offset = centre_x - (centre[0] + image * period)
+        nearest = offset if nearest is None else np.where(np.abs(offset) < np.abs(nearest), offset, nearest)
+    delta_y = centre_y - centre[1]
+
+    fill = np.clip(
+        circle_rectangle_area(
+            x0 - (centre_x - nearest), x1 - (centre_x - nearest), y0 - centre[1], y1 - centre[1], SEAM_RADIUS
+        )
+        / ((x1 - x0) * (y1 - y0)),
+        0.0,
+        1.0,
+    )
+    arithmetic = fill * EPS_CORE + (1 - fill) * EPS_BG
+    harmonic = fill / EPS_CORE + (1 - fill) / EPS_BG
+
+    def prediction(offset_x):
+        length = np.hypot(offset_x, delta_y)
+        n_x = np.where(length > 0, offset_x / np.where(length > 0, length, 1.0), 0.0)
+        return n_x**2 * harmonic + (1 - n_x**2) / arithmetic
+
+    got = np.asarray(smooth.inv_permittivities, dtype=np.float64)[0][:, :, 0]
+    sampled = np.asarray(point.inv_permittivities, dtype=np.float64)[0][:, :, 0]
+    moved = got != sampled
+    assert int(np.count_nonzero(moved)) > 20
+    np.testing.assert_allclose(got[moved], prediction(nearest)[moved], rtol=1e-5, atol=0)
+    # The same prediction from the un-shifted centre is not close, so the test really pins the image.
+    assert np.max(np.abs(got - prediction(centre_x - centre[0]))[moved]) > 1e-2
+
+
+def test_an_object_longer_than_two_periods_is_rejected():
+    """One lattice vector each way is libctl's own bound; beyond two periods it stops covering."""
+    from fdtdx.core.physics.geometry_raster import entry_shifts
+
+    bounds = ((0.0, 5.0), (0.0, 1.0), (0.0, 1.0))
+    assert len(entry_shifts(bounds, (False, False, False), (10.0, 10.0, 10.0))) == 1
+    assert len(entry_shifts(bounds, (True, False, False), (10.0, 10.0, 10.0))) == 3
+    assert len(entry_shifts(bounds, (True, True, False), (10.0, 10.0, 10.0))) == 9
+    with pytest.raises(ValueError, match="exceeds two periods"):
+        entry_shifts(((0.0, 25.0), (0.0, 1.0), (0.0, 1.0)), (True, False, False), (10.0, 10.0, 10.0))

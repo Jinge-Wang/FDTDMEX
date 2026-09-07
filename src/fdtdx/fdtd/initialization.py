@@ -906,6 +906,11 @@ def _init_arrays(
             supersample=config.yee_smooth_supersample,
             full_tensor=config.yee_smooth_full_tensor,
             report_box_difference=config.yee_sampling_diagnostics_enabled,
+            # The same predicate the field halo uses, so the material periodicity and the field
+            # periodicity cannot disagree. Symmetry is the one case where they could -- a symmetry
+            # axis keeps its far-side periodic boundary while its min-side halo is deliberately not
+            # wrapped -- and symmetry is rejected outright for every yee sampling mode above.
+            periodic_axes=objects.periodic_axes,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
         full_index = (slice(None), slice(None), slice(None), slice(None))

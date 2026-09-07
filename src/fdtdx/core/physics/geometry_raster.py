@@ -245,6 +245,105 @@ def _axis_window(coords: np.ndarray, lower: float, upper: float) -> tuple[int, i
     return start, max(start, stop)
 
 
+#: Packed code of the identity periodic shift, ``9*(0+1) + 3*(0+1) + (0+1)``.
+SHIFT_IDENTITY = 13
+
+
+def grid_periods(grid: RectilinearGrid) -> tuple[float, float, float]:
+    """Metric period of each axis: the full extent of the grid, which is what wrap padding wraps."""
+    periods = []
+    for axis in range(3):
+        edges = np.asarray(grid.edges(axis), dtype=float)
+        periods.append(float(edges[-1] - edges[0]))
+    return periods[0], periods[1], periods[2]
+
+
+def periodic_image_axes(
+    grid: RectilinearGrid,
+    periodic_axes: tuple[bool, bool, bool],
+) -> tuple[bool, bool, bool]:
+    """Axes that get periodic images of the geometry: periodic *and* actually resolved.
+
+    A periodic flag alone is not enough. fdtdx's 2-D convention is one cell with periodic boundaries
+    on the third axis, so every 2-D scene reports a periodic z. Replicating objects along an axis
+    the simulation is invariant along would put images outside the one-cell-thick shapes, report a
+    spurious second material and move the statistics of every recorded 2-D run.
+
+    Args:
+        grid (RectilinearGrid): The resolved simulation grid.
+        periodic_axes (tuple): Which axes carry a periodic or Bloch boundary.
+
+    Returns:
+        tuple: The three flags with the invariant axes cleared.
+    """
+    return tuple(bool(periodic_axes[axis]) and grid.shape[axis] > 1 for axis in range(3))  # type: ignore[return-value]
+
+
+def entry_shifts(
+    bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
+    periodic_axes: tuple[bool, bool, bool],
+    periods: tuple[float, float, float],
+) -> list[np.ndarray]:
+    """Candidate periodic translations of one object, the identity first.
+
+    One lattice vector each way per periodic axis, which is libctl's own bound (``LOOP_PERIODIC``
+    runs every axis from -1 to +1 and is the only periodic search in the library). A candidate is
+    *not* pruned against the domain here: on a periodic axis the evaluated coordinates reach below
+    the first edge, so an image that misses the domain can still cover part of the domain-edge
+    pixel. The window test the caller already does prunes it for free against the coordinates
+    actually being evaluated.
+
+    Args:
+        bounds (tuple): The object's own per-axis ``(lower, upper)`` metric bounds.
+        periodic_axes (tuple): Axes that get images, from :func:`periodic_image_axes`.
+        periods (tuple): Metric period per axis.
+
+    Returns:
+        list: ``(3,)`` float arrays; the first is always the zero shift.
+
+    Raises:
+        ValueError: If an object is more than two periods long on a periodic axis, where one
+            lattice vector each way no longer covers it.
+    """
+    per_axis: list[list[float]] = []
+    for axis in range(3):
+        options = [0.0]
+        if periodic_axes[axis] and periods[axis] > 0.0:
+            extent = bounds[axis][1] - bounds[axis][0]
+            if extent > 2.0 * periods[axis] * (1.0 + 1e-9):
+                raise ValueError(
+                    f"Object extent {extent} on periodic axis {axis} exceeds two periods "
+                    f"({periods[axis]}); one lattice vector each way no longer covers the domain."
+                )
+            options.extend([-periods[axis], periods[axis]])
+        per_axis.append(options)
+    shifts = []
+    for shift_x in per_axis[0]:
+        for shift_y in per_axis[1]:
+            for shift_z in per_axis[2]:
+                shifts.append(np.array([shift_x, shift_y, shift_z], dtype=float))
+    return shifts
+
+
+def shift_code(shift: np.ndarray, periods: tuple[float, float, float]) -> int:
+    """Pack a shift as ``9*(mx+1) + 3*(my+1) + (mz+1)``; the identity is :data:`SHIFT_IDENTITY`."""
+    code = 0
+    for axis in range(3):
+        step = 0 if periods[axis] <= 0.0 else int(round(float(shift[axis]) / periods[axis]))
+        code = code * 3 + (step + 1)
+    return code
+
+
+def unpack_shift_codes(codes: np.ndarray, periods: tuple[float, float, float]) -> np.ndarray:
+    """Metric shift per entry, from the packed codes of :func:`shift_code`."""
+    packed = np.asarray(codes, dtype=np.int64)
+    out = np.zeros((packed.shape[0], 3), dtype=float)
+    out[:, 0] = (packed // 9 - 1) * periods[0]
+    out[:, 1] = ((packed // 3) % 3 - 1) * periods[1]
+    out[:, 2] = (packed % 3 - 1) * periods[2]
+    return out
+
+
 def _entry_material_at(entry: SceneEntry, points: np.ndarray) -> np.ndarray:
     """Global material index of one entry at each point (constant for every object today)."""
     obj = entry.obj
@@ -257,6 +356,8 @@ def _entry_material_at(entry: SceneEntry, points: np.ndarray) -> np.ndarray:
 def front_material_indices(
     scene: Scene,
     coords: tuple[np.ndarray, np.ndarray, np.ndarray],
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+    periods: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> np.ndarray:
     """Resolve, at every lattice point, the material of the highest-priority object containing it.
 
@@ -273,55 +374,85 @@ def front_material_indices(
         np.ndarray: ``int32`` array of shape ``(len(x), len(y), len(z))`` with global material
         indices.
     """
-    return front_indices(scene, coords)[0]
+    return front_indices(scene, coords, periodic_axes, periods)[0]
 
 
 def front_indices(
     scene: Scene,
     coords: tuple[np.ndarray, np.ndarray, np.ndarray],
-) -> tuple[np.ndarray, np.ndarray]:
-    """Resolve both the material and the winning object at every lattice point.
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+    periods: tuple[float, float, float] = (0.0, 0.0, 0.0),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Resolve the material, the winning object and its periodic image at every lattice point.
 
     Same pass as :func:`front_material_indices`, which is a thin wrapper over this. The second
     output is the winning entry's position in ``scene.entries`` (its priority), which the sub-pixel
     smoothing step needs to know *which shape* bounds the material inside a pixel — a material index
-    alone does not identify an object.
+    alone does not identify an object. The third says which periodic image of that shape won, which
+    the smoothing step needs to take the fill fraction and the normal in the right frame.
+
+    On a periodic axis every object is also tested one lattice vector each way. The object itself is
+    never moved: its bounding interval is shifted to window the lattice, and the query points are
+    shifted back into the object's own frame, which is what libctl and Meep both do. An object and
+    its images are one entry with one priority, so they cannot outrank each other, and the ascending
+    write order is unchanged.
 
     Args:
         scene (Scene): The scene from :func:`build_scene`.
         coords (tuple): The three 1-D lattice coordinate arrays.
+        periodic_axes (tuple): Axes to replicate along, from :func:`periodic_image_axes`.
+        periods (tuple): Metric period per axis, from :func:`grid_periods`.
 
     Returns:
-        tuple: ``(material_index, entry_index)``, both ``int32`` of shape
-        ``(len(x), len(y), len(z))``. Points claimed by no object carry the background material and
-        entry ``-1``.
+        tuple: ``(material_index, entry_index, shift_code)``, the first two ``int32`` and the third
+        ``int8``, all of shape ``(len(x), len(y), len(z))``. Points claimed by no object carry the
+        background material, entry ``-1`` and the identity shift.
     """
     shape = (coords[0].size, coords[1].size, coords[2].size)
     front = np.full(shape, scene.background_index, dtype=np.int32)
     owner = np.full(shape, -1, dtype=np.int32)
+    shifts = np.full(shape, SHIFT_IDENTITY, dtype=np.int8)
+    # Nudge first, then subtract the shift. A shift is an exact translation by one period, so
+    # (x + tol) - L carries the same +tol offset relative to the image's faces as x + tol does
+    # relative to the original's; the half-open convention is then identical in every image. Doing
+    # it the other way round would compute the tolerance from the shifted array and could round
+    # differently at the seam.
     coords = _nudge_off_ties(coords)
 
     for entry in scene.entries:
-        windows = [_axis_window(coords[axis], entry.bounds[axis][0], entry.bounds[axis][1]) for axis in range(3)]
-        sizes = [w[1] - w[0] for w in windows]
-        if any(size == 0 for size in sizes):
-            continue
-        plane = max(1, sizes[1] * sizes[2])
-        chunk = max(1, min(sizes[0], _CHUNK_POINTS // plane))
-        y_coords = coords[1][windows[1][0] : windows[1][1]]
-        z_coords = coords[2][windows[2][0] : windows[2][1]]
-        for begin in range(windows[0][0], windows[0][1], chunk):
-            end = min(begin + chunk, windows[0][1])
-            x_coords = coords[0][begin:end]
-            block = np.stack(np.meshgrid(x_coords, y_coords, z_coords, indexing="ij"), axis=-1)
-            mask = np.asarray(entry.obj.contains(block), dtype=bool)
-            if not mask.any():
+        for shift in entry_shifts(entry.bounds, periodic_axes, periods):
+            moved = bool(np.any(shift != 0.0))
+            windows = [
+                _axis_window(coords[axis], entry.bounds[axis][0] + shift[axis], entry.bounds[axis][1] + shift[axis])
+                for axis in range(3)
+            ]
+            sizes = [w[1] - w[0] for w in windows]
+            if any(size == 0 for size in sizes):
                 continue
-            target = (slice(begin, end), slice(windows[1][0], windows[1][1]), slice(windows[2][0], windows[2][1]))
-            values = _entry_material_at(entry, block)
-            front[target] = np.where(mask, values, front[target])
-            owner[target] = np.where(mask, np.int32(entry.priority), owner[target])
-    return front, owner
+            code = np.int8(shift_code(shift, periods))
+            plane = max(1, sizes[1] * sizes[2])
+            chunk = max(1, min(sizes[0], _CHUNK_POINTS // plane))
+            y_coords = coords[1][windows[1][0] : windows[1][1]]
+            z_coords = coords[2][windows[2][0] : windows[2][1]]
+            for begin in range(windows[0][0], windows[0][1], chunk):
+                end = min(begin + chunk, windows[0][1])
+                x_coords = coords[0][begin:end]
+                block = np.stack(np.meshgrid(x_coords, y_coords, z_coords, indexing="ij"), axis=-1)
+                if moved:
+                    block = block - shift
+                mask = np.asarray(entry.obj.contains(block), dtype=bool)
+                if not mask.any():
+                    continue
+                target = (
+                    slice(begin, end),
+                    slice(windows[1][0], windows[1][1]),
+                    slice(windows[2][0], windows[2][1]),
+                )
+                values = _entry_material_at(entry, block)
+                front[target] = np.where(mask, values, front[target])
+                owner[target] = np.where(mask, np.int32(entry.priority), owner[target])
+                shifts[target] = np.where(mask, code, shifts[target])
+    return front, owner, shifts
 
 
 def box_mode_material_indices(
@@ -447,6 +578,7 @@ def load_scene_on_yee_lattices(
     supersample: int = 8,
     full_tensor: bool = False,
     report_box_difference: bool = False,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -471,6 +603,11 @@ def load_scene_on_yee_lattices(
             answer analytically.
         full_tensor (bool): Request the 9-component tier. The row form is used whenever
             ``num_perm_components`` is 9, however that tier was reached.
+        periodic_axes (tuple): Which axes carry a periodic or Bloch boundary. An object crossing
+            such a face is also evaluated one lattice vector each way, so it reappears on the other
+            side, and the domain-edge smoothing pixel becomes the full dual box instead of being
+            clipped. An axis the simulation is invariant along is excluded, since fdtdx's 2-D
+            convention is a single periodic cell there.
         report_box_difference (bool): Also rasterise the scene the legacy ``"box"`` way and count
             how many Yee points the two modes disagree on. Off by default: it is a second pass over
             every object plus another ``int32`` copy of the domain, and nothing in the simulation
@@ -482,18 +619,27 @@ def load_scene_on_yee_lattices(
     """
     scene = build_scene(static_objects)
     materials = scene.materials
+    image_axes = periodic_image_axes(grid, periodic_axes)
+    periods = grid_periods(grid)
 
     need_H = num_permeability_components is not None or num_magnetic_cond_components is not None
 
-    resolved_E = [front_indices(scene, yee_lattice_coordinates(grid, "E", c)) for c in range(3)]
+    resolved_E = [
+        front_indices(scene, yee_lattice_coordinates(grid, "E", c), image_axes, periods) for c in range(3)
+    ]
     front_E = np.stack([r[0] for r in resolved_E], axis=0)
     owner_E = np.stack([r[1] for r in resolved_E], axis=0)
+    shift_E = np.stack([r[2] for r in resolved_E], axis=0)
     front_H = None
     owner_H = None
+    shift_H = None
     if need_H:
-        resolved_H = [front_indices(scene, yee_lattice_coordinates(grid, "H", c)) for c in range(3)]
+        resolved_H = [
+            front_indices(scene, yee_lattice_coordinates(grid, "H", c), image_axes, periods) for c in range(3)
+        ]
         front_H = np.stack([r[0] for r in resolved_H], axis=0)
         owner_H = np.stack([r[1] for r in resolved_H], axis=0)
+        shift_H = np.stack([r[2] for r in resolved_H], axis=0)
 
     difference: dict[str, Any] = {"box_difference_reported": report_box_difference}
     if report_box_difference:
@@ -521,6 +667,8 @@ def load_scene_on_yee_lattices(
             property_kind="permittivity",
             front_material=front_E,
             front_owner=owner_E,
+            front_shift=shift_E,
+            periodic_axes=image_axes,
             inverse_property=inv_permittivities,
             # A 9-component array must always be written as the full Kottke row: entry (c, c) of a
             # row-major 3x3 lives at 4*c, not at c. The config flag's only job is to force the tier.
@@ -547,7 +695,7 @@ def load_scene_on_yee_lattices(
             # reaches this branch and is untouched by construction.
             from fdtdx.core.physics.geometry_smooth import smooth_property_on_yee_pixels
 
-            assert owner_H is not None
+            assert owner_H is not None and shift_H is not None
             inv_permeabilities, permeability_stats = smooth_property_on_yee_pixels(
                 scene=scene,
                 grid=grid,
@@ -555,6 +703,8 @@ def load_scene_on_yee_lattices(
                 property_kind="permeability",
                 front_material=front_H,
                 front_owner=owner_H,
+                front_shift=shift_H,
+                periodic_axes=image_axes,
                 inverse_property=inv_permeabilities,
                 supersample=supersample,
                 full_tensor=num_permeability_components == 9,
