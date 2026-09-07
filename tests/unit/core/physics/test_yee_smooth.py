@@ -18,6 +18,7 @@ from fdtdx.core.grid import RectilinearGrid, UniformGrid
 from fdtdx.core.physics.geometry_smooth import (
     circle_rectangle_area,
     kottke_inverse_permittivity,
+    kottke_tensor,
     pixel_axis_bounds,
     polygons_rectangle_area,
 )
@@ -980,3 +981,288 @@ def test_the_full_tensor_flag_widens_the_permeability_too():
     assert np.asarray(arrays.inv_permittivities).shape[0] == 9
     assert np.asarray(arrays.inv_permeabilities).shape[0] == 9
     assert info["yee_sampling_difference"]["smoothing_H"]["num_smoothed"] > 0
+
+
+# ---------------------------------------------------------------------------
+# (A) The anisotropic blend: the tau transform
+# ---------------------------------------------------------------------------
+
+
+def _reference_frame(normal: np.ndarray) -> np.ndarray:
+    """Meep's rotation, written out for one normal with a Python branch instead of ``np.where``."""
+    if abs(normal[0]) > 1e-2 or abs(normal[1]) > 1e-2:
+        tangent = np.array([normal[1], -normal[0], 0.0])
+    else:
+        tangent = np.array([0.0, -normal[2], normal[1]])
+    tangent = tangent / np.linalg.norm(tangent)
+    return np.array([normal, np.cross(tangent, normal), tangent])
+
+
+def _reference_tau(m: np.ndarray) -> np.ndarray:
+    """Kottke Eq. (4), the six entries written as scalars."""
+    return np.array(
+        [
+            [-1 / m[0, 0], m[0, 1] / m[0, 0], m[0, 2] / m[0, 0]],
+            [m[0, 1] / m[0, 0], m[1, 1] - m[0, 1] ** 2 / m[0, 0], m[1, 2] - m[0, 1] * m[0, 2] / m[0, 0]],
+            [m[0, 2] / m[0, 0], m[1, 2] - m[0, 1] * m[0, 2] / m[0, 0], m[2, 2] - m[0, 2] ** 2 / m[0, 0]],
+        ]
+    )
+
+
+def _reference_tau_inverse(d: np.ndarray) -> np.ndarray:
+    """Kottke Eq. (23): the same six entries with the two ``0j`` signs flipped."""
+    return np.array(
+        [
+            [-1 / d[0, 0], -d[0, 1] / d[0, 0], -d[0, 2] / d[0, 0]],
+            [-d[0, 1] / d[0, 0], d[1, 1] - d[0, 1] ** 2 / d[0, 0], d[1, 2] - d[0, 1] * d[0, 2] / d[0, 0]],
+            [-d[0, 2] / d[0, 0], d[1, 2] - d[0, 1] * d[0, 2] / d[0, 0], d[2, 2] - d[0, 2] ** 2 / d[0, 0]],
+        ]
+    )
+
+
+def _reference_kottke(normal, eps_hi, eps_lo, fill, forward_rotation="correct"):
+    """Rotate, transform, average, undo, invert, rotate back — no call into the production module."""
+    rot = _reference_frame(np.asarray(normal, dtype=float))
+    if forward_rotation == "correct":
+        hi, lo = rot @ eps_hi @ rot.T, rot @ eps_lo @ rot.T
+    else:  # the transposed forward rotation, to show what the isotropic reduction cannot see
+        hi, lo = rot.T @ eps_hi @ rot, rot.T @ eps_lo @ rot
+    averaged = fill * _reference_tau(hi) + (1 - fill) * _reference_tau(lo)
+    return rot.T @ np.linalg.inv(_reference_tau_inverse(averaged)) @ rot
+
+
+def _unit_normal(degrees: float) -> np.ndarray:
+    radians = np.deg2rad(degrees)
+    return np.array([np.cos(radians), np.sin(radians), 0.0])
+
+
+@pytest.mark.parametrize("degrees", [0.0, 30.0, 45.0, 60.0, 90.0])
+@pytest.mark.parametrize("fill", [0.05, 0.5, 0.95])
+def test_anisotropic_path_reduces_to_the_isotropic_formula(degrees, fill):
+    """Two scalar-times-identity tensors must give exactly the formula the scalar path computes.
+
+    ``tau(a I) = diag(-1/a, a, a)``, so the average is ``diag(-<1/eps>, <eps>, <eps>)`` and the
+    inverse transform gives the harmonic mean along the normal and the arithmetic mean in the plane
+    — the ``n n^T <1/eps> + (I - n n^T)/<eps>`` the fork has always used. This is the derivation as
+    an executable check, not an assumption.
+    """
+    a, b = EPS_CORE, EPS_BG
+    normal = _unit_normal(degrees)[None, :]
+    tensor = kottke_tensor(normal, (a * np.eye(3))[None], (b * np.eye(3))[None], np.array([fill]))[0]
+    arithmetic = np.array([fill * a + (1 - fill) * b])
+    harmonic = np.array([fill / a + (1 - fill) / b])
+    for component in range(3):
+        row = kottke_inverse_permittivity(normal, arithmetic, harmonic, component, True)[0]
+        # An absolute floor as well as rtol: T[c, j] is exactly zero wherever n_c n_j is.
+        np.testing.assert_allclose(tensor[component], row, rtol=1e-13, atol=1e-15)
+
+
+def test_the_isotropic_reduction_does_not_pin_the_forward_rotation():
+    """The reduction of the test above is blind to transposing the forward rotation; this is not.
+
+    A multiple of the identity is invariant under any rotation, so the isotropic case cannot tell
+    ``R eps R^T`` from ``R^T eps R``. Only a genuinely anisotropic pair does, which is why the
+    check below exists alongside the reduction rather than instead of it.
+    """
+    eps_hi = np.diag([2.0, 3.0, 4.0])
+    eps_lo = np.diag([5.0, 1.0, 1.0])
+    normal, fill = _unit_normal(30.0), 0.4
+
+    isotropic_pair = (6.25 * np.eye(3), 2.085 * np.eye(3))
+    blind = np.max(
+        np.abs(
+            _reference_kottke(normal, *isotropic_pair, fill)
+            - _reference_kottke(normal, *isotropic_pair, fill, forward_rotation="transposed")
+        )
+    )
+    assert blind < 1e-14, "the isotropic case must be invariant, otherwise this test proves nothing"
+
+    correct = _reference_kottke(normal, eps_hi, eps_lo, fill)
+    transposed = _reference_kottke(normal, eps_hi, eps_lo, fill, forward_rotation="transposed")
+    assert np.max(np.abs(correct - transposed)) > 1e-2, "the anisotropic case must be able to tell"
+    got = kottke_tensor(normal[None], eps_hi[None], eps_lo[None], np.array([fill]))[0]
+    np.testing.assert_allclose(got, correct, rtol=1e-12, atol=1e-15)
+
+
+def test_diagonal_tensor_pixel_matches_a_hand_computed_tau_average():
+    """One pixel, two diagonal tensors, a tilted normal, against a literal computed independently.
+
+    The literal is kept as well as the reference arithmetic so that a later refactor of the
+    reference cannot silently follow the production code. Entry ``(2, 2)`` is checkable by hand: the
+    normal has no z component, so that direction is purely tangential and averages arithmetically,
+    giving ``1 / (0.4*4 + 0.6*1)``.
+    """
+    eps_hi = np.diag([2.0, 3.0, 4.0])
+    eps_lo = np.diag([5.0, 1.0, 1.0])
+    normal, fill = _unit_normal(30.0), 0.4
+    expected = np.array(
+        [
+            [0.3100917431192661, -0.0381368985152780, 0.0],
+            [-0.0381368985152781, 0.5865443425076453, 0.0],
+            [0.0, 0.0, 0.4545454545454545],
+        ]
+    )
+    got = kottke_tensor(normal[None], eps_hi[None], eps_lo[None], np.array([fill]))[0]
+    np.testing.assert_allclose(got, expected, rtol=1e-12, atol=1e-15)
+    np.testing.assert_allclose(got, _reference_kottke(normal, eps_hi, eps_lo, fill), rtol=1e-12, atol=1e-15)
+    assert got[2, 2] == pytest.approx(1.0 / (0.4 * 4.0 + 0.6 * 1.0), rel=1e-15)
+    np.testing.assert_allclose(got, got.T, rtol=0, atol=1e-15)
+
+
+def test_a_global_rotation_rotates_the_effective_tensor():
+    """Rotating both tensors *and* the normal by one rotation rotates the answer by the same one.
+
+    All three have to turn together: rotating only the tensors, or only one of them, changes the
+    physical problem and the answer moves by a per-cent, so a test that rotates less than everything
+    is testing nothing.
+    """
+    eps_hi = np.diag([2.0, 3.0, 4.0])
+    eps_lo = np.diag([5.0, 1.0, 1.0])
+    normal, fill = _unit_normal(30.0), 0.4
+    angle = 0.37
+    rot = np.array(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0],
+            [np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    base = kottke_tensor(normal[None], eps_hi[None], eps_lo[None], np.array([fill]))[0]
+    turned = kottke_tensor(
+        (rot @ normal)[None], (rot @ eps_hi @ rot.T)[None], (rot @ eps_lo @ rot.T)[None], np.array([fill])
+    )[0]
+    np.testing.assert_allclose(turned, rot @ base @ rot.T, rtol=1e-12, atol=1e-15)
+    # Rotating one tensor only is a different problem, and must not agree.
+    partial = kottke_tensor(normal[None], (rot @ eps_hi @ rot.T)[None], eps_lo[None], np.array([fill]))[0]
+    assert np.max(np.abs(partial - rot @ base @ rot.T)) > 1e-2
+
+
+def test_the_normal_sign_does_not_matter():
+    """Flipping ``n`` flips rows 0 and 1 of the frame together, and the transform is even under that."""
+    eps_hi = np.array([[6.0, 0.8, 0.1], [0.8, 5.0, 0.2], [0.1, 0.2, 4.0]])
+    eps_lo = 2.085 * np.eye(3)
+    for degrees in (0.0, 17.0, 90.0):
+        normal = _unit_normal(degrees)
+        forward = kottke_tensor(normal[None], eps_hi[None], eps_lo[None], np.array([0.3]))[0]
+        reverse = kottke_tensor((-normal)[None], eps_hi[None], eps_lo[None], np.array([0.3]))[0]
+        np.testing.assert_allclose(forward, reverse, rtol=1e-12, atol=1e-15)
+
+
+def test_the_blend_stays_symmetric_and_positive_definite():
+    """Positive-definite inputs give a positive-definite, symmetric effective inverse tensor."""
+    rng = np.random.default_rng(20260907)
+    count = 400
+    normals = rng.normal(size=(count, 3))
+    normals /= np.linalg.norm(normals, axis=-1)[:, None]
+
+    def _spd(n):
+        a = rng.normal(size=(n, 3, 3))
+        return a @ np.swapaxes(a, -1, -2) + 3.0 * np.eye(3)
+
+    tensor = kottke_tensor(normals, _spd(count), _spd(count), rng.uniform(0.02, 0.98, size=count))
+    np.testing.assert_allclose(tensor, np.swapaxes(tensor, -1, -2), rtol=0, atol=1e-12)
+    assert float(np.min(np.linalg.eigvalsh(tensor))) > 0.0
+
+
+def _tensor_planar_interface(d: float, face_offset: float, material: Material, sampling: str, **kwargs):
+    """``_planar_interface`` with an arbitrary slab material, so the tensor path can be exercised."""
+    cells = 12
+    name = _tag()
+    config = _config(d, sampling, **kwargs)
+    volume = _volume((cells, 4, 4), f"v{name}")
+    span = cells * d
+    face = 6 * d + face_offset
+    slab = UniformMaterialObject(
+        material=material,
+        partial_real_shape=(span - face, None, None),
+        partial_real_position=(0.5 * face, 0.0, 0.0),
+        placement_order=1,
+        name=f"s{name}",
+    )
+    container, arrays, _, resolved, info = fdtdx.place_objects([volume, slab], config, [])
+    placed = {o.name: o for o in container.object_list}[slab.name]
+    return arrays, resolved, info, float(placed.metric_bounds[0][0])
+
+
+def test_an_anisotropic_interface_is_smoothed_instead_of_skipped():
+    """A diagonally anisotropic slab against an isotropic background now goes through the blend.
+
+    The interface normal is along x, so the answer is hand-checkable per component: ``eps_xx``
+    averages harmonically and the two tangential entries arithmetically, each in that component's
+    *own* diagonal entry of the slab tensor. Before this change the pixel was refused, counted under
+    ``num_anisotropic_skips`` and left at its point sample, with a warning.
+    """
+    import warnings as _warnings
+
+    d = 40e-9
+    slab = np.array([6.0, 5.0, 4.0])
+    with _warnings.catch_warnings(record=True) as caught:
+        _warnings.simplefilter("always")
+        arrays, resolved, info, face = _tensor_planar_interface(
+            d, 0.37 * d, Material(permittivity=tuple(slab)), "yee_smooth"
+        )
+    assert not [w for w in caught if "anisotropic" in str(w.message)]
+
+    stats = _smoothing_stats(info)
+    assert stats["num_anisotropic_skips"] == 0
+    assert stats["num_anisotropic_pixels"] > 0
+    assert stats["num_smoothed"] > 0
+
+    inv_eps = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    grid = resolved.resolved_grid
+    for component in range(3):
+        lower, upper = pixel_axis_bounds(grid, "E", component)[0]
+        raw = np.clip((upper - face) / (upper - lower), 0.0, 1.0)
+        interface = np.flatnonzero((raw > 1e-9) & (raw < 1 - 1e-9))
+        assert interface.size == 1
+        cell = int(interface[0])
+        f = float(raw[cell])
+        if component == 0:  # normal to the interface: harmonic mean of eps_xx
+            expected = f / slab[0] + (1 - f) / EPS_BG
+        else:  # tangential: inverse of the arithmetic mean of that component's own entry
+            expected = 1.0 / (f * slab[component] + (1 - f) * EPS_BG)
+        got = float(inv_eps[component][cell, 2, 2])
+        assert got == pytest.approx(expected, rel=2e-6), f"component {component}: {got} vs {expected}"
+
+
+def test_a_non_positive_definite_tensor_keeps_the_point_sample():
+    """The tau transform divides by ``n^T eps n``; an indefinite tensor is refused before it runs."""
+    d = 40e-9
+    metal_like = Material(permittivity=(-2.0, 3.0, 4.0))
+    point, _, _, _ = _tensor_planar_interface(d, 0.37 * d, metal_like, "yee")
+    smooth, _, info, _ = _tensor_planar_interface(d, 0.37 * d, metal_like, "yee_smooth")
+    stats = _smoothing_stats(info)
+    assert stats["num_metal_skips"] > 0
+    assert stats["num_smoothed"] == 0
+    np.testing.assert_array_equal(
+        np.asarray(point.inv_permittivities), np.asarray(smooth.inv_permittivities)
+    )
+
+
+def test_the_dropped_off_diagonal_terms_are_counted():
+    """A curved rim tilts the normal, so the diagonal tier discards real off-diagonal content.
+
+    The 9-component tier stores the whole row and drops nothing. The counter makes the difference
+    between the two tiers visible in the loader report instead of leaving it to a convergence study.
+    """
+    d, cells = 25e-9, 40
+    disk_kwargs = dict(
+        axis=2,
+        radius=0.4e-6,
+        material_name="core",
+        materials={"core": Material(permittivity=EPS_CORE)},
+        partial_grid_shape=(None, None, 1),
+        partial_real_position=(0.13 * d, 0.13 * d, 0.0),
+        placement_order=1,
+    )
+    dropped = {}
+    for full_tensor in (False, True):
+        name = _tag()
+        config = _config(d, "yee_smooth", yee_smooth_full_tensor=full_tensor)
+        volume = _volume((cells, cells, 1), f"v{name}")
+        _, _, _, _, info = fdtdx.place_objects(
+            [volume, Cylinder(name=f"c{name}", **disk_kwargs)], config, []
+        )
+        dropped[full_tensor] = _smoothing_stats(info)["num_offdiagonal_dropped"]
+    assert dropped[False] > 0
+    assert dropped[True] == 0

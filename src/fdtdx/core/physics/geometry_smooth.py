@@ -39,7 +39,6 @@ is kept only as a fallback for shapes that cannot answer analytically, and the l
 many pixels used it.
 """
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -59,8 +58,14 @@ from fdtdx.objects.static_material.static import SimulationVolume
 #: A fill fraction this close to 0 or 1 means the interface misses the pixel; keep the point sample.
 _FILL_EPS = 1e-12
 
-#: Relative tolerance on "this material is isotropic" before the pixel is left point-sampled.
+#: Relative tolerance on "this material is isotropic" before the pixel takes the scalar fast path.
 _ISOTROPY_TOL = 1e-12
+
+#: Meep's threshold for "the normal is close enough to z that (n_y, -n_x, 0) is a bad tangent".
+_MEEP_TANGENT_THRESHOLD = 1e-2
+
+#: Relative size an off-diagonal entry must reach before the diagonal tier reports it as dropped.
+_OFFDIAGONAL_TOL = 1e-12
 
 
 @dataclass
@@ -75,7 +80,16 @@ class SmoothingStats:
     num_zero_normal_fallbacks: int = 0
     num_degenerate_fill_fallbacks: int = 0
     num_metal_skips: int = 0
+    #: Kept at zero. It used to count pixels refused because a side was anisotropic; the tensor
+    #: blend handles those now, and the only remaining refusal (a non-positive-definite tensor) is
+    #: counted under ``num_metal_skips``. The field stays so a recorded run's JSON keeps its keys.
     num_anisotropic_skips: int = 0
+    #: Pixels where at least one side was anisotropic, so the tensor blend ran instead of the scalar one.
+    num_anisotropic_pixels: int = 0
+    #: Pixels whose blend produced a non-zero off-diagonal entry that a 3-component array cannot hold.
+    num_offdiagonal_dropped: int = 0
+    #: Pixels where an input tensor was not symmetric and was symmetrised before the transform.
+    num_asymmetric_tensor_pixels: int = 0
     num_supersampled_pixels: int = 0
     per_component_candidates: list[int] = field(default_factory=list)
 
@@ -329,6 +343,139 @@ def polygons_rectangle_area(
 # ---------------------------------------------------------------------------
 
 
+def _interface_frame(normal: np.ndarray) -> np.ndarray:
+    """Rotation with the interface normal as row 0, built exactly the way Meep builds its columns.
+
+    Meep puts the normal in column 0, takes column 2 as ``(n_y, -n_x, 0)`` unless the normal is
+    within ``1e-2`` of the z axis (then ``(0, -n_z, n_y)``), normalises it, and takes column 1 as
+    column 2 cross column 0. Transposed into rows, that is what this returns. The effective tensor
+    does not depend on which tangential pair is chosen — the tau map is equivariant under a rotation
+    inside the interface plane — but taking the same choice removes one source of last-digit
+    disagreement when the two codes are compared on one scene.
+
+    Args:
+        normal (np.ndarray): ``(M, 3)`` unit interface normals.
+
+    Returns:
+        np.ndarray: ``(M, 3, 3)`` rotations; ``R @ eps @ R.T`` is the tensor in the interface frame.
+    """
+    nx, ny, nz = normal[:, 0], normal[:, 1], normal[:, 2]
+    zero = np.zeros_like(nx)
+    off_axis = (np.abs(nx) > _MEEP_TANGENT_THRESHOLD) | (np.abs(ny) > _MEEP_TANGENT_THRESHOLD)
+    tangent = np.where(
+        off_axis[:, None],
+        np.stack([ny, -nx, zero], axis=-1),
+        np.stack([zero, -nz, ny], axis=-1),
+    )
+    length = np.linalg.norm(tangent, axis=-1)
+    tangent = tangent / np.where(length > 0.0, length, 1.0)[:, None]
+    return np.stack([normal, np.cross(tangent, normal), tangent], axis=1)
+
+
+def _tau(tensor: np.ndarray) -> np.ndarray:
+    """Kottke's change of variables on a symmetric tensor whose index 0 is the interface normal.
+
+    ``tau`` maps a tensor onto the one whose *arithmetic* average across the interface is the
+    correct one, because it acts on the field vector that is continuous there: the normal component
+    of ``D`` and the two tangential components of ``E``. Entry ``00`` is the inversion along the
+    normal; the ``ij`` block is the Schur complement of the normal entry, i.e. what is left of the
+    tangential block once the normal direction has been eliminated. Six entries, no iteration.
+
+    Args:
+        tensor (np.ndarray): ``(M, 3, 3)`` symmetric tensors with a non-zero ``00`` entry.
+
+    Returns:
+        np.ndarray: ``(M, 3, 3)`` transformed tensors, symmetric.
+    """
+    out = np.zeros_like(tensor)
+    m00 = tensor[:, 0, 0]
+    m01, m02, m12 = tensor[:, 0, 1], tensor[:, 0, 2], tensor[:, 1, 2]
+    out[:, 0, 0] = -1.0 / m00
+    out[:, 0, 1] = out[:, 1, 0] = m01 / m00
+    out[:, 0, 2] = out[:, 2, 0] = m02 / m00
+    out[:, 1, 1] = tensor[:, 1, 1] - m01 * m01 / m00
+    out[:, 2, 2] = tensor[:, 2, 2] - m02 * m02 / m00
+    out[:, 1, 2] = out[:, 2, 1] = m12 - m01 * m02 / m00
+    return out
+
+
+def _tau_inverse(tensor: np.ndarray) -> np.ndarray:
+    """Undo :func:`_tau`. Differs from it only by the sign of the two ``0j`` entries."""
+    out = np.zeros_like(tensor)
+    d00 = tensor[:, 0, 0]
+    d01, d02, d12 = tensor[:, 0, 1], tensor[:, 0, 2], tensor[:, 1, 2]
+    out[:, 0, 0] = -1.0 / d00
+    out[:, 0, 1] = out[:, 1, 0] = -d01 / d00
+    out[:, 0, 2] = out[:, 2, 0] = -d02 / d00
+    out[:, 1, 1] = tensor[:, 1, 1] - d01 * d01 / d00
+    out[:, 2, 2] = tensor[:, 2, 2] - d02 * d02 / d00
+    out[:, 1, 2] = out[:, 2, 1] = d12 - d01 * d02 / d00
+    return out
+
+
+def _symmetric_inverse(tensor: np.ndarray) -> np.ndarray:
+    """Inverse of a stack of symmetric 3x3 tensors, by the adjugate.
+
+    ``np.linalg.inv`` raises for the *whole* stack as soon as one member is singular, which would
+    make a single degenerate pixel abort the entire load. The closed form cannot raise; the callers
+    guarantee a positive-definite input, and a zero determinant would only produce infinities at
+    that one pixel. This is also the routine Meep uses (``sym_matrix_invert``).
+
+    Args:
+        tensor (np.ndarray): ``(M, 3, 3)`` symmetric tensors.
+
+    Returns:
+        np.ndarray: ``(M, 3, 3)`` inverses, symmetric.
+    """
+    m00, m11, m22 = tensor[:, 0, 0], tensor[:, 1, 1], tensor[:, 2, 2]
+    m01, m02, m12 = tensor[:, 0, 1], tensor[:, 0, 2], tensor[:, 1, 2]
+    c00 = m11 * m22 - m12 * m12
+    c01 = m02 * m12 - m01 * m22
+    c02 = m01 * m12 - m02 * m11
+    determinant = m00 * c00 + m01 * c01 + m02 * c02
+    safe = np.where(determinant != 0.0, determinant, 1.0)
+    out = np.zeros_like(tensor)
+    out[:, 0, 0] = c00 / safe
+    out[:, 0, 1] = out[:, 1, 0] = c01 / safe
+    out[:, 0, 2] = out[:, 2, 0] = c02 / safe
+    out[:, 1, 1] = (m00 * m22 - m02 * m02) / safe
+    out[:, 1, 2] = out[:, 2, 1] = (m01 * m02 - m00 * m12) / safe
+    out[:, 2, 2] = (m00 * m11 - m01 * m01) / safe
+    return out
+
+
+def kottke_tensor(
+    normal: np.ndarray,
+    tensor_hi: np.ndarray,
+    tensor_lo: np.ndarray,
+    fill: np.ndarray,
+) -> np.ndarray:
+    """Effective *inverse* property tensor of a pixel straddling two anisotropic materials.
+
+    Rotate both tensors into the interface frame, tau-transform each, average the two entrywise
+    with the fill fraction as the weight, undo the transform, invert, and rotate back. The result is
+    the effective inverse permittivity (or permeability) in the lab frame. For two isotropic
+    materials it reduces exactly to ``n n^T <1/eps> + (I - n n^T) / <eps>``, which is what
+    :func:`kottke_inverse_permittivity` computes directly.
+
+    Args:
+        normal (np.ndarray): ``(M, 3)`` unit interface normals.
+        tensor_hi (np.ndarray): ``(M, 3, 3)`` symmetric positive-definite front-material tensors.
+        tensor_lo (np.ndarray): ``(M, 3, 3)`` the same for the material behind.
+        fill (np.ndarray): ``(M,)`` fraction of the pixel occupied by the front material.
+
+    Returns:
+        np.ndarray: ``(M, 3, 3)`` effective inverse property tensors in the lab frame.
+    """
+    rotation = _interface_frame(normal)
+    transposed = np.swapaxes(rotation, -1, -2)
+    hi = rotation @ tensor_hi @ transposed
+    lo = rotation @ tensor_lo @ transposed
+    averaged = fill[:, None, None] * _tau(hi) + (1.0 - fill)[:, None, None] * _tau(lo)
+    effective = _tau_inverse(averaged)
+    return transposed @ _symmetric_inverse(effective) @ rotation
+
+
 def kottke_inverse_permittivity(
     normal: np.ndarray,
     arithmetic: np.ndarray,
@@ -484,17 +631,24 @@ def _material_value_classes(scene: Scene, property_kind: str) -> np.ndarray:
     return classes
 
 
-def _property_tensors(scene: Scene, property_kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Scalar value, isotropy flag and full 3x3 tensor of one property, per global material.
+def _property_tensors(
+    scene: Scene, property_kind: str
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Scalar value, isotropy flag, symmetrised 3x3 tensor and asymmetry flag, per global material.
+
+    fdtdx stores a material property as a general 9-tuple with no symmetry check, while the Kottke
+    construction is defined for a symmetric tensor. An asymmetric input is symmetrised as
+    ``0.5 * (T + T^T)`` and flagged rather than rejected, so a scene still loads and the loader can
+    report how many pixels the symmetrisation touched.
 
     Args:
         scene (Scene): The scene whose global material list is read.
         property_kind (str): ``"permittivity"`` or ``"permeability"``.
 
     Returns:
-        tuple: ``(scalar, isotropic, tensor)`` of shapes ``(M,)``, ``(M,)`` and ``(M, 3, 3)``. The
-        scalar is the ``xx`` entry; it is what the isotropic fast path blends and it is only
-        meaningful where ``isotropic`` is true.
+        tuple: ``(scalar, isotropic, tensor, asymmetric)`` of shapes ``(M,)``, ``(M,)``,
+        ``(M, 3, 3)`` and ``(M,)``. The scalar is the ``xx`` entry; it is what the isotropic fast
+        path blends and it is only meaningful where ``isotropic`` is true.
 
     Raises:
         ValueError: If ``property_kind`` is not a smoothed property.
@@ -512,7 +666,10 @@ def _property_tensors(scene: Scene, property_kind: str) -> tuple[np.ndarray, np.
     isotropic = (np.ptp(diagonal, axis=1) <= _ISOTROPY_TOL * scale) & (
         np.max(np.abs(off_diagonal), axis=1) <= _ISOTROPY_TOL * scale
     )
-    return diagonal[:, 0], isotropic, table.reshape(table.shape[0], 3, 3)
+    tensor = table.reshape(table.shape[0], 3, 3)
+    magnitude = np.maximum(np.max(np.abs(tensor), axis=(1, 2)), 1.0)
+    asymmetric = np.max(np.abs(tensor - np.swapaxes(tensor, -1, -2)), axis=(1, 2)) > 1e-12 * magnitude
+    return diagonal[:, 0], isotropic, 0.5 * (tensor + np.swapaxes(tensor, -1, -2)), asymmetric
 
 
 def _spanning_axes(entry, grid: RectilinearGrid) -> tuple[int, ...]:
@@ -571,11 +728,12 @@ def _smooth_component_lattice(
     classes: np.ndarray,
     scalar: np.ndarray,
     isotropic: np.ndarray,
+    tensors: np.ndarray,
+    asymmetric: np.ndarray,
     target: np.ndarray,
     full_tensor: bool,
     supersample: int,
     stats: SmoothingStats,
-    warned_anisotropic: list[bool],
 ) -> None:
     """Smooth one component's lattice in place: probe, classify, blend, write.
 
@@ -589,11 +747,12 @@ def _smooth_component_lattice(
         classes (np.ndarray): Material index to value-class map from :func:`_material_value_classes`.
         scalar (np.ndarray): Per-material scalar property value.
         isotropic (np.ndarray): Per-material isotropy flag.
+        tensors (np.ndarray): Per-material symmetrised ``(M, 3, 3)`` property tensor.
+        asymmetric (np.ndarray): Per-material flag: the stored tensor was not symmetric.
         target (np.ndarray): The inverse-property array, modified in place.
         full_tensor (bool): Write whole rows instead of the diagonal entry.
         supersample (int): Samples per axis where no analytic overlap or normal is available.
         stats (SmoothingStats): Counters, accumulated across components.
-        warned_anisotropic (list): One-element mutable flag, so the warning fires once per pass.
     """
     ignore_global = invariant_axes(grid)
     degenerate_axis = tuple(axis in ignore_global for axis in range(3))
@@ -674,22 +833,23 @@ def _smooth_component_lattice(
 
     value_hi = scalar[owner_class]
     value_lo = scalar[other_class]
+    both_isotropic = isotropic[owner_class] & isotropic[other_class]
 
     usable = np.ones(count, dtype=bool)
-    both_isotropic = isotropic[owner_class] & isotropic[other_class]
-    stats.num_anisotropic_skips += int(np.count_nonzero(~both_isotropic))
-    if not both_isotropic.all() and not warned_anisotropic[0]:
-        warnings.warn(
-            "material_sampling='yee_smooth' met an anisotropic material at an interface pixel. "
-            "The Kottke blend implemented here assumes both sides are locally isotropic, so those "
-            "pixels keep their point sample.",
-            UserWarning,
-            stacklevel=2,
-        )
-        warned_anisotropic[0] = True
-    usable &= both_isotropic
 
+    # Both sides must be invertible in every direction before the tau transform divides by
+    # n^T eps n. A metal (eps <= 0) or an indefinite tensor keeps the point sample. The isotropic
+    # pair keeps the scalar test it has always used, so this counter cannot move on a scene that
+    # carries no tensor material; the eigenvalue test is paid only where one is present. The guard
+    # runs before the blend, not inside it, so no pixel ever reaches a division by zero.
     positive = (value_hi > 0.0) & (value_lo > 0.0)
+    if not both_isotropic.all():
+        anisotropic_cells = ~both_isotropic
+        smallest = np.minimum(
+            np.linalg.eigvalsh(tensors[owner_class[anisotropic_cells]])[:, 0],
+            np.linalg.eigvalsh(tensors[other_class[anisotropic_cells]])[:, 0],
+        )
+        positive[anisotropic_cells] = smallest > 0.0
     stats.num_metal_skips += int(np.count_nonzero(~positive))
     usable &= positive
 
@@ -704,10 +864,51 @@ def _smooth_component_lattice(
     if not usable.any():
         return
     written = tuple(axis_cells[usable] for axis_cells in cells)
-    arithmetic = fill[usable] * value_hi[usable] + (1.0 - fill[usable]) * value_lo[usable]
-    harmonic = fill[usable] / value_hi[usable] + (1.0 - fill[usable]) / value_lo[usable]
-    blend = kottke_inverse_permittivity(normal[usable], arithmetic, harmonic, component, full_tensor)
-    _write_component_entries(target, written, blend, component, full_tensor)
+    normal_used = normal[usable]
+    fill_used = fill[usable]
+    isotropic_pair = both_isotropic[usable]
+    used = int(np.count_nonzero(usable))
+    row = np.zeros((used, 3), dtype=float)
+    diagonal_entry = np.zeros(used, dtype=float)
+
+    if isotropic_pair.any():
+        value_hi_used = value_hi[usable][isotropic_pair]
+        value_lo_used = value_lo[usable][isotropic_pair]
+        scalar_fill = fill_used[isotropic_pair]
+        arithmetic = scalar_fill * value_hi_used + (1.0 - scalar_fill) * value_lo_used
+        harmonic = scalar_fill / value_hi_used + (1.0 - scalar_fill) / value_lo_used
+        scalar_normal = normal_used[isotropic_pair]
+        row[isotropic_pair] = kottke_inverse_permittivity(scalar_normal, arithmetic, harmonic, component, True)
+        if not full_tensor:
+            diagonal_entry[isotropic_pair] = kottke_inverse_permittivity(
+                scalar_normal, arithmetic, harmonic, component, False
+            )
+    if not isotropic_pair.all():
+        tensor_cells = ~isotropic_pair
+        effective = kottke_tensor(
+            normal_used[tensor_cells],
+            tensors[owner_class[usable][tensor_cells]],
+            tensors[other_class[usable][tensor_cells]],
+            fill_used[tensor_cells],
+        )
+        row[tensor_cells] = effective[:, component, :]
+        diagonal_entry[tensor_cells] = effective[:, component, component]
+
+    stats.num_anisotropic_pixels += int(np.count_nonzero(~isotropic_pair))
+    stats.num_asymmetric_tensor_pixels += int(
+        np.count_nonzero(asymmetric[owner_class[usable]] | asymmetric[other_class[usable]])
+    )
+    if not full_tensor:
+        # The 3-component tier holds entry (c, c) only. At a tilted interface the blend genuinely
+        # produces off-diagonal terms -- for two isotropic materials as much as for two tensor ones
+        # -- and they are dropped here. Report the loss instead of leaving it invisible.
+        others = [j for j in range(3) if j != component]
+        reference = np.maximum(np.abs(diagonal_entry), 1.0)
+        stats.num_offdiagonal_dropped += int(
+            np.count_nonzero(np.max(np.abs(row[:, others]), axis=1) > _OFFDIAGONAL_TOL * reference)
+        )
+
+    _write_component_entries(target, written, row if full_tensor else diagonal_entry, component, full_tensor)
     stats.num_smoothed += int(np.count_nonzero(usable))
 
 
@@ -756,8 +957,7 @@ def smooth_property_on_yee_pixels(
         )
     stats = SmoothingStats()
     classes = _material_value_classes(scene, property_kind)
-    scalar, isotropic, _ = _property_tensors(scene, property_kind)
-    warned_anisotropic = [False]
+    scalar, isotropic, tensors, asymmetric = _property_tensors(scene, property_kind)
 
     for component in range(3):
         _smooth_component_lattice(
@@ -770,11 +970,12 @@ def smooth_property_on_yee_pixels(
             classes=classes,
             scalar=scalar,
             isotropic=isotropic,
+            tensors=tensors,
+            asymmetric=asymmetric,
             target=inverse_property,
             full_tensor=full_tensor,
             supersample=supersample,
             stats=stats,
-            warned_anisotropic=warned_anisotropic,
         )
 
     return inverse_property, stats
