@@ -895,3 +895,88 @@ def test_magnetic_pixels_away_from_the_face_keep_the_point_sample():
     assert differing <= info["yee_sampling_difference"]["smoothing_H"]["num_smoothed"]
     np.testing.assert_array_equal(point_mu[:, :4], smooth_mu[:, :4])
     np.testing.assert_array_equal(point_mu[:, 9:], smooth_mu[:, 9:])
+
+
+# ---------------------------------------------------------------------------
+# Array tiers under yee sampling
+# ---------------------------------------------------------------------------
+
+#: A permittivity with real off-diagonal entries: symmetric, positive definite, not axis aligned.
+OFF_DIAGONAL_EPS = (6.0, 0.8, 0.0, 0.8, 5.0, 0.0, 0.0, 0.0, 4.0)
+#: The same shape for the permeability.
+OFF_DIAGONAL_MU = (1.6, 0.3, 0.0, 0.3, 1.4, 0.0, 0.0, 0.0, 1.2)
+
+
+def _tensor_slab(sampling: str, material: Material, **kwargs):
+    """A slab of one material filling the right half of a small 3-D domain."""
+    d, cells = 50e-9, 10
+    name = _tag()
+    config = _config(d, sampling, **kwargs)
+    volume = _volume((cells, 4, 4), f"v{name}")
+    slab = UniformMaterialObject(
+        material=material,
+        partial_real_shape=(0.5 * cells * d, None, None),
+        partial_real_position=(0.25 * cells * d, 0.0, 0.0),
+        placement_order=1,
+        name=f"s{name}",
+    )
+    _, arrays, _, _, info = fdtdx.place_objects([volume, slab], config, [])
+    return arrays, info
+
+
+def test_off_diagonal_permittivity_reaches_the_full_tensor_tier():
+    """A material tensor with off-diagonal entries is no longer truncated to its diagonal.
+
+    Under yee sampling the tier used to be forced to 3 regardless of the materials, so the six
+    off-diagonal entries were dropped before the loader saw them — no warning, no counter. The tier
+    is derived from the materials again, so this scene allocates 9 components and the array carries
+    the rows of the inverse tensor.
+    """
+    arrays, _ = _tensor_slab("yee", Material(permittivity=OFF_DIAGONAL_EPS))
+    inv_eps = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    assert inv_eps.shape[0] == 9
+    expected = np.linalg.inv(np.asarray(OFF_DIAGONAL_EPS, dtype=np.float64).reshape(3, 3))
+    deep = (8, 2, 2)  # well inside the slab
+    for c in range(3):
+        for j in range(3):
+            assert float(inv_eps[(3 * c + j, *deep)]) == pytest.approx(expected[c, j], rel=2e-6, abs=1e-9)
+
+
+def test_off_diagonal_permeability_reaches_the_full_tensor_tier():
+    """The identical repair on the magnetic side: mu keeps its off-diagonal entries too."""
+    arrays, _ = _tensor_slab("yee", Material(permittivity=EPS_CORE, permeability=OFF_DIAGONAL_MU))
+    inv_mu = np.asarray(arrays.inv_permeabilities, dtype=np.float64)
+    assert inv_mu.shape[0] == 9
+    expected = np.linalg.inv(np.asarray(OFF_DIAGONAL_MU, dtype=np.float64).reshape(3, 3))
+    deep = (8, 2, 2)
+    for c in range(3):
+        for j in range(3):
+            assert float(inv_mu[(3 * c + j, *deep)]) == pytest.approx(expected[c, j], rel=2e-6, abs=1e-9)
+
+
+def test_diagonal_materials_stay_on_the_diagonal_tier():
+    """Deriving the tier from the materials must not widen any scene that has no off-diagonal entry.
+
+    The "diagonally anisotropic" predicate tests only the six off-diagonal entries, so an isotropic
+    and a diagonally anisotropic material both answer yes and both keep the cheap 3-component
+    allocation.
+    """
+    for material in (
+        Material(permittivity=EPS_CORE),
+        Material(permittivity=(6.0, 5.0, 4.0)),
+        Material(permittivity=EPS_CORE, permeability=(1.4, 1.2, 1.1)),
+    ):
+        arrays, _ = _tensor_slab("yee", material)
+        assert np.asarray(arrays.inv_permittivities).shape[0] == 3
+        if np.ndim(arrays.inv_permeabilities) == 4:
+            assert np.asarray(arrays.inv_permeabilities).shape[0] == 3
+
+
+def test_the_full_tensor_flag_widens_the_permeability_too():
+    """``yee_smooth_full_tensor`` keeps the Kottke off-diagonal terms for eps and mu together."""
+    arrays, info = _tensor_slab(
+        "yee_smooth", Material(permittivity=EPS_CORE, permeability=MU_CORE), yee_smooth_full_tensor=True
+    )
+    assert np.asarray(arrays.inv_permittivities).shape[0] == 9
+    assert np.asarray(arrays.inv_permeabilities).shape[0] == 9
+    assert info["yee_sampling_difference"]["smoothing_H"]["num_smoothed"] > 0

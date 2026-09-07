@@ -702,10 +702,23 @@ def _init_arrays(
         isotropic_permeability = False
         isotropic_electric_conductivity = False
         isotropic_magnetic_conductivity = False
-        diagonally_anisotropic_permittivity = not (yee_smoothing and config.yee_smooth_full_tensor)
-        diagonally_anisotropic_permeability = True
-        diagonally_anisotropic_electric_conductivity = True
-        diagonally_anisotropic_magnetic_conductivity = True
+        # The tier stays derived from the materials. Forcing the diagonal tier here used to drop a
+        # material's off-diagonal entries before the loader ever saw them, silently and without a
+        # counter, because compute_allowed_* is then asked for a 3-wide table. Every isotropic and
+        # every diagonal material still lands on the 3-component tier, since the "diagonally
+        # anisotropic" predicate tests only the six off-diagonal entries; only a material that
+        # genuinely carries one moves to 9. yee_smooth_full_tensor keeps forcing 9 for the two
+        # smoothed properties, because the smoothing itself produces off-diagonal terms at a tilted
+        # interface even when every material is isotropic; it governs eps and mu together, since
+        # there is no reading in which the Kottke off-diagonal terms are kept for E and dropped
+        # for H in one run.
+        force_full_tensor = yee_smoothing and config.yee_smooth_full_tensor
+        diagonally_anisotropic_permittivity = (
+            objects.all_objects_diagonally_anisotropic_permittivity and not force_full_tensor
+        )
+        diagonally_anisotropic_permeability = (
+            objects.all_objects_diagonally_anisotropic_permeability and not force_full_tensor
+        )
 
     # Dispersion tiers. The recurrence coefficients c1/c2 carry 1 (isotropic,
     # broadcast) or 3 (per-axis) components; the field coupling c3
