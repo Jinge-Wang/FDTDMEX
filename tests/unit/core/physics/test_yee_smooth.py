@@ -761,3 +761,137 @@ def test_yee_smooth_rejects_the_per_object_subpixel_flag():
     )
     with pytest.raises(NotImplementedError, match="redundant"):
         fdtdx.place_objects([volume, core], config, [])
+
+
+# ---------------------------------------------------------------------------
+# (B) The permeability on the H lattices
+# ---------------------------------------------------------------------------
+
+MU_CORE = 2.4
+
+
+def _magnetic_planar_interface(d: float, face_offset: float, sampling: str, permeability: float, **kwargs):
+    """``_planar_interface`` with the contrast in mu instead of eps.
+
+    The slab carries the background permittivity, so the E pass sees a single permittivity value
+    everywhere and finds no candidate at all; every candidate reported below belongs to the H pass.
+    """
+    cells = 12
+    name = _tag()
+    config = _config(d, sampling, **kwargs)
+    volume = _volume((cells, 4, 4), f"v{name}")
+    span = cells * d
+    face = 6 * d + face_offset
+    slab = UniformMaterialObject(
+        material=Material(permittivity=EPS_BG, permeability=permeability),
+        partial_real_shape=(span - face, None, None),
+        partial_real_position=(0.5 * face, 0.0, 0.0),
+        placement_order=1,
+        name=f"s{name}",
+    )
+    container, arrays, _, resolved, info = fdtdx.place_objects([volume, slab], config, [])
+    placed = {o.name: o for o in container.object_list}[slab.name]
+    return arrays, resolved, info, float(placed.metric_bounds[0][0])
+
+
+def test_h_pixel_is_dual_on_its_own_axis():
+    """``H_c`` sits at an edge on axis ``c`` and at a centre on the other two.
+
+    So its pixel is the dual cell on its own axis and the primal cell on the other two — the only
+    box centred on the sample point, which is the rule the E pixel already follows.
+    """
+    widths = [
+        np.array([20e-9, 30e-9, 40e-9, 25e-9]),
+        np.array([10e-9, 50e-9, 20e-9]),
+        np.array([15e-9, 35e-9]),
+    ]
+    edges = [np.concatenate([[0.0], np.cumsum(w)]) for w in widths]
+    grid = RectilinearGrid(x_edges=edges[0], y_edges=edges[1], z_edges=edges[2])
+    tol = dict(rtol=1e-6, atol=0)
+
+    for component in range(3):
+        bounds = pixel_axis_bounds(grid, "H", component)
+        for axis in range(3):
+            lower, upper = bounds[axis]
+            e = np.asarray(edges[axis], dtype=float)
+            w = np.diff(e)
+            if axis == component:  # dual: the box is centred on the edge the component sits at
+                previous = np.concatenate([w[:1], w[:-1]])
+                np.testing.assert_allclose(lower, np.clip(e[:-1] - 0.5 * previous, e[0], None), **tol)
+                np.testing.assert_allclose(upper, e[:-1] + 0.5 * w, **tol)
+            else:  # primal: the box is the cell the component's centre sits in
+                np.testing.assert_allclose(lower, e[:-1], **tol)
+                np.testing.assert_allclose(upper, e[1:], **tol)
+
+
+def test_permeability_is_smoothed_on_the_h_pixels():
+    """The blend is written on the H pixel, not the E pixel — pinned by an exact value per component.
+
+    Normal along x, so ``mu_xx`` is the harmonic mean and ``mu_yy``/``mu_zz`` the arithmetic one,
+    exactly as for the permittivity. The pixel the fill fraction is taken over is the H box: dual in
+    x for ``H_x``, primal in x for ``H_y`` and ``H_z``. Those two boxes are half a cell apart, so the
+    straddled cell index and the fill fraction differ between them and between H and E; feeding the
+    E lattice to the permeability pass would land on the wrong cell with the wrong number.
+    """
+    d = 40e-9
+    arrays, resolved, info, face = _magnetic_planar_interface(d, 0.37 * d, "yee_smooth", MU_CORE)
+    grid = resolved.resolved_grid
+    inv_mu = np.asarray(arrays.inv_permeabilities, dtype=np.float64)
+    assert inv_mu.shape[0] == 3
+
+    # The E pass has a single permittivity value in the scene and finds nothing to smooth.
+    assert _smoothing_stats(info)["num_candidates"] == 0
+    stats_h = info["yee_sampling_difference"]["smoothing_H"]
+    assert stats_h["num_smoothed"] > 0
+
+    for component, tangential in ((0, False), (1, True), (2, True)):
+        lower, upper = pixel_axis_bounds(grid, "H", component)[0]
+        fill = np.clip((upper - face) / (upper - lower), 0.0, 1.0)
+        interface = np.flatnonzero((fill > 1e-9) & (fill < 1 - 1e-9))
+        assert interface.size == 1, f"component {component} should straddle exactly one H pixel"
+        cell = int(interface[0])
+        f = float(fill[cell])
+        arithmetic = f * MU_CORE + (1 - f) * 1.0
+        harmonic = f / MU_CORE + (1 - f) / 1.0
+        got = float(inv_mu[component][cell, 2, 2])
+        expected = 1.0 / arithmetic if tangential else harmonic
+        assert got == pytest.approx(expected, rel=2e-6), (
+            f"component {component}: got {got}, expected {expected} (f={f}, cell={cell})"
+        )
+        # The same cell on the E lattice would carry a different fill, so the two are not swappable.
+        e_lower, e_upper = pixel_axis_bounds(grid, "E", component)[0]
+        e_fill = float(np.clip((e_upper[cell] - face) / (e_upper[cell] - e_lower[cell]), 0.0, 1.0))
+        assert abs(e_fill - f) > 0.2
+
+
+def test_non_magnetic_scene_leaves_inv_permeabilities_untouched():
+    """mu = 1 everywhere never allocates the array, so there is nothing for the H pass to touch.
+
+    Paired with its own positive control: the identical scene with a magnetic slab does allocate the
+    array and does report an H pass, so this test fails if feature B stops running rather than
+    passing vacuously.
+    """
+    d = 40e-9
+    arrays, _, info, _ = _magnetic_planar_interface(d, 0.37 * d, "yee_smooth", 1.0)
+    assert np.ndim(arrays.inv_permeabilities) == 0
+    assert float(np.asarray(arrays.inv_permeabilities)) == 1.0
+    assert "smoothing_H" not in info["yee_sampling_difference"]
+
+    magnetic_arrays, _, magnetic_info, _ = _magnetic_planar_interface(d, 0.37 * d, "yee_smooth", MU_CORE)
+    assert np.ndim(magnetic_arrays.inv_permeabilities) == 4
+    assert magnetic_info["yee_sampling_difference"]["smoothing_H"]["num_smoothed"] > 0
+
+
+def test_magnetic_pixels_away_from_the_face_keep_the_point_sample():
+    """Only the straddled pixels move; the rest of the permeability array is the ``"yee"`` array."""
+    d = 40e-9
+    point, _, point_info, _ = _magnetic_planar_interface(d, 0.37 * d, "yee", MU_CORE)
+    smooth, _, info, _ = _magnetic_planar_interface(d, 0.37 * d, "yee_smooth", MU_CORE)
+    point_mu = np.asarray(point.inv_permeabilities, dtype=np.float64)
+    smooth_mu = np.asarray(smooth.inv_permeabilities, dtype=np.float64)
+    assert "smoothing_H" not in point_info["yee_sampling_difference"]
+    differing = np.count_nonzero(point_mu != smooth_mu)
+    assert differing > 0
+    assert differing <= info["yee_sampling_difference"]["smoothing_H"]["num_smoothed"]
+    np.testing.assert_array_equal(point_mu[:, :4], smooth_mu[:, :4])
+    np.testing.assert_array_equal(point_mu[:, 9:], smooth_mu[:, 9:])

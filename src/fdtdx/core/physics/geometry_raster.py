@@ -464,7 +464,9 @@ def load_scene_on_yee_lattices(
         conductivity_spacing (float | None): Scale factor applied to conductivities.
         time_step_duration (float): Simulation time step, for the dispersive recurrence.
         smooth (bool): Replace the point sample by the Kottke blend at two-material pixels
-            (``material_sampling="yee_smooth"``). Conductivity and dispersion stay point-sampled.
+            (``material_sampling="yee_smooth"``). The permittivity is smoothed on the three E
+            lattices and the permeability, when its array exists, on the three H lattices.
+            Conductivity and dispersion stay point-sampled on both.
         supersample (int): Samples per axis used for a fill fraction or a normal that no shape can
             answer analytically.
         full_tensor (bool): Request the 9-component tier. The row form is used whenever
@@ -487,11 +489,11 @@ def load_scene_on_yee_lattices(
     front_E = np.stack([r[0] for r in resolved_E], axis=0)
     owner_E = np.stack([r[1] for r in resolved_E], axis=0)
     front_H = None
+    owner_H = None
     if need_H:
-        front_H = np.stack(
-            [front_material_indices(scene, yee_lattice_coordinates(grid, "H", c)) for c in range(3)],
-            axis=0,
-        )
+        resolved_H = [front_indices(scene, yee_lattice_coordinates(grid, "H", c)) for c in range(3)]
+        front_H = np.stack([r[0] for r in resolved_H], axis=0)
+        owner_H = np.stack([r[1] for r in resolved_H], axis=0)
 
     difference: dict[str, Any] = {"box_difference_reported": report_box_difference}
     if report_box_difference:
@@ -510,14 +512,16 @@ def load_scene_on_yee_lattices(
         invert=True,
     )
     if smooth:
-        from fdtdx.core.physics.geometry_smooth import smooth_inverse_permittivity_on_yee_pixels
+        from fdtdx.core.physics.geometry_smooth import smooth_property_on_yee_pixels
 
-        inv_permittivities, smoothing_stats = smooth_inverse_permittivity_on_yee_pixels(
+        inv_permittivities, smoothing_stats = smooth_property_on_yee_pixels(
             scene=scene,
             grid=grid,
+            field="E",
+            property_kind="permittivity",
             front_material=front_E,
             front_owner=owner_E,
-            inv_permittivities=inv_permittivities,
+            inverse_property=inv_permittivities,
             # A 9-component array must always be written as the full Kottke row: entry (c, c) of a
             # row-major 3x3 lives at 4*c, not at c. The config flag's only job is to force the tier.
             supersample=supersample,
@@ -536,6 +540,26 @@ def load_scene_on_yee_lattices(
             num_permeability_components,
             invert=True,
         )
+        if smooth:
+            # The permeability gets the identical treatment on the three H lattices. There is no
+            # separate "has_mu" test: the array exists exactly when some material is magnetic
+            # (fdtdx's all_objects_non_magnetic, which is Meep's has_mu), so a mu = 1 scene never
+            # reaches this branch and is untouched by construction.
+            from fdtdx.core.physics.geometry_smooth import smooth_property_on_yee_pixels
+
+            assert owner_H is not None
+            inv_permeabilities, permeability_stats = smooth_property_on_yee_pixels(
+                scene=scene,
+                grid=grid,
+                field="H",
+                property_kind="permeability",
+                front_material=front_H,
+                front_owner=owner_H,
+                inverse_property=inv_permeabilities,
+                supersample=supersample,
+                full_tensor=num_permeability_components == 9,
+            )
+            difference["smoothing_H"] = permeability_stats.as_dict()
 
     electric_conductivity = None
     if num_electric_cond_components is not None:

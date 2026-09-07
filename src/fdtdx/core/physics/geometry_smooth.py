@@ -51,7 +51,6 @@ from fdtdx.core.physics.geometry_raster import (
     E_OFFSETS,
     H_OFFSETS,
     Scene,
-    _material_signature,
     front_indices,
 )
 from fdtdx.materials import compute_allowed_permeabilities, compute_allowed_permittivities
@@ -448,17 +447,36 @@ def _gradient_normal_from_fill(
 # ---------------------------------------------------------------------------
 
 
-def _material_value_classes(scene: Scene) -> np.ndarray:
-    """Map every global material index onto the first index with the same material definition.
+def _material_value_classes(scene: Scene, property_kind: str) -> np.ndarray:
+    """Map every global material index onto the first index carrying the same value of one property.
 
     Two objects can carry the same material under two names (a carve-out drawn in the background
     material, say). Those are one material physically, and counting them as two would report a
-    spurious interface. This is the reimplementation of Meep's ``material_type_equal`` test.
+    spurious interface. This is the reimplementation of Meep's ``material_type_equal`` test,
+    narrowed to the property this pass is smoothing: two materials that differ only in conductivity
+    or dispersion present no permittivity step, and on the H lattices a purely dielectric interface
+    is not a permeability interface at all — without the narrowing every dielectric face in the
+    domain would be probed, filled and normal-solved on the H pass to write back the identity.
+
+    Args:
+        scene (Scene): The scene whose global material list is read.
+        property_kind (str): ``"permittivity"`` or ``"permeability"``.
+
+    Returns:
+        np.ndarray: ``int32`` class index per global material.
+
+    Raises:
+        ValueError: If ``property_kind`` is not a smoothed property.
     """
     from fdtdx.materials import compute_ordered_names
 
     names = compute_ordered_names(scene.materials)
-    signatures = [_material_signature(scene.materials[name]) for name in names]
+    if property_kind == "permittivity":
+        signatures = [tuple(scene.materials[name].permittivity) for name in names]
+    elif property_kind == "permeability":
+        signatures = [tuple(scene.materials[name].permeability) for name in names]
+    else:
+        raise ValueError(f"property_kind must be 'permittivity' or 'permeability', got {property_kind!r}")
     classes = np.arange(len(names), dtype=np.int32)
     seen: dict[tuple, int] = {}
     for index, signature in enumerate(signatures):
@@ -737,7 +755,7 @@ def smooth_property_on_yee_pixels(
             f"got {inverse_property.shape[0]}."
         )
     stats = SmoothingStats()
-    classes = _material_value_classes(scene)
+    classes = _material_value_classes(scene, property_kind)
     scalar, isotropic, _ = _property_tensors(scene, property_kind)
     warned_anisotropic = [False]
 
