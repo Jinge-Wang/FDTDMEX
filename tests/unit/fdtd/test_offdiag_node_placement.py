@@ -24,7 +24,13 @@ import pytest
 import fdtdx
 from fdtdx.config import SimulationConfig
 from fdtdx.core.grid import UniformGrid
-from fdtdx.core.physics.geometry_smooth import apply_dtoe_map, min_eigenvalue_of_symmetric_part
+from fdtdx.core.physics.geometry_smooth import (
+    OFFDIAGONAL_ENTRIES,
+    apply_dtoe_map,
+    min_eigenvalue_of_symmetric_part,
+    pixel_diagonals_from_vertex_tensor,
+    vertex_offdiagonals_from_pixel_rows,
+)
 from fdtdx.fdtd.misc import OFFDIAG_ROW_PARTNERS, add_offdiag_correction
 from fdtdx.fdtd.update import offdiag_correction_terms, update_E, update_E_reverse
 from fdtdx.materials import Material
@@ -859,3 +865,176 @@ def test_a_lossy_vertex_keeps_a_zero_entry_and_is_counted():
     # The lossless twin of the same scene does write entries, so the counter above is not vacuous.
     _, lossless, _, _ = _periodic_scene(_disk, 6.25)
     assert np.count_nonzero(np.asarray(lossless.inv_permittivity_offdiag)) > 0
+
+
+# ---------------------------------------------------------------------------
+# (i) The two placements that take every entry from one family of boxes
+# ---------------------------------------------------------------------------
+
+
+def _explicit_vertex_offdiagonals(rows: np.ndarray, periodic) -> np.ndarray:
+    """``vertex_offdiagonals_from_pixel_rows``, written as scalar lookups with Python loops.
+
+    The mean of the four component pixels adjacent to a vertex in the entry's own plane. Deliberately
+    index by index, with the out-of-range rule spelled out, so it shares no code with the vectorised
+    helper.
+    """
+    shape = rows.shape[1:]
+    out = np.zeros((3, *shape))
+
+    def sample(plane: int, index) -> float:
+        wrapped = list(index)
+        for axis in range(3):
+            if 0 <= wrapped[axis] < shape[axis]:
+                continue
+            wrapped[axis] = wrapped[axis] % shape[axis] if periodic[axis] else min(max(wrapped[axis], 0), shape[axis] - 1)
+        return float(rows[(plane, *wrapped)])
+
+    for entry, (i, j) in enumerate(OFFDIAGONAL_ENTRIES):
+        for a in range(shape[0]):
+            for b in range(shape[1]):
+                for c in range(shape[2]):
+                    here = [a, b, c]
+                    back_i = list(here)
+                    back_i[i] -= 1
+                    back_j = list(here)
+                    back_j[j] -= 1
+                    out[(entry, *here)] = 0.25 * (
+                        sample(3 * i + j, here)
+                        + sample(3 * i + j, back_i)
+                        + sample(3 * j + i, here)
+                        + sample(3 * j + i, back_j)
+                    )
+    return out
+
+
+def _explicit_pixel_diagonals(vertex: np.ndarray, periodic) -> np.ndarray:
+    """``pixel_diagonals_from_vertex_tensor``, written as scalar lookups with Python loops."""
+    shape = vertex.shape[1:]
+    out = np.zeros((3, *shape))
+
+    def sample(axis: int, index) -> float:
+        wrapped = list(index)
+        for a in range(3):
+            if 0 <= wrapped[a] < shape[a]:
+                continue
+            wrapped[a] = wrapped[a] % shape[a] if periodic[a] else min(max(wrapped[a], 0), shape[a] - 1)
+        return float(vertex[(axis, *wrapped)])
+
+    for axis in range(3):
+        for a in range(shape[0]):
+            for b in range(shape[1]):
+                for c in range(shape[2]):
+                    here = [a, b, c]
+                    ahead = list(here)
+                    ahead[axis] += 1
+                    out[(axis, *here)] = 0.5 * (sample(axis, here) + sample(axis, ahead))
+    return out
+
+
+@pytest.mark.parametrize(
+    "periodic",
+    [(False, False, False), (True, True, True), (True, False, True)],
+    ids=["terminated", "periodic", "mixed"],
+)
+def test_the_two_re_placement_helpers_are_plain_means_of_their_neighbours(periodic):
+    """Both helpers equal an index-by-index transcription on random arrays, at every boundary.
+
+    They are the whole difference between the three vertex placements: ``node_avg`` averages four
+    component pixels onto a vertex, ``vertex_all`` averages two vertices onto a component point. A
+    missing neighbour at a terminated face replicates the edge value, which is the same halo rule the
+    update's coefficient padding uses.
+    """
+    rng = np.random.default_rng(1401)
+    shape = (5, 4, 3)
+    rows = rng.standard_normal((9, *shape))
+    vertex = rng.standard_normal((6, *shape))
+
+    obtained = vertex_offdiagonals_from_pixel_rows(rows, periodic)
+    assert np.max(np.abs(obtained - _explicit_vertex_offdiagonals(rows, periodic))) < 1e-14
+
+    obtained = pixel_diagonals_from_vertex_tensor(vertex, periodic)
+    assert np.max(np.abs(obtained - _explicit_pixel_diagonals(vertex, periodic))) < 1e-14
+
+
+@pytest.mark.parametrize("placement", ["node_avg", "vertex_all"])
+@pytest.mark.parametrize("eps_core", [6.25, 12.1, 30.0])
+@pytest.mark.parametrize("shape_fn, geometry", [(_disk, "disk"), (_tilted_slab, "tilted slab")])
+def test_the_two_variants_assemble_a_symmetric_map_with_a_real_spectrum(placement, eps_core, shape_fn, geometry):
+    """The reason they exist at all: one shared vertex array, so the map is its own transpose.
+
+    Same assertion as the ``"node"`` test above. Both variants keep the permittivity on the
+    3-component tier and write one shared ``(xy, xz, yz)`` array, so nothing about the symmetry
+    argument changes when the entries are computed from different boxes.
+    """
+    _, arrays, _, _ = _periodic_scene(shape_fn, eps_core, eps_placement=placement)
+    assert arrays.inv_permittivities.shape[0] == 3
+    assert arrays.inv_permittivity_offdiag is not None
+    shape = tuple(int(n) for n in np.asarray(arrays.inv_permittivities).shape[1:])
+    dense = _dense_dtoe(arrays, (True, True, True), shape)
+
+    asymmetry = np.linalg.norm(dense - dense.T, "fro") / np.linalg.norm(dense, "fro")
+    assert asymmetry < 1e-14, f"{placement} {geometry} eps={eps_core}: asymmetry {asymmetry:.3e}"
+
+    inplane = np.arange(2 * shape[0] * shape[1])
+    block = dense[np.ix_(inplane, inplane)]
+    spectrum = np.linalg.eigvals(block @ _inplane_double_curl(shape[0]))
+    scale = float(np.max(np.abs(spectrum)))
+    tolerance = 1e-9 * scale
+    assert int(np.count_nonzero(np.abs(spectrum.imag) > tolerance)) == 0
+    assert int(np.count_nonzero((spectrum.real < -tolerance) & (np.abs(spectrum.imag) <= tolerance))) == 0
+
+
+@pytest.mark.parametrize("eps_core", [6.25, 12.1])
+def test_node_avg_leaves_the_diagonal_entries_exactly_where_node_leaves_them(eps_core):
+    """``node_avg`` moves only the off-diagonal entries; the diagonal array does not move at all.
+
+    It reaches the diagonal through the 9-component Kottke row rather than the diagonal-entry call,
+    so this pins that the two really are the same number and not merely close: entry ``(c, c)`` of
+    the row is ``n_c n_c <1/eps> + (1 - n_c n_c) / <eps>``, which is what the diagonal tier writes.
+    """
+    _, node, _, _ = _periodic_scene(_disk, eps_core, eps_placement="node")
+    _, averaged, _, _ = _periodic_scene(_disk, eps_core, eps_placement="node_avg")
+    assert np.array_equal(np.asarray(node.inv_permittivities), np.asarray(averaged.inv_permittivities))
+    # The entries themselves do move: the vertex value is a mean over four pixels, so its peak is
+    # smaller than the value the vertex box produces on its own.
+    node_entries = np.asarray(node.inv_permittivity_offdiag)
+    averaged_entries = np.asarray(averaged.inv_permittivity_offdiag)
+    assert np.max(np.abs(averaged_entries)) < np.max(np.abs(node_entries))
+    assert np.count_nonzero(averaged_entries) > 0
+
+
+@pytest.mark.parametrize("eps_core", [6.25, 12.1])
+def test_vertex_all_keeps_nodes_entries_and_rebuilds_the_diagonal_from_them(eps_core):
+    """``vertex_all`` computes the same vertex box, so its off-diagonal entries are ``node``'s.
+
+    What changes is the diagonal: it is the mean of the two vertices bracketing each component point
+    along that component's own axis, and no longer the value of the component's own pixel. On a
+    2-D scene the ``E_z`` pixel *is* the vertex box on both in-plane axes and degenerate on the third,
+    so that one component comes out unmoved — a check that the box bookkeeping is right.
+    """
+    _, node, _, _ = _periodic_scene(_disk, eps_core, eps_placement="node")
+    _, whole, _, _ = _periodic_scene(_disk, eps_core, eps_placement="vertex_all")
+    assert np.array_equal(np.asarray(node.inv_permittivity_offdiag), np.asarray(whole.inv_permittivity_offdiag))
+
+    node_diagonal = np.asarray(node.inv_permittivities)
+    whole_diagonal = np.asarray(whole.inv_permittivities)
+    assert np.array_equal(node_diagonal[2], whole_diagonal[2])
+    assert not np.array_equal(node_diagonal[0], whole_diagonal[0])
+    assert not np.array_equal(node_diagonal[1], whole_diagonal[1])
+
+    # The tent-shaped average spreads the rim over one more cell on each in-plane axis, so more
+    # pixels differ from vacuum than under the pixel-placed diagonal, and the extremes stay inside
+    # the two bulk values.
+    for axis in (0, 1):
+        assert np.count_nonzero(whole_diagonal[axis] != 1.0) > np.count_nonzero(node_diagonal[axis] != 1.0)
+        assert whole_diagonal[axis].min() >= node_diagonal[axis].min() - 1e-12
+        assert whole_diagonal[axis].max() <= 1.0 + 1e-12
+
+
+def test_every_placement_name_is_accepted_and_an_unknown_one_is_not():
+    """The four values the config takes, and the error for anything else."""
+    for placement in ("node", "node_avg", "vertex_all", "pixel"):
+        assert _config(eps_placement=placement).yee_smooth_offdiag_placement == placement
+    with pytest.raises(ValueError, match="yee_smooth_offdiag_placement"):
+        _config(eps_placement="vertex")
