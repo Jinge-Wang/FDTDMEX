@@ -561,10 +561,17 @@ def test_planar_interface_gives_the_harmonic_and_arithmetic_means():
 
 
 def test_full_tensor_matches_the_diagonal_for_axis_aligned_normals():
-    """A Manhattan scene has ``n`` on an axis, so the off-diagonal Kottke terms are exactly zero."""
+    """A Manhattan scene has ``n`` on an axis, so the off-diagonal Kottke terms are exactly zero.
+
+    Pinned to the ``"pixel"`` placement, which is what allocates the dense 9-component tensor. The
+    default ``"node"`` placement leaves the permittivity on the diagonal tier and puts the
+    off-diagonal entries on the vertex lattice instead.
+    """
     d = 40e-9
     diagonal, _, _, _ = _planar_interface(d, 0.37 * d, "yee_smooth")
-    full, _, _, _ = _planar_interface(d, 0.37 * d, "yee_smooth", yee_smooth_full_tensor=True)
+    full, _, _, _ = _planar_interface(
+        d, 0.37 * d, "yee_smooth", yee_smooth_full_tensor=True, yee_smooth_offdiag_placement="pixel"
+    )
     assert diagonal.shape[0] == 3
     assert full.shape[0] == 9
     for component in range(3):
@@ -974,9 +981,17 @@ def test_diagonal_materials_stay_on_the_diagonal_tier():
 
 
 def test_the_full_tensor_flag_widens_the_permeability_too():
-    """``yee_smooth_full_tensor`` keeps the Kottke off-diagonal terms for eps and mu together."""
+    """``yee_smooth_full_tensor`` keeps the Kottke off-diagonal terms for eps and mu together.
+
+    Under the ``"pixel"`` placement both properties take the dense 9-component tier. The vertex
+    placement moves only the electric off-diagonals; the magnetic ones stay on the dense path, which
+    the companion test below pins.
+    """
     arrays, info = _tensor_slab(
-        "yee_smooth", Material(permittivity=EPS_CORE, permeability=MU_CORE), yee_smooth_full_tensor=True
+        "yee_smooth",
+        Material(permittivity=EPS_CORE, permeability=MU_CORE),
+        yee_smooth_full_tensor=True,
+        yee_smooth_offdiag_placement="pixel",
     )
     assert np.asarray(arrays.inv_permittivities).shape[0] == 9
     assert np.asarray(arrays.inv_permeabilities).shape[0] == 9
@@ -1242,6 +1257,9 @@ def test_the_dropped_off_diagonal_terms_are_counted():
 
     The 9-component tier stores the whole row and drops nothing. The counter makes the difference
     between the two tiers visible in the loader report instead of leaving it to a convergence study.
+    Pinned to the ``"pixel"`` placement: under ``"node"`` the permittivity array *is* the diagonal
+    tier and the entries the counter tracks live in a separate array, which the vertex-pass tests
+    check instead.
     """
     d, cells = 25e-9, 40
     disk_kwargs = dict(
@@ -1256,7 +1274,7 @@ def test_the_dropped_off_diagonal_terms_are_counted():
     dropped = {}
     for full_tensor in (False, True):
         name = _tag()
-        config = _config(d, "yee_smooth", yee_smooth_full_tensor=full_tensor)
+        config = _config(d, "yee_smooth", yee_smooth_full_tensor=full_tensor, yee_smooth_offdiag_placement="pixel")
         volume = _volume((cells, cells, 1), f"v{name}")
         _, _, _, _, info = fdtdx.place_objects([volume, Cylinder(name=f"c{name}", **disk_kwargs)], config, [])
         dropped[full_tensor] = _smoothing_stats(info)["num_offdiagonal_dropped"]

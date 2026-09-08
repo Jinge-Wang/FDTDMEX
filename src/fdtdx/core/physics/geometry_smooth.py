@@ -89,6 +89,7 @@ from fdtdx.core.physics.geometry_raster import (
     E_OFFSETS,
     H_OFFSETS,
     SHIFT_IDENTITY,
+    V_OFFSETS,
     Scene,
     entry_shifts,
     front_indices,
@@ -137,6 +138,17 @@ class SmoothingStats:
     #: two faces with opposite normals inside one pixel, and no single-normal blend describes that.
     num_multi_shift_pixels: int = 0
     num_supersampled_pixels: int = 0
+    #: Vertex pass only. Vertices where at least one of the two materials carries electric
+    #: conductivity, so the off-diagonal entries are written as zero: the diagonal branch's lossy
+    #: factor ``1 / (1 + c*sigma*eta0*inv_eps/2)`` is a per-component scalar and has no consistent
+    #: off-diagonal form without a D-field formulation of the update.
+    num_lossy_offdiag_skips: int = 0
+    #: Vertex pass only. Vertices where one of the two materials is a genuinely anisotropic *bulk*
+    #: tensor (non-zero off-diagonal entries of its own), which the vertex array cannot represent —
+    #: its entries would then no longer be purely smoothing-induced. Written as zero and counted;
+    #: the run-level gate normally keeps such a scene on the dense pixel path, so this is a
+    #: defence-in-depth counter that should read zero.
+    num_bulk_tensor_offdiag_skips: int = 0
     per_component_candidates: list[int] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
@@ -266,7 +278,9 @@ def _offsets(field_name: str) -> tuple[tuple[float, float, float], ...]:
         return E_OFFSETS
     if field_name == "H":
         return H_OFFSETS
-    raise ValueError(f"field must be 'E' or 'H', got {field_name!r}")
+    if field_name == "V":
+        return V_OFFSETS
+    raise ValueError(f"field must be 'E', 'H' or 'V', got {field_name!r}")
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +584,40 @@ def kottke_inverse_permittivity(
     return row
 
 
+#: The three independent off-diagonal entries of a symmetric 3x3, as ``(row, column)`` index pairs,
+#: in the order the vertex array stores them.
+OFFDIAGONAL_ENTRIES: tuple[tuple[int, int], ...] = ((0, 1), (0, 2), (1, 2))
+
+
+def _isotropic_offdiagonal_entries(
+    normal: np.ndarray,
+    arithmetic: np.ndarray,
+    harmonic: np.ndarray,
+) -> np.ndarray:
+    """The ``(xy, xz, yz)`` entries of the effective inverse permittivity, two isotropic materials.
+
+    Reading entry ``(i, j)`` of ``n n^T <1/eps> + (I - n n^T)/<eps>`` and separating the identity
+    part leaves, for ``i != j``, exactly ``n_i n_j (<1/eps> - 1/<eps>)``. The bracket is the gap
+    between the mean of the inverse and the inverse of the mean, so by the arithmetic-harmonic mean
+    inequality it is strictly positive at a genuine two-material pixel and the entry vanishes if and
+    only if ``n_i n_j`` does — that is, at every axis-aligned interface and on every axis the
+    simulation is invariant along.
+
+    Args:
+        normal (np.ndarray): ``(M, 3)`` unit interface normals.
+        arithmetic (np.ndarray): ``(M,)`` fill-weighted arithmetic mean ``<eps>``.
+        harmonic (np.ndarray): ``(M,)`` fill-weighted mean of the inverse, ``<1/eps>``.
+
+    Returns:
+        np.ndarray: ``(M, 3)`` entries in the order ``(xy, xz, yz)``.
+    """
+    gap = harmonic - 1.0 / arithmetic
+    out = np.zeros((normal.shape[0], 3), dtype=float)
+    for entry, (i, j) in enumerate(OFFDIAGONAL_ENTRIES):
+        out[:, entry] = normal[:, i] * normal[:, j] * gap
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Fill fractions
 # ---------------------------------------------------------------------------
@@ -778,21 +826,38 @@ def _write_component_entries(
     blend: np.ndarray,
     component: int,
     full_tensor: bool,
+    write_mode: str = "row",
 ) -> None:
-    """Write one component's smoothed entries into the assembled inverse-property array.
+    """Write one lattice's smoothed entries into the assembled inverse-property array.
 
-    The single place a smoothed value reaches the material array. Meep evaluates the two
-    off-diagonal entries of row ``c`` on a half-cell-shifted control volume
-    (``gv.dV(here - shift1, ...)``) rather than on component ``c``'s own pixel; moving them there is
-    a separate change that replaces this function and nothing else.
+    The single place a smoothed value reaches the material array, in all three modes.
+
+    ``write_mode="row"`` is the pixel placement: entry ``(c, c)`` of the blend at component ``c``'s
+    own pixel for a 3-component array, the whole row ``c`` for a 9-component one. Meep instead
+    evaluates the two off-diagonal entries of row ``c`` on a half-cell-shifted control volume
+    (``gv.dV(here - shift1, ...)``), which for all three rows is the same primary-grid vertex; that
+    is ``write_mode="offdiag"``, which writes the three independent off-diagonal entries
+    ``(xy, xz, yz)`` of one symmetric tensor at that vertex. The two modes write different arrays
+    and never both run on the same one.
 
     Args:
         target (np.ndarray): ``(3 or 9, Nx, Ny, Nz)`` array, modified in place.
-        cells (tuple): The three index arrays of the pixels being written.
-        blend (np.ndarray): ``(K,)`` diagonal entries or ``(K, 3)`` rows.
-        component (int): Which component's lattice is being written.
-        full_tensor (bool): Whether ``target`` carries 9 components.
+        cells (tuple): The three index arrays of the pixels (or vertices) being written.
+        blend (np.ndarray): ``(K,)`` diagonal entries, ``(K, 3)`` rows, or ``(K, 3)`` off-diagonal
+            entries in the order ``(xy, xz, yz)``.
+        component (int): Which component's lattice is being written. Ignored for ``"offdiag"``.
+        full_tensor (bool): Whether ``target`` carries 9 components. Ignored for ``"offdiag"``.
+        write_mode (str): ``"row"`` (pixel placement) or ``"offdiag"`` (vertex placement).
+
+    Raises:
+        ValueError: If ``write_mode`` is not one of the two.
     """
+    if write_mode == "offdiag":
+        for entry in range(3):
+            target[(entry, *cells)] = blend[:, entry]
+        return
+    if write_mode != "row":
+        raise ValueError(f"write_mode must be 'row' or 'offdiag', got {write_mode!r}")
     if full_tensor:
         for j in range(3):
             target[(3 * component + j, *cells)] = blend[:, j]
@@ -819,6 +884,9 @@ def _smooth_component_lattice(
     full_tensor: bool,
     supersample: int,
     stats: SmoothingStats,
+    write_mode: str = "row",
+    lossy: np.ndarray | None = None,
+    bulk_tensor: np.ndarray | None = None,
 ) -> None:
     """Smooth one component's lattice in place: probe, classify, blend, write.
 
@@ -838,10 +906,20 @@ def _smooth_component_lattice(
         tensors (np.ndarray): Per-material symmetrised ``(M, 3, 3)`` property tensor.
         asymmetric (np.ndarray): Per-material flag: the stored tensor was not symmetric.
         target (np.ndarray): The inverse-property array, modified in place.
-        full_tensor (bool): Write whole rows instead of the diagonal entry.
+        full_tensor (bool): Write whole rows instead of the diagonal entry. Ignored in
+            ``write_mode="offdiag"``.
         supersample (int): Samples per axis where no analytic overlap or normal is available.
         stats (SmoothingStats): Counters, accumulated across components.
+        write_mode (str): ``"row"`` for the pixel placement (this is the E and H pass), or
+            ``"offdiag"`` for the vertex pass, which writes the three off-diagonal entries
+            ``(xy, xz, yz)`` of the symmetric blend into a 3-component array.
+        lossy (np.ndarray | None): Per global material flag "carries electric conductivity".
+            Required in ``"offdiag"`` mode, where such a vertex is written as zero and counted.
+        bulk_tensor (np.ndarray | None): Per global material flag "the stored tensor has a non-zero
+            off-diagonal entry of its own". Required in ``"offdiag"`` mode, where such a vertex is
+            written as zero and counted.
     """
+    vertex_mode = write_mode == "offdiag"
     ignore_global = invariant_axes(grid)
     degenerate_axis = tuple(axis in ignore_global for axis in range(3))
 
@@ -998,6 +1076,23 @@ def _smooth_component_lattice(
     stats.num_zero_normal_fallbacks += int(np.count_nonzero(zero_normal))
     usable &= ~zero_normal
 
+    if vertex_mode:
+        assert lossy is not None and bulk_tensor is not None
+        # The diagonal branch multiplies the lossy interface by a per-component scalar
+        # 1 / (1 + c*sigma*eta0*inv_eps/2). There is no off-diagonal form of that factor short of
+        # writing the update on D, so a vertex whose materials are not both lossless keeps a zero
+        # off-diagonal entry rather than a term the lossy factor cannot scale consistently.
+        conductive = lossy[owner_class] | lossy[other_class]
+        stats.num_lossy_offdiag_skips += int(np.count_nonzero(conductive))
+        usable &= ~conductive
+        # The vertex array carries the *smoothing-induced* off-diagonals of isotropic and diagonal
+        # materials. A material with off-diagonal entries of its own has a bulk term that belongs at
+        # its own cells, not on a shared vertex; the run-level gate keeps such a scene on the dense
+        # pixel path, and this is the same gate applied per vertex.
+        genuinely_anisotropic = bulk_tensor[owner_class] | bulk_tensor[other_class]
+        stats.num_bulk_tensor_offdiag_skips += int(np.count_nonzero(genuinely_anisotropic))
+        usable &= ~genuinely_anisotropic
+
     if not usable.any():
         return
     written = tuple(axis_cells[usable] for axis_cells in cells)
@@ -1015,11 +1110,14 @@ def _smooth_component_lattice(
         arithmetic = scalar_fill * value_hi_used + (1.0 - scalar_fill) * value_lo_used
         harmonic = scalar_fill / value_hi_used + (1.0 - scalar_fill) / value_lo_used
         scalar_normal = normal_used[isotropic_pair]
-        row[isotropic_pair] = kottke_inverse_permittivity(scalar_normal, arithmetic, harmonic, component, True)
-        if not full_tensor:
-            diagonal_entry[isotropic_pair] = kottke_inverse_permittivity(
-                scalar_normal, arithmetic, harmonic, component, False
-            )
+        if vertex_mode:
+            row[isotropic_pair] = _isotropic_offdiagonal_entries(scalar_normal, arithmetic, harmonic)
+        else:
+            row[isotropic_pair] = kottke_inverse_permittivity(scalar_normal, arithmetic, harmonic, component, True)
+            if not full_tensor:
+                diagonal_entry[isotropic_pair] = kottke_inverse_permittivity(
+                    scalar_normal, arithmetic, harmonic, component, False
+                )
     if not isotropic_pair.all():
         tensor_cells = ~isotropic_pair
         effective = kottke_tensor(
@@ -1028,14 +1126,17 @@ def _smooth_component_lattice(
             tensors[other_class[usable][tensor_cells]],
             fill_used[tensor_cells],
         )
-        row[tensor_cells] = effective[:, component, :]
-        diagonal_entry[tensor_cells] = effective[:, component, component]
+        if vertex_mode:
+            row[tensor_cells] = np.stack([effective[:, 0, 1], effective[:, 0, 2], effective[:, 1, 2]], axis=-1)
+        else:
+            row[tensor_cells] = effective[:, component, :]
+            diagonal_entry[tensor_cells] = effective[:, component, component]
 
     stats.num_anisotropic_pixels += int(np.count_nonzero(~isotropic_pair))
     stats.num_asymmetric_tensor_pixels += int(
         np.count_nonzero(asymmetric[owner_class[usable]] | asymmetric[other_class[usable]])
     )
-    if not full_tensor:
+    if not full_tensor and not vertex_mode:
         # The 3-component tier holds entry (c, c) only. At a tilted interface the blend genuinely
         # produces off-diagonal terms -- for two isotropic materials as much as for two tensor ones
         # -- and they are dropped here. Report the loss instead of leaving it invisible.
@@ -1045,7 +1146,14 @@ def _smooth_component_lattice(
             np.count_nonzero(np.max(np.abs(row[:, others]), axis=1) > _OFFDIAGONAL_TOL * reference)
         )
 
-    _write_component_entries(target, written, row if full_tensor else diagonal_entry, component, full_tensor)
+    _write_component_entries(
+        target,
+        written,
+        row if (full_tensor or vertex_mode) else diagonal_entry,
+        component,
+        full_tensor,
+        write_mode,
+    )
     stats.num_smoothed += int(np.count_nonzero(usable))
 
 
@@ -1124,6 +1232,86 @@ def smooth_property_on_yee_pixels(
         )
 
     return inverse_property, stats
+
+
+def smooth_offdiagonal_on_vertex_lattice(
+    scene: Scene,
+    grid: RectilinearGrid,
+    supersample: int,
+    periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+) -> tuple[np.ndarray, SmoothingStats]:
+    """The three off-diagonal Kottke entries of the inverse permittivity, on the cell vertices.
+
+    One extra smoothing pass, on one extra lattice. The vertex sits at ``(e_x[i], e_y[j], e_z[k])``
+    and its pixel is the dual box on all three axes, centred on it — the same box
+    :func:`pixel_axis_bounds` builds for any axis a component sits on an edge of, so the periodic
+    mirroring and the non-periodic clip are inherited unchanged. The probe rule (centre plus eight
+    corners), the fill fraction, the analytic normal and the anisotropic ``tau`` path are the ones
+    the E and H passes already use.
+
+    The output is the array Meep stores per voxel and applies with its ``OFFDIAG`` macro: because
+    the off-diagonal entry of row ``c`` is evaluated half a cell back along ``c``'s own axis, and
+    that point is the same vertex for all three rows, both coupled rows read one shared number and
+    the assembled D-to-E map is exactly symmetric. The diagonal entries do not move: they stay at
+    the component pixels, written by the ordinary diagonal-tier pass.
+
+    Args:
+        scene (Scene): The scene from :func:`fdtdx.core.physics.geometry_raster.build_scene`.
+        grid (RectilinearGrid): The resolved simulation grid.
+        supersample (int): Samples per axis where no analytic overlap or normal is available.
+        periodic_axes (tuple): Axes carrying periodic images, invariant axes already excluded.
+
+    Returns:
+        tuple: ``(inv_permittivity_offdiag, stats)`` with the array of shape ``(3, Nx, Ny, Nz)``
+        holding ``(xy, xz, yz)`` and zero wherever no interface was blended.
+    """
+    from fdtdx.core.physics.geometry_raster import yee_lattice_coordinates
+
+    periods = grid_periods(grid)
+    coords = yee_lattice_coordinates(grid, "V", 0)
+    front_material, front_owner, front_shift = front_indices(scene, coords, periodic_axes, periods)
+
+    classes = _material_value_classes(scene, "permittivity")
+    scalar, isotropic, tensors, asymmetric = _property_tensors(scene, "permittivity")
+    lossy = _electrically_conductive(scene)
+    off_diagonal = tensors[:, (0, 0, 1), (1, 2, 2)]
+    magnitude = np.maximum(np.max(np.abs(tensors), axis=(1, 2)), 1.0)
+    bulk_tensor = np.max(np.abs(off_diagonal), axis=1) > _OFFDIAGONAL_TOL * magnitude
+
+    target = np.zeros((3, *front_material.shape), dtype=np.float64)
+    stats = SmoothingStats()
+    _smooth_component_lattice(
+        scene=scene,
+        grid=grid,
+        field="V",
+        component=0,
+        front_material=front_material,
+        front_owner=front_owner,
+        front_shift=front_shift,
+        periodic_axes=periodic_axes,
+        periods=periods,
+        classes=classes,
+        scalar=scalar,
+        isotropic=isotropic,
+        tensors=tensors,
+        asymmetric=asymmetric,
+        target=target,
+        full_tensor=False,
+        supersample=supersample,
+        stats=stats,
+        write_mode="offdiag",
+        lossy=lossy,
+        bulk_tensor=bulk_tensor,
+    )
+    return target, stats
+
+
+def _electrically_conductive(scene: Scene) -> np.ndarray:
+    """Per global material: does it carry any electric conductivity at all?"""
+    from fdtdx.materials import compute_allowed_electric_conductivities
+
+    table = np.asarray(compute_allowed_electric_conductivities(scene.materials), dtype=float)
+    return np.max(np.abs(table), axis=1) > 0.0
 
 
 def smooth_inverse_permittivity_on_yee_pixels(

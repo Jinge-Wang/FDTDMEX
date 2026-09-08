@@ -685,6 +685,7 @@ def _init_arrays(
     # to 9 further down. The 3-component tier keeps the Metal block-hybrid kernel eligible.
     yee_sampling = config.uses_yee_material_sampling
     yee_smoothing = config.uses_yee_smoothing
+    node_offdiag = False
     if yee_sampling:
         if subpixel_permittivity and not yee_smoothing:
             raise NotImplementedError(
@@ -712,12 +713,47 @@ def _init_arrays(
         # interface even when every material is isotropic; it governs eps and mu together, since
         # there is no reading in which the Kottke off-diagonal terms are kept for E and dropped
         # for H in one run.
-        force_full_tensor = yee_smoothing and config.yee_smooth_full_tensor
+        #
+        # Under the node placement the permittivity does *not* widen: the diagonal entries stay
+        # where they are, on the 3-component array, and the three off-diagonal entries move to a
+        # separate array on the cell-vertex lattice, which the update applies as an additive
+        # correction. The gate is that every material's own permittivity is diagonal — the vertex
+        # array carries smoothing-induced off-diagonals, and a material with off-diagonal entries of
+        # its own has a bulk term that belongs at its own cells. Such a scene keeps the dense pixel
+        # placement (which the material tier forces to 9 anyway). The permeability is untouched by
+        # the placement: the H off-diagonals stay on the dense path.
+        node_offdiag = (
+            yee_smoothing
+            and config.yee_smooth_full_tensor
+            and config.yee_smooth_offdiag_placement_resolved == "node"
+            and objects.all_objects_diagonally_anisotropic_permittivity
+        )
+        if yee_smoothing and config.yee_smooth_full_tensor and not node_offdiag:
+            if config.yee_smooth_offdiag_placement_resolved == "node":
+                warnings.warn(
+                    "yee_smooth_offdiag_placement='node' was requested but a material carries "
+                    "off-diagonal permittivity entries of its own, so the smoothing-induced "
+                    "off-diagonals cannot be separated onto the vertex lattice. Falling back to the "
+                    "dense 9-component pixel placement for this run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    "yee_smooth_offdiag_placement='pixel' writes the whole Kottke row at each "
+                    "component's own pixel. The two coupled rows then read different arrays, the "
+                    "assembled D-to-E map is 1-5% asymmetric, and growing modes appear on a curved "
+                    "interface from a permittivity contrast of about 6 upwards. Use 'node' unless "
+                    "you are reproducing a recorded run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        force_full_tensor = yee_smoothing and config.yee_smooth_full_tensor and not node_offdiag
         diagonally_anisotropic_permittivity = (
             objects.all_objects_diagonally_anisotropic_permittivity and not force_full_tensor
         )
-        diagonally_anisotropic_permeability = (
-            objects.all_objects_diagonally_anisotropic_permeability and not force_full_tensor
+        diagonally_anisotropic_permeability = objects.all_objects_diagonally_anisotropic_permeability and not (
+            yee_smoothing and config.yee_smooth_full_tensor
         )
 
     # Dispersion tiers. The recurrence coefficients c1/c2 carry 1 (isotropic,
@@ -833,6 +869,10 @@ def _init_arrays(
             sharding_axis=1,
             backend=config.backend,
         )
+    # Written only by the yee_smooth loader under the node placement; stays None otherwise, which is
+    # what makes every other run bit-identical (the update's correction is guarded on it).
+    inv_permittivity_offdiag = None
+
     conductivity_spacing = None
     if electric_conductivity is not None or magnetic_conductivity is not None:
         conductivity_spacing = constants.c * config.time_step_duration / config.courant_number
@@ -911,12 +951,15 @@ def _init_arrays(
             # axis keeps its far-side periodic boundary while its min-side halo is deliberately not
             # wrapped -- and symmetry is rejected outright for every yee sampling mode above.
             periodic_axes=objects.periodic_axes,
+            offdiag_on_vertices=node_offdiag,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
         full_index = (slice(None), slice(None), slice(None), slice(None))
         inv_permittivities = sharding_preserving_set(
             inv_permittivities, full_index, jnp.asarray(scene_arrays.inv_permittivities, dtype=config.dtype)
         )
+        if scene_arrays.inv_permittivity_offdiag is not None:
+            inv_permittivity_offdiag = jnp.asarray(scene_arrays.inv_permittivity_offdiag, dtype=config.dtype)
         if scene_arrays.inv_permeabilities is not None:
             inv_permeabilities = sharding_preserving_set(
                 inv_permeabilities, full_index, jnp.asarray(scene_arrays.inv_permeabilities, dtype=config.dtype)
@@ -1273,6 +1316,7 @@ def _init_arrays(
         dispersive_c2=dispersive_c2,
         dispersive_c3=dispersive_c3,
         initial_inv_permittivities=initial_inv_permittivities,
+        inv_permittivity_offdiag=inv_permittivity_offdiag,
     )
     return arrays, config, info
 

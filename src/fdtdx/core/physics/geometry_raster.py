@@ -75,6 +75,13 @@ E_OFFSETS: tuple[tuple[float, float, float], ...] = ((0.5, 0.0, 0.0), (0.0, 0.5,
 #: Half-cell offsets of the three H components, in the order (x, y, z) per component.
 H_OFFSETS: tuple[tuple[float, float, float], ...] = ((0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (0.5, 0.5, 0.0))
 
+#: Half-cell offsets of the cell-vertex lattice, where the off-diagonal Kottke entries live under
+#: ``yee_smooth_offdiag_placement="node"``. It is **one** lattice, not three: the off-diagonal entry
+#: of row ``c`` sits half a cell back along ``c``'s own axis from the ``E_c`` point, which for all
+#: three components is the same primary-grid vertex ``(i, j, k)``. The three entries are repeated so
+#: the tuple can be indexed by component like the other two.
+V_OFFSETS: tuple[tuple[float, float, float], ...] = ((0.0, 0.0, 0.0),) * 3
+
 #: Maximum number of lattice points evaluated in one ``contains`` call, to bound peak memory.
 _CHUNK_POINTS = 4_000_000
 
@@ -88,21 +95,23 @@ def yee_lattice_coordinates(
 
     Args:
         grid (RectilinearGrid): The resolved simulation grid.
-        field (str): ``"E"`` or ``"H"``.
-        component (int): Component index 0, 1 or 2.
+        field (str): ``"E"``, ``"H"`` or ``"V"`` (the cell-vertex lattice).
+        component (int): Component index 0, 1 or 2. Ignored for ``"V"``, which is one lattice.
 
     Returns:
         tuple: ``(x, y, z)`` coordinate arrays of lengths ``(Nx, Ny, Nz)``, in metres.
 
     Raises:
-        ValueError: If ``field`` is not ``"E"`` or ``"H"``.
+        ValueError: If ``field`` is not ``"E"``, ``"H"`` or ``"V"``.
     """
     if field == "E":
         offsets = E_OFFSETS[component]
     elif field == "H":
         offsets = H_OFFSETS[component]
+    elif field == "V":
+        offsets = V_OFFSETS[component]
     else:
-        raise ValueError(f"field must be 'E' or 'H', got {field!r}")
+        raise ValueError(f"field must be 'E', 'H' or 'V', got {field!r}")
     coords = []
     for axis in range(3):
         edges = np.asarray(grid.edges(axis), dtype=float)
@@ -501,6 +510,10 @@ class YeeSceneArrays:
     """Host-side material arrays assembled from per-Yee-point sampling."""
 
     inv_permittivities: np.ndarray
+    #: ``(3, Nx, Ny, Nz)`` off-diagonal entries ``(xy, xz, yz)`` of the smoothed inverse
+    #: permittivity on the cell-vertex lattice, or ``None`` unless the vertex (node) placement is
+    #: active. Zero wherever no interface was blended.
+    inv_permittivity_offdiag: np.ndarray | None
     inv_permeabilities: np.ndarray | None
     electric_conductivity: np.ndarray | None
     magnetic_conductivity: np.ndarray | None
@@ -588,6 +601,7 @@ def load_scene_on_yee_lattices(
     full_tensor: bool = False,
     report_box_difference: bool = False,
     periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+    offdiag_on_vertices: bool = False,
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -617,6 +631,10 @@ def load_scene_on_yee_lattices(
             side, and the domain-edge smoothing pixel becomes the full dual box instead of being
             clipped. An axis the simulation is invariant along is excluded, since fdtdx's 2-D
             convention is a single periodic cell there.
+        offdiag_on_vertices (bool): Run one more smoothing pass on the cell-vertex lattice and
+            return its three off-diagonal Kottke entries in ``inv_permittivity_offdiag``. The
+            permittivity array itself then stays on the diagonal tier, bit-identical to a run
+            without the flag; the update applies the vertex entries as an additive correction.
         report_box_difference (bool): Also rasterise the scene the legacy ``"box"`` way and count
             how many Yee points the two modes disagree on. Off by default: it is a second pass over
             every object plus another ``int32`` copy of the domain, and nothing in the simulation
@@ -683,6 +701,18 @@ def load_scene_on_yee_lattices(
             full_tensor=num_perm_components == 9,
         )
         difference["smoothing"] = smoothing_stats.as_dict()
+
+    inv_permittivity_offdiag = None
+    if smooth and offdiag_on_vertices:
+        from fdtdx.core.physics.geometry_smooth import smooth_offdiagonal_on_vertex_lattice
+
+        inv_permittivity_offdiag, offdiag_stats = smooth_offdiagonal_on_vertex_lattice(
+            scene=scene,
+            grid=grid,
+            supersample=supersample,
+            periodic_axes=image_axes,
+        )
+        difference["smoothing_offdiag"] = offdiag_stats.as_dict()
 
     inv_permeabilities = None
     if num_permeability_components is not None:
@@ -768,6 +798,7 @@ def load_scene_on_yee_lattices(
 
     return YeeSceneArrays(
         inv_permittivities=inv_permittivities,
+        inv_permittivity_offdiag=inv_permittivity_offdiag,
         inv_permeabilities=inv_permeabilities,
         electric_conductivity=electric_conductivity,
         magnetic_conductivity=magnetic_conductivity,

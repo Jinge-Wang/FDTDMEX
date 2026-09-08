@@ -67,6 +67,13 @@ YEE_MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("yee", "yee_smooth")
 #: Environment variable that turns the box-vs-Yee sampling diagnostic on without touching the config.
 YEE_DIAGNOSTICS_ENV_VAR = "FDTDX_YEE_SAMPLING_DIAGNOSTICS"
 
+#: The accepted values of :attr:`SimulationConfig.yee_smooth_offdiag_placement`.
+YEE_OFFDIAG_PLACEMENTS: tuple[str, ...] = ("node", "pixel")
+
+#: Environment variable that selects the off-diagonal placement without touching the config, so a
+#: recorded case script can be re-run under either one.
+YEE_OFFDIAG_PLACEMENT_ENV_VAR = "FDTDX_YEE_OFFDIAG_PLACEMENT"
+
 _TRUTHY = ("1", "true", "yes", "on")
 
 
@@ -158,6 +165,20 @@ class SimulationConfig(TreeClass):
     #: block-hybrid kernel wherever the tilted pixels are scattered.
     yee_smooth_full_tensor: bool = frozen_field(default=False)
 
+    #: Where the three off-diagonal Kottke entries live when ``yee_smooth_full_tensor`` is set.
+    #: ``"node"`` (default) puts them on the **cell-vertex** lattice and applies them with Meep's
+    #: product-averaged stencil (Werner & Cary 2007) as an additive term in the otherwise unchanged
+    #: diagonal update: the 3-component ``inv_permittivities`` array stays bit-identical to the
+    #: diagonal tier and a separate 3-component ``inv_permittivity_offdiag`` array carries
+    #: ``(xy, xz, yz)`` at the vertices. Because both coupled rows then read one shared array, the
+    #: assembled D-to-E map is exactly symmetric. ``"pixel"`` keeps the earlier behaviour — the whole
+    #: Kottke row written at the component's own pixel into a dense 9-component tensor — which is
+    #: 1-5% asymmetric and grows modes at high contrast; it is kept for comparison and regression and
+    #: warns when selected. A genuinely anisotropic *bulk* material (a user tensor with non-zero
+    #: off-diagonal entries) always takes the ``"pixel"`` path, because the vertex array can only
+    #: carry the smoothing-induced off-diagonals of isotropic and diagonal materials.
+    yee_smooth_offdiag_placement: Literal["node", "pixel"] = frozen_field(default="node")
+
     #: Report how many Yee sample points disagree with what the legacy ``"box"`` path would have
     #: written, in ``info["yee_sampling_difference"]``. Off by default: answering it rasterises the
     #: whole scene a second time on the cell-centre lattice and holds another ``int32`` copy of the
@@ -183,6 +204,12 @@ class SimulationConfig(TreeClass):
 
         if self.yee_smooth_supersample < 1:
             raise ValueError(f"config.yee_smooth_supersample must be >= 1, got {self.yee_smooth_supersample}")
+
+        if self.yee_smooth_offdiag_placement not in YEE_OFFDIAG_PLACEMENTS:
+            raise ValueError(
+                "config.yee_smooth_offdiag_placement must be 'node' or 'pixel', "
+                f"got {self.yee_smooth_offdiag_placement!r}"
+            )
 
         if len(self.symmetry) != 3 or any(s not in (-1, 0, 1) for s in self.symmetry):
             raise ValueError(
@@ -263,6 +290,19 @@ class SimulationConfig(TreeClass):
         if self.yee_sampling_diagnostics:
             return True
         return os.environ.get(YEE_DIAGNOSTICS_ENV_VAR, "").strip().lower() in _TRUTHY
+
+    @property
+    def yee_smooth_offdiag_placement_resolved(self) -> str:
+        """The off-diagonal placement actually used, after the environment override.
+
+        Returns:
+            str: ``"node"`` or ``"pixel"``. ``FDTDX_YEE_OFFDIAG_PLACEMENT`` wins over the config
+                field when it names one of the two; any other value is ignored.
+        """
+        override = os.environ.get(YEE_OFFDIAG_PLACEMENT_ENV_VAR, "").strip().lower()
+        if override in YEE_OFFDIAG_PLACEMENTS:
+            return override
+        return self.yee_smooth_offdiag_placement
 
     @property
     def courant_number(self) -> float:
