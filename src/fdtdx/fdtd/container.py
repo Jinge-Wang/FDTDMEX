@@ -456,6 +456,16 @@ class ArrayContainer(TreeClass):
     #: Only used when etching a device.
     initial_inv_permittivities: jax.Array | None = None
 
+    #: Off-diagonal entries ``(xy, xz, yz)`` of the smoothed inverse permittivity, on the
+    #: **cell-vertex** lattice: shape ``(3, Nx, Ny, Nz)``, entry ``q`` at the vertex
+    #: ``(e_x[i], e_y[j], e_z[k])``, zero wherever no interface was blended. ``None`` — the default
+    #: — everywhere except ``material_sampling="yee_smooth"`` with
+    #: ``yee_smooth_offdiag_placement="node"``, and then the E update adds Meep's product-averaged
+    #: stencil of these entries to the otherwise unchanged diagonal update. Both coupled rows read
+    #: the same array, which is what makes the assembled D-to-E map exactly symmetric. It is a
+    #: run-fixed material array, carried like the conductivities rather than as a gradient primal.
+    inv_permittivity_offdiag: jax.Array | None = None
+
     def reset(
         self,
         reset_detector_states: bool = True,
