@@ -43,6 +43,41 @@ entry the elementwise update applies to ``E_c``; the optional full-tensor tier w
 ``c`` into the 9-component layout, and the loader counts the pixels where the diagonal tier had to
 drop a non-zero off-diagonal term.
 
+**Where the off-diagonal entries go.** Reading entry ``(i, j)`` of the tensor above and separating
+the identity part leaves, for ``i != j``, exactly ``n_i n_j (<1/eps> - 1/<eps>)``: a term that is
+non-zero at every pixel whose interface normal is tilted, even when both materials are isotropic.
+It is not an artefact — it is the second-order correction itself, and dropping it costs the order
+at a curved rim. Where it is *stored* decides whether the resulting operator is stable.
+
+Under ``yee_smooth_offdiag_placement="pixel"`` the whole row ``c`` is written at component ``c``'s
+own pixel, into a 9-component array. Row x's ``xy`` entry is then an average over the ``E_x`` box
+and row y's ``yx`` entry an average over the ``E_y`` box — two different boxes holding different
+material fractions — so the assembled D-to-E map is not symmetric (measured 1-5% in Frobenius norm),
+and the squared frequencies of the semi-discrete system leave the real axis: a curved rim grows a
+mode from a permittivity contrast of about 6 upwards.
+
+Under the default ``"node"`` the diagonal entries stay exactly where they are and the three
+off-diagonal entries ``(xy, xz, yz)`` move to the **cell vertices**, half a cell back along each
+row's own axis from its component point — which for all three rows is the same primary-grid vertex
+``(i, j, k)``, so it is one extra lattice, not three. Both coupled rows then read one shared number
+and the map is its own transpose entry for entry. The vertex's smoothing box is the dual cell on all
+three axes, centred on it, which is what ``pixel_axis_bounds`` already builds for any axis a
+component sits on an edge of, so the periodic mirroring and the non-periodic clip carry over
+unchanged. This is Meep's rule (``anisotropic_averaging.cpp`` evaluates the off-diagonal row at
+``here - shift1``) and the entries are applied with its ``OFFDIAG`` stencil in
+:func:`fdtdx.fdtd.misc.add_offdiag_correction`.
+
+Two kinds of vertex are written as zero and counted. One whose materials are not both lossless: the
+diagonal update's lossy factor is a per-component scalar and has no off-diagonal form short of
+writing the update on ``D``. And one where a material carries off-diagonal entries *of its own*: the
+vertex array holds what the smoothing induces, and a genuinely anisotropic bulk material has a term
+that belongs at its own cells, so such a scene keeps the dense pixel placement instead.
+
+Symmetry is necessary and not sufficient. Above a contrast of roughly 30 on a curved rim the
+symmetric part of the node-placed map loses positive definiteness and a purely growing,
+non-oscillatory mode becomes possible; ``yee_smooth_check_definiteness`` measures the smallest
+eigenvalue at build time (:func:`min_eigenvalue_of_symmetric_part`) and warns.
+
 **The blend, anisotropic materials.** Averaging a tensor entrywise is wrong: the quantity that is
 continuous across the interface is not ``E`` or ``D`` but the mixed vector made of the normal
 component of ``D`` and the two tangential components of ``E``. Kottke's change of variables ``tau``

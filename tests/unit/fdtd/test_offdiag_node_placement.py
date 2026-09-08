@@ -35,6 +35,15 @@ from fdtdx.objects.static_material.static import SimulationVolume, UniformMateri
 _COUNTER = [0]
 
 
+def _mlx_available() -> bool:
+    """Whether the MLX twin of the stencil can be exercised here."""
+    try:
+        import mlx.core  # noqa: F401
+    except Exception:  # pragma: no cover - depends on the machine
+        return False
+    return True
+
+
 def _tag() -> str:
     _COUNTER[0] += 1
     return f"nd{_COUNTER[0]}"
@@ -595,3 +604,80 @@ def test_the_two_dimensional_ez_polarization_cannot_be_touched(float64):
     # The in-plane rows stayed at zero, which is the second half of the mechanism.
     assert float(jnp.max(jnp.abs(node.fields.E[0]))) == 0.0
     assert float(jnp.max(jnp.abs(node.fields.E[1]))) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The MLX twin of the stencil
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not _mlx_available(), reason="the MLX helper needs mlx installed")
+@pytest.mark.parametrize(
+    "periodic",
+    [(False, False, False), (True, True, True), (True, False, True)],
+    ids=["terminated", "periodic", "mixed"],
+)
+def test_the_mlx_helper_agrees_with_the_jax_one(periodic):
+    """The MLX-op core's correction equals the JAX one on random arrays, to float32 round-off.
+
+    Run on the MLX CPU device: this box has no Metal available to the test process, and the
+    arithmetic is the same either way. The custom Metal kernels do not carry this term at all —
+    ``kernel_eligible`` refuses a run whose state has the vertex array, which the companion
+    assertion below pins — so the MLX path this exercises is the one such a run actually takes.
+    """
+    import mlx.core as mx
+
+    from fdtdx.mlx.update import add_offdiag_correction_mlx
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        rng = np.random.default_rng(31)
+        shape = (5, 4, 3)
+        entries = rng.standard_normal((3, *shape)).astype(np.float32)
+        increment = rng.standard_normal((3, *shape)).astype(np.float32)
+        field = rng.standard_normal((3, *shape)).astype(np.float32)
+
+        reference = np.asarray(
+            add_offdiag_correction(
+                jnp.asarray(field),
+                jnp.asarray(_pad_field(increment, periodic)),
+                jnp.asarray(_pad_entries(entries, periodic)),
+            )
+        )
+        obtained = np.asarray(
+            add_offdiag_correction_mlx(mx.array(field), mx.array(increment), mx.array(entries), periodic)
+        )
+        assert np.max(np.abs(reference - obtained)) < 2e-6 * max(float(np.max(np.abs(reference))), 1.0)
+    finally:
+        mx.set_default_device(previous)
+
+
+@pytest.mark.skipif(not _mlx_available(), reason="the kernel eligibility gate needs mlx installed")
+def test_the_metal_kernel_refuses_a_run_carrying_the_vertex_entries():
+    """A state with ``inv_eps_offdiag`` drops to the MLX-op cores, which do carry the correction."""
+    import mlx.core as mx
+
+    from fdtdx.mlx.kernels import kernel_eligible
+    from fdtdx.mlx.state import MLXState
+
+    previous = mx.default_device()
+    mx.set_default_device(mx.cpu)
+    try:
+        shape = (4, 4, 4)
+        state = MLXState(
+            E=mx.zeros((3, *shape)),
+            H=mx.zeros((3, *shape)),
+            psi_E=(),
+            psi_H=(),
+            inv_eps=mx.ones((3, *shape)),
+            inv_mu=1.0,
+            cpml_a=mx.zeros((6, *shape)),
+            cpml_b=mx.zeros((6, *shape)),
+            inv_kappa=mx.ones((6, *shape)),
+        )
+        assert kernel_eligible(state) is True
+        state.inv_eps_offdiag = mx.zeros((3, *shape))
+        assert kernel_eligible(state) is False
+    finally:
+        mx.set_default_device(previous)

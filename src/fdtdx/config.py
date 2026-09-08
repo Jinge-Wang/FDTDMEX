@@ -159,10 +159,12 @@ class SimulationConfig(TreeClass):
     #: sidewall). Boxes, cylinders and polygon extrusions are exact and never use it.
     yee_smooth_supersample: int = frozen_field(default=8)
 
-    #: Keep the off-diagonal Kottke terms under ``material_sampling="yee_smooth"``, allocating the
-    #: full 9-component inverse permittivity tensor. More accurate for tilted interfaces and
-    #: identical to the default diagonal tier for axis-aligned ones, but it costs the Metal
-    #: block-hybrid kernel wherever the tilted pixels are scattered.
+    #: Keep the off-diagonal Kottke terms under ``material_sampling="yee_smooth"``. They are the
+    #: second-order correction at a tilted interface and are exactly zero at an axis-aligned one, so
+    #: this changes nothing on a Manhattan scene. Where they are stored is
+    #: :attr:`yee_smooth_offdiag_placement`; under its default the permittivity array itself stays on
+    #: the cheap diagonal tier and only a second 3-component array is added. Either way the run
+    #: leaves the Metal bulk kernel for the MLX-op cores.
     yee_smooth_full_tensor: bool = frozen_field(default=False)
 
     #: Where the three off-diagonal Kottke entries live when ``yee_smooth_full_tensor`` is set.
