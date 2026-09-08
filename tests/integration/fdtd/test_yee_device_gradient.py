@@ -45,8 +45,15 @@ def _tag() -> str:
     return f"yd{_COUNTER[0]}"
 
 
-def _build(sampling: str, discrete: bool = False, gradient: bool = True):
-    """Strip waveguide + design region + dipole + energy detector, in one sampling mode."""
+def _build(sampling: str, discrete: bool = False, gradient: bool = True, curved: bool = False):
+    """Strip waveguide + design region + dipole + energy detector, in one sampling mode.
+
+    With ``curved`` the scene also carries a rod running along x above the strip and the run uses
+    the vertex (node) off-diagonal placement, so the E update gains the off-diagonal correction on
+    the rod's curved surface. The rod's normal is tilted in the ``y``-``z`` plane there, which is
+    what produces a non-zero ``yz`` vertex entry; a Manhattan scene would leave the array at zero
+    and the correction would be an identity.
+    """
     name = _tag()
     config = SimulationConfig(
         time=SIM_TIME,
@@ -55,6 +62,7 @@ def _build(sampling: str, discrete: bool = False, gradient: bool = True):
         dtype=jnp.float32,
         courant_factor=0.99,
         material_sampling=sampling,
+        yee_smooth_full_tensor=curved,
         gradient_config=GradientConfig(method="checkpointed", num_checkpoints=2) if gradient else None,
     )
     volume = fdtdx.SimulationVolume(
@@ -77,6 +85,26 @@ def _build(sampling: str, discrete: bool = False, gradient: bool = True):
     )
     objects.append(strip)
     constraints.extend([strip.same_size(volume, axes=(0,)), strip.place_at_center(volume, axes=(0, 1, 2))])
+
+    if curved:
+        rod = fdtdx.Cylinder(
+            name=f"rod_{name}",
+            axis=0,
+            radius=2.5 * SPACING,
+            material_name="core",
+            materials={"core": Material(permittivity=EPS_SI)},
+            placement_order=2,
+        )
+        objects.append(rod)
+        constraints.extend(
+            [
+                rod.same_size(volume, axes=(0,)),
+                rod.place_at_center(volume, axes=(0, 2)),
+                # Clear of the strip below and of the PML above: the rod's own curved face is the
+                # only interface the vertex pass has to describe.
+                rod.place_relative_to(volume, axes=(1,), own_positions=(0.0,), other_positions=(0.5,)),
+            ]
+        )
 
     device = fdtdx.Device(
         name=f"dev_{name}",
@@ -124,14 +152,14 @@ def _objective(params, container, arrays, config, key):
     return jnp.sum(final_arrays.detector_states[name]["energy"])
 
 
-_SCENES: dict[tuple[str, bool], tuple] = {}
+_SCENES: dict[tuple[str, bool, bool], tuple] = {}
 
 
-def _scene(sampling: str, discrete: bool = False):
-    """Placed scene, built once per (mode, parameter type) and reused across tests."""
-    key = (sampling, discrete)
+def _scene(sampling: str, discrete: bool = False, curved: bool = False):
+    """Placed scene, built once per (mode, parameter type, geometry) and reused across tests."""
+    key = (sampling, discrete, curved)
     if key not in _SCENES:
-        _SCENES[key] = _build(sampling, discrete=discrete)
+        _SCENES[key] = _build(sampling, discrete=discrete, curved=curved)
     return _SCENES[key]
 
 
@@ -241,3 +269,52 @@ def test_discrete_device_gradient_flows_under_yee_smooth():
     grads = jax.grad(_objective)(params, container, arrays, config, key)[device_name]
     assert bool(jnp.all(jnp.isfinite(grads)))
     assert float(jnp.max(jnp.abs(grads))) > 0.0
+
+
+def test_gradient_matches_a_finite_difference_next_to_a_curved_object_under_node_placement():
+    """AD vs a central difference with the vertex off-diagonal correction live in the E update.
+
+    The correction adds a term that couples ``E_y`` and ``E_z`` on the rod's curved surface, applied
+    with Meep's product-averaged stencil over the two bracketing vertices. It is linear in the
+    fields and its coefficients are run-fixed, so the checkpointed tape differentiates through it
+    exactly — but it does move the field, and a sign or an index error in the correction would show
+    up here as a gradient that no longer matches the finite difference of the objective it came
+    from.
+
+    The bar is the ``1e-3`` relative the ``"box"`` and ``"yee_smooth"`` rows already use. The
+    measured disagreement on this machine is 4.8e-5, alongside 4.9e-5 for ``"box"`` and 3.9e-5 for
+    ``"yee_smooth"`` without the rod — the correction costs no gradient accuracy.
+
+    A rod along x puts its normal in the ``y``-``z`` plane, so the loader writes 312 non-zero ``yz``
+    vertex entries here and none on ``xy`` or ``xz``. The assertions below check the array is alive
+    before trusting the gradient comparison.
+    """
+    container, arrays, params, config, info, device_name, _ = _scene("yee_smooth", curved=True)
+    # The correction is actually active: the loader wrote the vertex array and it is not all zero.
+    assert arrays.inv_permittivity_offdiag is not None
+    entries = np.asarray(arrays.inv_permittivity_offdiag, dtype=np.float64)
+    assert np.count_nonzero(entries) > 0
+    assert info["yee_sampling_difference"]["smoothing_offdiag"]["num_smoothed"] > 0
+    # The diagonal array stayed on the cheap tier — the entries moved, they were not added on top.
+    assert arrays.inv_permittivities.shape == (3, *DOMAIN)
+
+    key = jax.random.PRNGKey(1)
+    grads = jax.grad(_objective)(params, container, arrays, config, key)[device_name]
+    assert bool(jnp.all(jnp.isfinite(grads)))
+
+    flat_index = int(np.argmax(np.abs(np.asarray(grads))))
+    index = tuple(int(i) for i in np.unravel_index(flat_index, grads.shape))
+    analytic = float(grads[index])
+    assert abs(analytic) > 0.0
+
+    step = 0.05
+    base = params[device_name]
+
+    def shifted(delta: float) -> float:
+        perturbed = dict(params)
+        perturbed[device_name] = base.at[index].add(delta)
+        return float(_objective(perturbed, container, arrays, config, key))
+
+    finite = (shifted(step) - shifted(-step)) / (2.0 * step)
+    relative = abs(finite - analytic) / abs(finite)
+    assert relative < 1e-3, f"grad {analytic:.6e} vs finite difference {finite:.6e} ({relative:.2e})"
