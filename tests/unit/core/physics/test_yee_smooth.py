@@ -1282,6 +1282,115 @@ def test_the_dropped_off_diagonal_terms_are_counted():
     assert dropped[True] == 0
 
 
+def _tilted_half_plane(angle_deg: float, offset: float, size: float) -> np.ndarray:
+    """Vertices of a rectangle covering the half-plane ``n . x >= offset``, ``n`` at ``angle_deg``.
+
+    ``size`` only needs to exceed the domain: the polygon then behaves as a single flat interface at
+    the chosen tilt, with its other three edges far outside whatever pixel is under test.
+    """
+    theta = np.deg2rad(angle_deg)
+    normal = np.array([np.cos(theta), np.sin(theta)])
+    tangent = np.array([-np.sin(theta), np.cos(theta)])
+    near0 = offset * normal - 0.5 * size * tangent
+    near1 = offset * normal + 0.5 * size * tangent
+    return np.array([near0, near1, near1 + size * normal, near0 + size * normal])
+
+
+def test_a_tilted_diagonal_interface_is_smoothed_by_the_full_tau_blend_not_the_isotropic_formula():
+    """A diagonally anisotropic material at a normal that is not axis-aligned needs the real tensor.
+
+    The other feature-A end-to-end test (``test_an_anisotropic_interface_is_smoothed_instead_of_
+    skipped``) uses a slab normal to ``x``, where the blend reduces to the same per-component
+    harmonic/arithmetic split an isotropic treatment would give component by component — an
+    axis-aligned normal cannot exercise the tau transform's cross-coupling between components at
+    all. Here the interface is a half-plane at 60 degrees, so the pixel's normal has both an ``x``
+    and a ``y`` part and the effective tensor genuinely mixes them.
+
+    The gate: replacing the anisotropic material by its isotropic average (the mean of its three
+    principal values, at the same fill and normal) is the diagonal-tier-style approximation, and it
+    misses the true blend by a wide, precisely predicted margin — comparable in order of magnitude to
+    the 0.226 Q9v measured on its own scene, though this is a different scene and not the same
+    number. The production tensor function is also checked directly against the independent
+    reference tau transcription this file already uses for the hand-computed pixel above
+    (``_reference_kottke``), which never calls into the production module.
+    """
+    d, cells = 40e-9, 16
+    eps_hi_diag = np.array([10.0, 5.0, 2.0])
+    verts = _tilted_half_plane(angle_deg=60.0, offset=0.37 * d, size=4000e-9)
+    name = _tag()
+    config = _config(d, "yee_smooth", yee_smooth_full_tensor=True, yee_smooth_offdiag_placement="pixel")
+    volume = _volume((cells, cells, 1), f"v{name}")
+    poly = ExtrudedPolygon(
+        axis=2,
+        vertices=verts,
+        material_name="core",
+        materials={"core": Material(permittivity=tuple(eps_hi_diag))},
+        partial_grid_shape=(None, None, 1),
+        partial_real_position=(0.0, 0.0, 0.0),
+        placement_order=1,
+        name=f"p{name}",
+    )
+    container, arrays, _, resolved, info = fdtdx.place_objects([volume, poly], config, [])
+
+    stats = _smoothing_stats(info)
+    assert stats["num_anisotropic_skips"] == 0
+    assert stats["num_anisotropic_pixels"] > 0
+    assert stats["num_smoothed"] > 0
+
+    # Locate one clean two-material pixel near the tilted edge, comfortably away from 0/1 fill so it
+    # cannot be a degenerate-fill fallback, and away from the domain border and the polygon's other
+    # three (far away) edges.
+    grid = resolved.resolved_grid
+    component = 0
+    bounds = pixel_axis_bounds(grid, "E", component)
+    x_lower, x_upper = bounds[0]
+    y_lower, y_upper = bounds[1]
+    placed = next(o for o in container.object_list if o.name.startswith("p"))
+
+    target = None
+    for ix in range(4, cells - 4):
+        for iy in range(4, cells - 4):
+            x0, x1, y0, y1 = x_lower[ix], x_upper[ix], y_lower[iy], y_upper[iy]
+            area = float(
+                polygons_rectangle_area([verts], np.array([x0]), np.array([x1]), np.array([y0]), np.array([y1]))[0]
+            )
+            fill = area / ((x1 - x0) * (y1 - y0))
+            if 0.3 < fill < 0.7:
+                target = (ix, iy, fill, x0, x1, y0, y1)
+                break
+        if target is not None:
+            break
+    assert target is not None, "the sweep must find at least one clean two-material pixel near the tilted edge"
+    ix, iy, fill, x0, x1, y0, y1 = target
+    centre = np.array([[0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.0]])
+    normal = np.asarray(placed.normal_at(centre, ignore_axes=(2,))[0], dtype=float)
+
+    eps_hi, eps_lo = np.diag(eps_hi_diag), EPS_BG * np.eye(3)
+
+    # The production tensor function against the independent reference transcription: exact, no
+    # array, no float32 storage in the way.
+    direct = kottke_tensor(normal[None], eps_hi[None], eps_lo[None], np.array([fill]))[0]
+    reference = _reference_kottke(normal, eps_hi, eps_lo, fill)
+    np.testing.assert_allclose(direct, reference, rtol=0, atol=1e-12)
+
+    # The same prediction, read back out of the assembled array.
+    inv_eps = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    got_row = np.array([inv_eps[3 * component + j, ix, iy, 0] for j in range(3)])
+    np.testing.assert_allclose(got_row, direct[component], rtol=0, atol=1e-6)
+
+    # The counterfactual a diagonal-only (isotropic-average) treatment would give: the same fill and
+    # normal, but with the material replaced by the mean of its three principal values.
+    eps_hi_avg = float(np.mean(eps_hi_diag))
+    arithmetic_avg = fill * eps_hi_avg + (1 - fill) * EPS_BG
+    harmonic_avg = fill / eps_hi_avg + (1 - fill) / EPS_BG
+    isotropic_average = kottke_inverse_permittivity(
+        normal[None], np.array([arithmetic_avg]), np.array([harmonic_avg]), component, True
+    )[0]
+    assert abs(isotropic_average[component] - direct[component][component]) > 0.03, (
+        "the isotropic-average approximation must miss the true tau-path value by a wide margin"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (C) Periodic images across a Bloch/periodic face
 # ---------------------------------------------------------------------------
@@ -1476,6 +1585,75 @@ def test_a_seam_pixel_reached_by_two_images_is_counted_not_smoothed():
         found += two_images.size
         np.testing.assert_array_equal(smoothed[component][two_images], sampled[component][two_images])
     assert found > 0, "the slab must reach at least one pixel with two of its images"
+
+
+def test_an_image_that_misses_the_domain_still_reaches_the_domain_edge_pixel():
+    """Q8v amendment 1: prune a candidate image against the coordinates evaluated, never the domain.
+
+    An object entirely inside the domain can have an ``m = -1`` image whose translated bounds miss
+    the true domain ``[e_0, e_N)`` completely, yet the image still reaches the extended half-cell
+    pixel the periodic corner lattice adds below ``e_0`` (``geometry_smooth.py``, the domain-edge
+    pixel test above this section). The refuted rule prunes a shift by testing its translated bounds
+    against the domain; the rule actually implemented prunes it against the coordinate array being
+    evaluated instead, which for a periodic axis extends below ``e_0``. The two rules disagree at
+    exactly this pixel.
+
+    This is deliberately *not* the seam slab already in this file
+    (``test_a_seam_pixel_reached_by_two_images_is_counted_not_smoothed``): that slab's own direct
+    instance also reaches the domain-edge pixel, so it is a genuine two-shift pixel and the
+    amendment-3 guard keeps its point sample regardless of which pruning rule found the image — nine
+    of the ten mutations Q9v tried were caught that way, but the domain-pruning mutation survived
+    for exactly this reason (Q9v's review, S2). Here the slab sits well inside the domain — nowhere
+    near either edge on its own — so only its image ever reaches this pixel, the pixel is a genuine
+    *single*-shift candidate, and the two rules give numerically different, both individually
+    plausible-looking answers: a domain-pruning implementation drops the image and leaves the pixel
+    at its raw background point sample; the implemented rule keeps it and the pixel is smoothed to a
+    specific, analytically predicted fill.
+    """
+    d, cells = SEAM_D, 10
+    lo, hi = 2.9 * d, 4.9 * d  # a 2-cell slab, comfortably inside (-5d, 5d) and nowhere near e_0
+
+    def slab(tag):
+        return [
+            UniformMaterialObject(
+                material=Material(permittivity=EPS_CORE),
+                partial_real_shape=(hi - lo, None, d),
+                partial_real_position=(0.5 * (lo + hi), 0.0, 0.0),
+                placement_order=1,
+                name=f"w{tag}",
+            )
+        ]
+
+    container, arrays, resolved, _info = _periodic_scene(slab, "yee_smooth", _tag(), shape=(cells, cells, 1))
+    _, point, _, _ = _periodic_scene(slab, "yee", _tag(), shape=(cells, cells, 1))
+
+    grid = resolved.resolved_grid
+    edges = np.asarray(grid.edges(0), dtype=float)
+    period = float(edges[-1] - edges[0])
+    placed = next(o for o in container.object_list if o.name.startswith("w"))
+    plo, phi = placed.metric_bounds[0]
+    assert plo > edges[0] and phi < edges[-1], "the slab's own instance must sit well inside the domain"
+
+    # The m = -1 image must miss the true domain [e_0, e_N) entirely...
+    assert phi - period <= edges[0], "the image must miss the domain completely for this test to isolate amendment 1"
+    # ...yet still reach the extended half-cell pixel below e_0 (component 1 is dual on axis 0).
+    window_lower, window_upper = pixel_axis_bounds(grid, "E", 1, container.periodic_axes)[0]
+    window_lo, window_hi = float(window_lower[0]), float(window_upper[0])
+    assert phi - period > window_lo, "the image must still cover part of the domain-edge pixel"
+    # The slab's direct instance must not reach this pixel at all, so the pixel is single-shift.
+    assert plo > window_hi, "the direct instance must not also reach the domain-edge pixel"
+
+    expected_fill = (min(phi - period, window_hi) - max(plo - period, window_lo)) / (window_hi - window_lo)
+    # Tangential to the slab's x-normal interface: the arithmetic mean of eps, then inverted.
+    expected_tangential = 1.0 / (expected_fill * EPS_CORE + (1 - expected_fill) * EPS_BG)
+
+    smoothed = np.asarray(arrays.inv_permittivities, dtype=np.float64)
+    sampled = np.asarray(point.inv_permittivities, dtype=np.float64)
+    assert sampled[1][0, 0, 0] == pytest.approx(1.0 / EPS_BG, rel=1e-6), "the raw point sample must be pure background"
+    assert smoothed[1][0, 0, 0] == pytest.approx(expected_tangential, rel=1e-6)
+    assert abs(smoothed[1][0, 0, 0] - sampled[1][0, 0, 0]) > 0.1, (
+        "the window rule must move this pixel by far more than noise"
+    )
 
 
 def test_the_seam_crossing_rim_recovers_the_wrapped_normal():
