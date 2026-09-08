@@ -304,6 +304,32 @@ def _tilted_slab(eps_core: float, tag: str, cells: int = _N):
     )
 
 
+def _silicon_air_edge_slab(eps_core: float, tag: str, cells: int = _N):
+    """A tilted rectangle whose long edge is one straight interface, for F5's hand-computed check.
+
+    Sized so a handful of vertices near the middle of the long edge sit several cells from the
+    short edges and from the domain's periodic seam: the fill fraction there is exactly what one
+    straight line cuts off a rectangle, checkable against the shape's own ``box_fill_fraction``
+    independently of the vertex-vs-pixel choice ``smooth_offdiagonal_on_vertex_lattice`` makes.
+    """
+    half_long = 0.42 * cells * _D
+    half_short = 0.12 * cells * _D
+    corners = np.array(
+        [[-half_long, -half_short], [half_long, -half_short], [half_long, half_short], [-half_long, half_short]]
+    )
+    angle = np.radians(20.0)
+    rotation = np.array([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]])
+    return ExtrudedPolygon(
+        axis=2,
+        vertices=corners @ rotation.T,
+        material_name="core",
+        materials={"core": Material(permittivity=eps_core)},
+        partial_grid_shape=(None, None, 1),
+        placement_order=1,
+        name=f"edge{tag}",
+    )
+
+
 def _periodic_scene(shape_fn, eps_core: float, cells: int = _N, **config_kwargs):
     """One shape in a fully periodic 2-D box, loaded through the fork's own material loader."""
     tag = _tag()
@@ -434,6 +460,69 @@ def test_the_min_eigenvalue_helper_reports_a_positive_value_without_the_correcti
     assert estimate["min_eig_sym_dtoe"] == pytest.approx(0.125, rel=1e-6)
     assert estimate["max_eig_sym_dtoe"] == pytest.approx(0.25, rel=1e-6)
     assert estimate["asym_rel_dtoe"] < 1e-12
+
+
+def test_the_vertex_lattice_matches_a_hand_computed_fill_and_normal_at_silicon_contrast(float64):
+    """Pins the vertex dual box directly, at eps = 12.1 (silicon/air), where F5 found a gap.
+
+    ``test_the_assembled_map_is_symmetric_and_its_spectrum_is_real`` would still pass if
+    ``smooth_offdiagonal_on_vertex_lattice`` sampled the ``E_x`` component pixel instead of the
+    cell-vertex dual box: both coupled rows would still read one *consistent* box, so the map
+    stays exactly symmetric, and at eps = 12.1 it stays positive definite too (the mutation needs
+    eps = 20 before the spectrum test notices). Only the number actually written at a vertex tells
+    the two boxes apart, so this test computes that number by hand and checks it directly.
+
+    The scene is a tilted rectangle of eps = 12.1 in eps = 1, one straight interface. At a handful
+    of vertices near the middle of its long edge -- several cells from any other edge, corner, or
+    the domain's periodic seam -- the fill fraction is exactly what one straight line cuts off a
+    rectangle, so it is read here from the shape's own ``box_fill_fraction`` / ``normal_at``
+    (simple, independently trustworthy primitives) against box bounds built from nothing but the
+    grid edges and dx -- NOT from the loader's own ``pixel_axis_bounds``, so a wrong field-code
+    choice inside the function under test has nowhere to hide. The ``E_x`` component box (same as
+    the vertex box on every axis except a dx/2 shift along x, matching ``pixel_axis_bounds``'s own
+    ``offsets[axis] == 0.5`` branch) is computed the same way, to confirm it would give a clearly
+    different, not merely rounded, answer.
+    """
+    container, arrays, config, _ = _periodic_scene(_silicon_air_edge_slab, 12.1, cells=_N, dtype=jnp.float64)
+    obj = next(o for o in container.object_list if o.name.startswith("edge"))
+    grid = config.resolved_grid
+    edges_x = np.asarray(grid.edges(0))
+    edges_y = np.asarray(grid.edges(1))
+    edges_z = np.asarray(grid.edges(2))
+    z_lo, z_hi = float(edges_z[0]), float(edges_z[-1])
+    eps_core, eps_bg = 12.1, 1.0
+
+    def fill_of(lower, upper):
+        result = obj.box_fill_fraction(np.asarray([lower]), np.asarray([upper]))
+        assert result is not None
+        return float(result[0])
+
+    def offdiag_xy(fill: float, normal: np.ndarray) -> float:
+        arithmetic = fill * eps_core + (1.0 - fill) * eps_bg  # <eps>
+        harmonic = fill / eps_core + (1.0 - fill) / eps_bg  # <1/eps>
+        return float(normal[0] * normal[1] * (harmonic - 1.0 / arithmetic))
+
+    entries = np.asarray(arrays.inv_permittivity_offdiag, dtype=np.float64)
+    # Three vertices along the tilted edge (checked once, offline, against this same scene): the
+    # vertex box and the E_x component box give clearly different fills at every one of them.
+    for i, j in ((4, 5), (7, 6), (10, 7)):
+        xi, yj = float(edges_x[i]), float(edges_y[j])
+        fill_vertex = fill_of((xi - 0.5 * _D, yj - 0.5 * _D, z_lo), (xi + 0.5 * _D, yj + 0.5 * _D, z_hi))
+        fill_component = fill_of((xi, yj - 0.5 * _D, z_lo), (xi + _D, yj + 0.5 * _D, z_hi))
+        assert 0.05 < fill_vertex < 0.95, "the probe should be a genuine interface vertex, not a corner"
+        assert abs(fill_vertex - fill_component) > 0.15, "the two boxes must disagree substantially here"
+
+        normal = np.asarray(obj.normal_at(np.asarray([[xi, yj, 0.5 * (z_lo + z_hi)]]), ignore_axes=(2,)))[0]
+        normal = normal / np.linalg.norm(normal)
+        assert normal[2] == 0.0  # extruded along z, invariant there
+
+        expected_xy = offdiag_xy(fill_vertex, normal)
+        wrong_xy = offdiag_xy(fill_component, normal)  # what the F5 mutation would write instead
+        assert abs(wrong_xy - expected_xy) > 0.03, "the wrong box should not be a rounding-level change"
+
+        assert entries[0, i, j, 0] == pytest.approx(expected_xy, abs=1e-9), f"xy at vertex ({i}, {j})"
+        assert entries[1, i, j, 0] == 0.0  # xz: normal has no z component
+        assert entries[2, i, j, 0] == 0.0  # yz
 
 
 # ---------------------------------------------------------------------------
