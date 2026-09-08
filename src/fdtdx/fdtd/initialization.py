@@ -4,6 +4,7 @@ from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from loguru import logger
 
 from fdtdx import constants
@@ -960,6 +961,29 @@ def _init_arrays(
         )
         if scene_arrays.inv_permittivity_offdiag is not None:
             inv_permittivity_offdiag = jnp.asarray(scene_arrays.inv_permittivity_offdiag, dtype=config.dtype)
+            if config.yee_smooth_check_definiteness:
+                from fdtdx.core.physics.geometry_smooth import min_eigenvalue_of_symmetric_part
+
+                smoothing_info = scene_arrays.sampling_difference.get("smoothing")
+                estimate = min_eigenvalue_of_symmetric_part(
+                    np.asarray(scene_arrays.inv_permittivities, dtype=np.float64),
+                    np.asarray(scene_arrays.inv_permittivity_offdiag, dtype=np.float64),
+                    objects.periodic_axes,
+                )
+                if smoothing_info is not None:
+                    smoothing_info.update(estimate)
+                if estimate["min_eig_sym_dtoe"] <= 0.0:
+                    warnings.warn(
+                        "The symmetric part of the assembled D-to-E map has smallest eigenvalue "
+                        f"{estimate['min_eig_sym_dtoe']:.4g} <= 0, so the semi-discrete system is "
+                        "not guaranteed to have real frequencies and a purely growing mode is "
+                        "possible. This is the high-contrast failure of the node placement (it "
+                        "appears above a permittivity contrast of roughly 30 on a curved rim); "
+                        "reduce the contrast, refine the grid around the interface, or accept the "
+                        "risk knowingly.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
         if scene_arrays.inv_permeabilities is not None:
             inv_permeabilities = sharding_preserving_set(
                 inv_permeabilities, full_index, jnp.asarray(scene_arrays.inv_permeabilities, dtype=config.dtype)

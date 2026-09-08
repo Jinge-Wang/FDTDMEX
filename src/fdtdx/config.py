@@ -179,6 +179,14 @@ class SimulationConfig(TreeClass):
     #: carry the smoothing-induced off-diagonals of isotropic and diagonal materials.
     yee_smooth_offdiag_placement: Literal["node", "pixel"] = frozen_field(default="node")
 
+    #: Estimate the smallest eigenvalue of the symmetric part of the assembled D-to-E map at build
+    #: time (a few dozen sparse mat-vecs, no per-step cost) and report it under
+    #: ``info["yee_sampling_difference"]["smoothing"]["min_eig_sym_dtoe"]``. Symmetry alone does not
+    #: bound the spectrum: above a permittivity contrast of roughly 30 the symmetric part of the
+    #: node-placed map can lose positive definiteness, which shows up as a purely growing mode. Off
+    #: by default because the check costs a sparse eigensolve on the whole domain.
+    yee_smooth_check_definiteness: bool = frozen_field(default=False)
+
     #: Report how many Yee sample points disagree with what the legacy ``"box"`` path would have
     #: written, in ``info["yee_sampling_difference"]``. Off by default: answering it rasterises the
     #: whole scene a second time on the cell-centre lattice and holds another ``int32`` copy of the

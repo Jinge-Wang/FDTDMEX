@@ -1306,6 +1306,142 @@ def smooth_offdiagonal_on_vertex_lattice(
     return target, stats
 
 
+def apply_dtoe_map(
+    inv_permittivities: np.ndarray,
+    inv_permittivity_offdiag: np.ndarray | None,
+    vector: np.ndarray,
+    periodic_axes: tuple[bool, bool, bool],
+) -> np.ndarray:
+    """Apply the assembled D-to-E map to a ``(3, Nx, Ny, Nz)`` vector, on the host.
+
+    The same arithmetic the JAX update does — the elementwise diagonal multiply plus the
+    vertex-placed off-diagonal stencil of :func:`fdtdx.fdtd.misc.add_offdiag_correction` — written in
+    NumPy so the build-time definiteness check can run it as a ``LinearOperator`` without a JAX
+    trace. Boundaries follow the field padding: wrap on a periodic axis, zero elsewhere.
+
+    Args:
+        inv_permittivities (np.ndarray): ``(3, Nx, Ny, Nz)`` diagonal entries at the component
+            pixels.
+        inv_permittivity_offdiag (np.ndarray | None): ``(3, Nx, Ny, Nz)`` vertex entries
+            ``(xy, xz, yz)``, or None for the diagonal map alone.
+        vector (np.ndarray): ``(3, Nx, Ny, Nz)`` input.
+        periodic_axes (tuple): Which axes wrap.
+
+    Returns:
+        np.ndarray: ``(3, Nx, Ny, Nz)`` image of ``vector``.
+    """
+    from fdtdx.fdtd.misc import OFFDIAG_ROW_PARTNERS
+
+    vector = np.asarray(vector, dtype=float)
+    out = np.asarray(inv_permittivities, dtype=float) * vector
+    if inv_permittivity_offdiag is None:
+        return out
+    pad = [(0, 0)] + [(1, 1)] * 3
+    field_pad = np.zeros((3, *[n + 2 for n in vector.shape[1:]]), dtype=float)
+    field_pad[:, 1:-1, 1:-1, 1:-1] = vector
+    entry_pad = np.pad(np.asarray(inv_permittivity_offdiag, dtype=float), pad, mode="edge")
+    for axis, wrap in enumerate(periodic_axes):
+        if not wrap:
+            continue
+        single = [(0, 0)] * 4
+        single[axis + 1] = (1, 1)
+        field_pad = np.pad(field_pad[_strip(axis)], single, mode="wrap")
+        entry_pad = np.pad(entry_pad[_strip(axis)], single, mode="wrap")
+    shape = vector.shape[1:]
+    for component in range(3):
+        for partner, entry in OFFDIAG_ROW_PARTNERS[component]:
+            for near in (0, 1):
+                offsets = [0, 0, 0]
+                offsets[component] = near
+                vertex = _numpy_window(entry_pad[entry], tuple(offsets), shape)
+                upper = _numpy_window(field_pad[partner], tuple(offsets), shape)
+                lower_offsets = list(offsets)
+                lower_offsets[partner] -= 1
+                lower = _numpy_window(field_pad[partner], tuple(lower_offsets), shape)
+                out[component] += 0.5 * vertex * 0.5 * (upper + lower)
+    return out
+
+
+def _strip(axis: int) -> tuple[slice, ...]:
+    """Drop the one-cell halo on one spatial axis of a ``(C, Nx+2, Ny+2, Nz+2)`` array."""
+    index: list[slice] = [slice(None)] * 4
+    index[axis + 1] = slice(1, -1)
+    return tuple(index)
+
+
+def _numpy_window(array: np.ndarray, offsets: tuple[int, int, int], shape: tuple[int, ...]) -> np.ndarray:
+    """The interior of a halo-padded 3-D array, shifted by whole cells on each axis."""
+    index = tuple(slice(1 + offsets[axis], 1 + offsets[axis] + shape[axis]) for axis in range(3))
+    return array[index]
+
+
+def min_eigenvalue_of_symmetric_part(
+    inv_permittivities: np.ndarray,
+    inv_permittivity_offdiag: np.ndarray,
+    periodic_axes: tuple[bool, bool, bool],
+    num_probes: int = 4,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Smallest eigenvalue of the symmetric part of the assembled D-to-E map, by sparse Lanczos.
+
+    With ``M`` the D-to-E map and ``C`` the discrete curl, the semi-discrete system is
+    ``d2E/dt2 = -M C^T C E``, so the squared frequencies are the eigenvalues of ``M K`` with
+    ``K = C^T C`` symmetric positive semi-definite. If ``M`` is symmetric **positive definite**,
+    ``M K`` is similar to ``M^(1/2) K M^(1/2)`` and every squared frequency is real and
+    non-negative — no mode can grow. Symmetry alone is not enough: the vertex placement is symmetric
+    to machine zero at every contrast, and yet above a permittivity contrast of roughly 30 on a
+    curved rim the symmetric part loses definiteness and a real negative squared frequency appears.
+    That is what this check catches, at a cost of a few dozen mat-vecs at build time and nothing per
+    step.
+
+    The measured asymmetry is reported alongside, because ``eigsh`` assumes a symmetric operator and
+    a non-zero value would invalidate its answer rather than merely be interesting.
+
+    Args:
+        inv_permittivities (np.ndarray): ``(3, Nx, Ny, Nz)`` diagonal entries.
+        inv_permittivity_offdiag (np.ndarray): ``(3, Nx, Ny, Nz)`` vertex entries.
+        periodic_axes (tuple): Which axes wrap.
+        num_probes (int): Random vector pairs used for the asymmetry estimate.
+        seed (int): Seed of those probes, so the reported number is reproducible.
+
+    Returns:
+        dict: ``min_eig_sym_dtoe``, ``max_eig_sym_dtoe``, ``asym_rel_dtoe`` and
+        ``min_eig_sym_dtoe_positive``.
+    """
+    from scipy.sparse.linalg import LinearOperator, eigsh
+
+    shape = inv_permittivities.shape
+    size = int(np.prod(shape))
+
+    def matvec(flat: np.ndarray) -> np.ndarray:
+        return apply_dtoe_map(
+            inv_permittivities, inv_permittivity_offdiag, flat.reshape(shape).astype(float), periodic_axes
+        ).reshape(-1)
+
+    operator = LinearOperator((size, size), matvec=matvec, rmatvec=matvec, dtype=float)
+
+    # <u, M v> - <M u, v> over random probes: exactly zero for a symmetric map, and the number to
+    # look at first if the eigenvalues ever look wrong.
+    rng = np.random.default_rng(seed)
+    asymmetry = 0.0
+    scale = 0.0
+    for _ in range(num_probes):
+        u = rng.standard_normal(size)
+        v = rng.standard_normal(size)
+        mu, mv = matvec(u), matvec(v)
+        asymmetry = max(asymmetry, abs(float(u @ mv - mu @ v)))
+        scale = max(scale, abs(float(u @ mv)), abs(float(mu @ v)))
+
+    smallest = float(eigsh(operator, k=1, which="SA", return_eigenvectors=False, tol=1e-10, maxiter=20000)[0])
+    largest = float(eigsh(operator, k=1, which="LA", return_eigenvectors=False, tol=1e-10, maxiter=20000)[0])
+    return {
+        "min_eig_sym_dtoe": smallest,
+        "max_eig_sym_dtoe": largest,
+        "asym_rel_dtoe": asymmetry / scale if scale > 0.0 else 0.0,
+        "min_eig_sym_dtoe_positive": bool(smallest > 0.0),
+    }
+
+
 def _electrically_conductive(scene: Scene) -> np.ndarray:
     """Per global material: does it carry any electric conductivity at all?"""
     from fdtdx.materials import compute_allowed_electric_conductivities
