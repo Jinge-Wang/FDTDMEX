@@ -807,6 +807,22 @@ def _init_arrays(
     else:
         num_perm_components = 9
 
+    if node_offdiag and num_perm_components != 3:
+        # Something downstream of the placement decision widened the permittivity anyway — oriented
+        # dispersive poles are the case that exists today. The 9-component update reads the whole
+        # row from the array itself and never looks at the vertex entries, so writing them would
+        # allocate an array nothing applies. Fall back to the dense placement, which that update
+        # does read.
+        node_offdiag = False
+        warnings.warn(
+            "yee_smooth_offdiag_placement='node' was requested but the permittivity array was "
+            "widened to the 9-component tier by another feature of this scene (oriented dispersive "
+            "poles are the case that does this), whose update reads the tensor rows directly. "
+            "Falling back to the dense pixel placement for this run.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     if isotropic_permeability:
         num_permeability_components = 1
     elif diagonally_anisotropic_permeability:

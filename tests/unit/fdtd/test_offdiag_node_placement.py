@@ -681,3 +681,92 @@ def test_the_metal_kernel_refuses_a_run_carrying_the_vertex_entries():
         assert kernel_eligible(state) is False
     finally:
         mx.set_default_device(previous)
+
+
+# ---------------------------------------------------------------------------
+# The gates that send a scene back to the dense placement
+# ---------------------------------------------------------------------------
+
+
+def test_a_bulk_tensor_material_falls_back_to_the_dense_placement():
+    """The vertex array holds smoothing-induced off-diagonals only.
+
+    A material whose own permittivity tensor has off-diagonal entries has a bulk term that belongs
+    at its own cells, and separating the two on one shared array is not defined. Such a scene keeps
+    the recorded dense 9-component path, and says so.
+    """
+    tag = _tag()
+    tilted = (6.0, 0.8, 0.0, 0.8, 5.0, 0.0, 0.0, 0.0, 4.0)
+    config = _config()
+    volume = SimulationVolume(partial_grid_shape=(12, 12, 1), material=Material(permittivity=1.0), name=f"vol{tag}")
+    disk = Cylinder(
+        axis=2,
+        radius=3.0 * _D,
+        material_name="core",
+        materials={"core": Material(permittivity=tilted)},
+        partial_grid_shape=(None, None, 1),
+        placement_order=1,
+        name=f"disk{tag}",
+    )
+    with pytest.warns(UserWarning, match="off-diagonal permittivity entries of its own"):
+        _, arrays, _, _, _ = fdtdx.place_objects([volume, disk], config, [])
+    assert arrays.inv_permittivities.shape[0] == 9
+    assert arrays.inv_permittivity_offdiag is None
+
+
+def test_an_oriented_dispersive_pole_falls_back_to_the_dense_placement():
+    """Anything else that widens the permittivity array takes the vertex entries with it.
+
+    Oriented poles force the 9-component tier further down in initialization, and that update reads
+    the tensor rows straight out of the array — it never looks at a vertex entry. Writing them would
+    allocate an array nothing applies, so the placement follows the tier.
+    """
+    from fdtdx.dispersion import DispersionModel, LorentzPole
+
+    tag = _tag()
+    pole = LorentzPole(resonance_frequency=2e14, damping=1e13, delta_epsilon=2.0, orientation=(1.0, 1.0, 0.0))
+    config = _config()
+    volume = SimulationVolume(partial_grid_shape=(12, 12, 1), material=Material(permittivity=1.0), name=f"vol{tag}")
+    disk = Cylinder(
+        axis=2,
+        radius=3.0 * _D,
+        material_name="core",
+        materials={"core": Material(permittivity=6.25, dispersion=DispersionModel(poles=(pole,)))},
+        partial_grid_shape=(None, None, 1),
+        placement_order=1,
+        name=f"disk{tag}",
+    )
+    with pytest.warns(UserWarning, match="widened to the 9-component tier"):
+        _, arrays, _, _, _ = fdtdx.place_objects([volume, disk], config, [])
+    assert arrays.inv_permittivities.shape[0] == 9
+    assert arrays.inv_permittivity_offdiag is None
+
+
+def test_a_lossy_vertex_keeps_a_zero_entry_and_is_counted():
+    """A conductive interface gets no off-diagonal term, and the loader says how many it skipped.
+
+    The diagonal branch divides by ``1 + c sigma eta0 inv_eps / 2``, a per-component scalar. There
+    is no off-diagonal form of that factor without writing the update on ``D``, so rather than scale
+    the correction by a factor that does not describe it, the vertex is left at zero and counted.
+    """
+    tag = _tag()
+    config = _config()
+    volume = SimulationVolume(partial_grid_shape=(16, 16, 1), material=Material(permittivity=1.0), name=f"vol{tag}")
+    disk = Cylinder(
+        axis=2,
+        radius=0.30 * 16 * _D,
+        material_name="core",
+        materials={"core": Material(permittivity=6.25, electric_conductivity=0.5)},
+        partial_grid_shape=(None, None, 1),
+        placement_order=1,
+        name=f"disk{tag}",
+    )
+    _, arrays, _, _, info = fdtdx.place_objects([volume, disk], config, [])
+    stats = info["yee_sampling_difference"]["smoothing_offdiag"]
+    assert stats["num_lossy_offdiag_skips"] > 0
+    assert stats["num_lossy_offdiag_skips"] == stats["num_candidates"]
+    assert np.count_nonzero(np.asarray(arrays.inv_permittivity_offdiag)) == 0
+
+    # The lossless twin of the same scene does write entries, so the counter above is not vacuous.
+    _, lossless, _, _ = _periodic_scene(_disk, 6.25)
+    assert np.count_nonzero(np.asarray(lossless.inv_permittivity_offdiag)) > 0
