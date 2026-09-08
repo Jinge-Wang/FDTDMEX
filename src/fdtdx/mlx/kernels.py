@@ -139,8 +139,17 @@ def kernel_eligible(state) -> bool:
     ``reference_spacing/cell_width`` buffer). Heterogeneous full-tensor materials are handled by the
     block hybrid (kernel for the iso/diag bulk, MLX-op aniso over a compact interior inclusion
     bbox) — eligible only lossless, uniform-grid, with that bbox compact + PML-disjoint.
+
+    **Vertex-placed off-diagonal entries are not eligible.** ``state.inv_eps_offdiag`` carries the
+    off-diagonal Kottke entries on the cell vertices, applied with a gather over both neighbouring
+    vertices and both straddling partner samples. That stencil is not in the Metal E-kernel's MSL
+    (which computes the elementwise ``cb * curl`` bulk only), so such a run drops to the MLX-op
+    cores, where ``update.add_offdiag_correction_mlx`` applies it. Folding it into the kernel is a
+    later stage; the sparse index-list form is the shape it should take there.
     """
     if state.sigma_E is not None or state.sigma_H is not None:
+        return False
+    if getattr(state, "inv_eps_offdiag", None) is not None:
         return False
     # Drude-Lorentz dispersion needs no gate here: it is always iso/diagonal (fdtdx forbids it with
     # off-diagonal tensors), so a lossless dispersive run is already eligible and rides the E-kernel's

@@ -49,6 +49,9 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_me
     a, b, ik = state.cpml_a, state.cpml_b, state.inv_kappa
     mfwd, mbwd = state.metric_fwd, state.metric_bwd
     per, awid, ext = state.periodic_axes, state.aniso_widths, state.cpml_extents
+    # Vertex-placed off-diagonal entries of the smoothed inverse permittivity: another time-invariant
+    # material array, captured like inv_eps. None leaves the E-core's graph unchanged.
+    off = state.inv_eps_offdiag
 
     if state.dispersive_c1 is not None:
         # Drude-Lorentz (ADE): thread polarization P through the E-core; coefficients are captured
@@ -57,12 +60,31 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_me
 
         def e_core(E, H, psi_E, P_curr, P_prev):
             return _update_E(
-                E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb, dc1, dc2, dc3, P_curr, P_prev
+                E,
+                H,
+                psi_E,
+                inv_eps,
+                sigma_E,
+                a,
+                b,
+                ik,
+                mbwd,
+                per,
+                ext,
+                awid,
+                c,
+                sb,
+                dc1,
+                dc2,
+                dc3,
+                P_curr,
+                P_prev,
+                off,
             )
     else:
 
         def e_core(E, H, psi_E):
-            return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb)
+            return _update_E(E, H, psi_E, inv_eps, sigma_E, a, b, ik, mbwd, per, ext, awid, c, sb, offdiag=off)
 
     def h_core(E, H, psi_H):
         return _update_H(E, H, psi_H, inv_mu, sigma_H, a, b, ik, mfwd, per, ext, awid, c, sb)

@@ -133,6 +133,11 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
         inv_kappa=_to_mx(inv_kappa),
         sigma_E=None if arrays.electric_conductivity is None else _to_mx(arrays.electric_conductivity),
         sigma_H=None if arrays.magnetic_conductivity is None else _to_mx(arrays.magnetic_conductivity),
+        inv_eps_offdiag=(
+            None
+            if getattr(arrays, "inv_permittivity_offdiag", None) is None
+            else _to_mx(arrays.inv_permittivity_offdiag)
+        ),
         periodic_axes=periodic_axes,
         cpml_extents=extents,
         metric_fwd=metric_fwd,
