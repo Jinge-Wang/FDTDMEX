@@ -68,7 +68,14 @@ YEE_MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("yee", "yee_smooth")
 YEE_DIAGNOSTICS_ENV_VAR = "FDTDX_YEE_SAMPLING_DIAGNOSTICS"
 
 #: The accepted values of :attr:`SimulationConfig.yee_smooth_offdiag_placement`.
-YEE_OFFDIAG_PLACEMENTS: tuple[str, ...] = ("node", "pixel")
+YEE_OFFDIAG_PLACEMENTS: tuple[str, ...] = ("node", "node_avg", "vertex_all", "pixel")
+
+#: The subset of :data:`YEE_OFFDIAG_PLACEMENTS` that keeps the permittivity array on the cheap
+#: 3-component diagonal tier and carries the three off-diagonal entries in a second array on the
+#: cell-vertex lattice, applied by the additive stencil. All three are exactly symmetric, because
+#: both coupled rows read one shared array; they differ only in which boxes the entries are
+#: integrated over. Test membership through this tuple rather than comparing to ``"node"``.
+YEE_OFFDIAG_VERTEX_PLACEMENTS: tuple[str, ...] = ("node", "node_avg", "vertex_all")
 
 #: Environment variable that selects the off-diagonal placement without touching the config, so a
 #: recorded case script can be re-run under either one.
@@ -179,7 +186,18 @@ class SimulationConfig(TreeClass):
     #: warns when selected. A genuinely anisotropic *bulk* material (a user tensor with non-zero
     #: off-diagonal entries) always takes the ``"pixel"`` path, because the vertex array can only
     #: carry the smoothing-induced off-diagonals of isotropic and diagonal materials.
-    yee_smooth_offdiag_placement: Literal["node", "pixel"] = frozen_field(default="node")
+    #:
+    #: ``"node"`` mixes two families of box: the diagonal entries are integrated over the component
+    #: pixels and the off-diagonal entries over the vertex dual cell, so the effective tensor at one
+    #: unknown is not the Kottke tensor of any single region and the first-order term of the
+    #: smoothing error no longer cancels (measured: about 27% of the error at 10 nm on a 2-D disk).
+    #: Two further values keep the exact symmetry and use one consistent family of boxes:
+    #: ``"node_avg"`` computes the full Kottke row at every component pixel, as ``"pixel"`` does,
+    #: and forms the vertex entry as the plain mean of the four component pixels adjacent to the
+    #: vertex in that entry's plane; ``"vertex_all"`` computes the whole Kottke tensor on the vertex
+    #: dual cells and takes the diagonal entry of component ``c`` as the mean of the two vertices
+    #: bracketing it along its own axis.
+    yee_smooth_offdiag_placement: Literal["node", "node_avg", "vertex_all", "pixel"] = frozen_field(default="node")
 
     #: Estimate the smallest eigenvalue of the symmetric part of the assembled D-to-E map at build
     #: time (a few dozen sparse mat-vecs, no per-step cost) and report it under
@@ -217,7 +235,7 @@ class SimulationConfig(TreeClass):
 
         if self.yee_smooth_offdiag_placement not in YEE_OFFDIAG_PLACEMENTS:
             raise ValueError(
-                "config.yee_smooth_offdiag_placement must be 'node' or 'pixel', "
+                f"config.yee_smooth_offdiag_placement must be one of {YEE_OFFDIAG_PLACEMENTS}, "
                 f"got {self.yee_smooth_offdiag_placement!r}"
             )
 
@@ -306,8 +324,8 @@ class SimulationConfig(TreeClass):
         """The off-diagonal placement actually used, after the environment override.
 
         Returns:
-            str: ``"node"`` or ``"pixel"``. ``FDTDX_YEE_OFFDIAG_PLACEMENT`` wins over the config
-                field when it names one of the two; any other value is ignored.
+            str: one of :data:`YEE_OFFDIAG_PLACEMENTS`. ``FDTDX_YEE_OFFDIAG_PLACEMENT`` wins over
+                the config field when it names one of them; any other value is ignored.
         """
         override = os.environ.get(YEE_OFFDIAG_PLACEMENT_ENV_VAR, "").strip().lower()
         if override in YEE_OFFDIAG_PLACEMENTS:

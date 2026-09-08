@@ -602,6 +602,7 @@ def load_scene_on_yee_lattices(
     report_box_difference: bool = False,
     periodic_axes: tuple[bool, bool, bool] = (False, False, False),
     offdiag_on_vertices: bool = False,
+    offdiag_placement: str = "node",
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -631,10 +632,16 @@ def load_scene_on_yee_lattices(
             side, and the domain-edge smoothing pixel becomes the full dual box instead of being
             clipped. An axis the simulation is invariant along is excluded, since fdtdx's 2-D
             convention is a single periodic cell there.
-        offdiag_on_vertices (bool): Run one more smoothing pass on the cell-vertex lattice and
-            return its three off-diagonal Kottke entries in ``inv_permittivity_offdiag``. The
-            permittivity array itself then stays on the diagonal tier, bit-identical to a run
-            without the flag; the update applies the vertex entries as an additive correction.
+        offdiag_on_vertices (bool): Put the three off-diagonal Kottke entries on the cell-vertex
+            lattice, in ``inv_permittivity_offdiag``. The permittivity array itself then stays on
+            the diagonal tier and the update applies the vertex entries as an additive correction.
+        offdiag_placement (str): Which vertex placement, when ``offdiag_on_vertices`` is set.
+            ``"node"`` takes the entries straight off the vertex dual cells and leaves the diagonal
+            entries bit-identical to a run without the flag. ``"node_avg"`` instead reads them off
+            the component pixels and averages four of them onto each vertex, so every entry comes
+            from the component boxes. ``"vertex_all"`` computes the whole tensor on the vertex dual
+            cells and rebuilds the diagonal entries from it, so every entry comes from the vertex
+            boxes. All three assemble an exactly symmetric D-to-E map.
         report_box_difference (bool): Also rasterise the scene the legacy ``"box"`` way and count
             how many Yee points the two modes disagree on. Off by default: it is a second pass over
             every object plus another ``int32`` copy of the domain, and nothing in the simulation
@@ -676,13 +683,68 @@ def load_scene_on_yee_lattices(
             difference["num_points_H"] = int(front_H.size)
             difference["num_differing_H"] = int(np.count_nonzero(front_H != box_front[None, ...]))
 
-    inv_permittivities = _assemble_property(
-        front_E,
-        _diagonal_table(compute_allowed_permittivities(materials, diagonally_anisotropic=num_perm_components == 3)),
-        num_perm_components,
-        invert=True,
+    permittivity_table = _diagonal_table(
+        compute_allowed_permittivities(materials, diagonally_anisotropic=num_perm_components == 3)
     )
-    if smooth:
+    inv_permittivities = _assemble_property(front_E, permittivity_table, num_perm_components, invert=True)
+    inv_permittivity_offdiag = None
+    vertex_placement = offdiag_placement if (smooth and offdiag_on_vertices) else None
+    if vertex_placement in ("node_avg", "vertex_all") and num_perm_components != 3:
+        # Both rebuild the 3-component diagonal array themselves, so they cannot also be the
+        # 9-component tier. The initialization gate never lets this combination through.
+        raise ValueError(
+            f"offdiag_placement={vertex_placement!r} needs the 3-component permittivity tier, "
+            f"got num_perm_components={num_perm_components}"
+        )
+
+    if smooth and vertex_placement == "vertex_all":
+        # Every entry off the vertex dual cells: the whole tensor is smoothed there and the diagonal
+        # is put back at the component points as the mean of the two vertices bracketing each one.
+        # The component lattices are not smoothed at all on this path, so there is one pass, not two.
+        from fdtdx.core.physics.geometry_smooth import (
+            pixel_diagonals_from_vertex_tensor,
+            smooth_permittivity_tensor_on_vertex_lattice,
+        )
+
+        vertex_tensor, offdiag_stats = smooth_permittivity_tensor_on_vertex_lattice(
+            scene=scene,
+            grid=grid,
+            supersample=supersample,
+            periodic_axes=image_axes,
+        )
+        inv_permittivities = pixel_diagonals_from_vertex_tensor(vertex_tensor, image_axes)
+        inv_permittivity_offdiag = np.ascontiguousarray(vertex_tensor[3:])
+        # One pass produced both halves, so both counters name the same numbers.
+        difference["smoothing"] = offdiag_stats.as_dict()
+        difference["smoothing_offdiag"] = offdiag_stats.as_dict()
+    elif smooth and vertex_placement == "node_avg":
+        # Every entry off the component pixels: the full Kottke row is smoothed there, the diagonal
+        # entries are taken straight out of it (entry (c, c) of a row-major 3x3 lives at 4*c, so the
+        # values are the ones the diagonal tier writes) and the off-diagonal entries are averaged
+        # onto the vertices. The 9-component array is scratch; it never reaches the simulation.
+        from fdtdx.core.physics.geometry_smooth import (
+            smooth_property_on_yee_pixels,
+            vertex_offdiagonals_from_pixel_rows,
+        )
+
+        rows, smoothing_stats = smooth_property_on_yee_pixels(
+            scene=scene,
+            grid=grid,
+            field="E",
+            property_kind="permittivity",
+            front_material=front_E,
+            front_owner=owner_E,
+            front_shift=shift_E,
+            periodic_axes=image_axes,
+            inverse_property=_assemble_property(front_E, permittivity_table, 9, invert=True),
+            supersample=supersample,
+            full_tensor=True,
+        )
+        inv_permittivities = np.ascontiguousarray(rows[(0, 4, 8), ...])
+        inv_permittivity_offdiag = vertex_offdiagonals_from_pixel_rows(rows, image_axes)
+        difference["smoothing"] = smoothing_stats.as_dict()
+        difference["smoothing_offdiag"] = smoothing_stats.as_dict()
+    elif smooth:
         from fdtdx.core.physics.geometry_smooth import smooth_property_on_yee_pixels
 
         inv_permittivities, smoothing_stats = smooth_property_on_yee_pixels(
@@ -702,8 +764,7 @@ def load_scene_on_yee_lattices(
         )
         difference["smoothing"] = smoothing_stats.as_dict()
 
-    inv_permittivity_offdiag = None
-    if smooth and offdiag_on_vertices:
+    if vertex_placement == "node":
         from fdtdx.core.physics.geometry_smooth import smooth_offdiagonal_on_vertex_lattice
 
         inv_permittivity_offdiag, offdiag_stats = smooth_offdiagonal_on_vertex_lattice(
@@ -713,6 +774,8 @@ def load_scene_on_yee_lattices(
             periodic_axes=image_axes,
         )
         difference["smoothing_offdiag"] = offdiag_stats.as_dict()
+    elif vertex_placement is not None and vertex_placement not in ("node_avg", "vertex_all"):
+        raise ValueError(f"unknown off-diagonal placement {vertex_placement!r}")
 
     inv_permeabilities = None
     if num_permeability_components is not None:

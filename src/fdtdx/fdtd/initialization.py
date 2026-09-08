@@ -8,7 +8,7 @@ import numpy as np
 from loguru import logger
 
 from fdtdx import constants
-from fdtdx.config import SimulationConfig
+from fdtdx.config import YEE_OFFDIAG_VERTEX_PLACEMENTS, SimulationConfig
 from fdtdx.core.grid import QuasiUniformGrid, RectilinearGrid
 from fdtdx.core.jax.default_key import default_key
 from fdtdx.core.jax.guards import check_not_tracing
@@ -687,6 +687,7 @@ def _init_arrays(
     yee_sampling = config.uses_yee_material_sampling
     yee_smoothing = config.uses_yee_smoothing
     node_offdiag = False
+    offdiag_placement = config.yee_smooth_offdiag_placement_resolved
     if yee_sampling:
         if subpixel_permittivity and not yee_smoothing:
             raise NotImplementedError(
@@ -726,16 +727,16 @@ def _init_arrays(
         node_offdiag = (
             yee_smoothing
             and config.yee_smooth_full_tensor
-            and config.yee_smooth_offdiag_placement_resolved == "node"
+            and offdiag_placement in YEE_OFFDIAG_VERTEX_PLACEMENTS
             and objects.all_objects_diagonally_anisotropic_permittivity
         )
         if yee_smoothing and config.yee_smooth_full_tensor and not node_offdiag:
-            if config.yee_smooth_offdiag_placement_resolved == "node":
+            if offdiag_placement in YEE_OFFDIAG_VERTEX_PLACEMENTS:
                 warnings.warn(
-                    "yee_smooth_offdiag_placement='node' was requested but a material carries "
-                    "off-diagonal permittivity entries of its own, so the smoothing-induced "
-                    "off-diagonals cannot be separated onto the vertex lattice. Falling back to the "
-                    "dense 9-component pixel placement for this run.",
+                    f"yee_smooth_offdiag_placement={offdiag_placement!r} was requested but a "
+                    "material carries off-diagonal permittivity entries of its own, so the "
+                    "smoothing-induced off-diagonals cannot be separated onto the vertex lattice. "
+                    "Falling back to the dense 9-component pixel placement for this run.",
                     UserWarning,
                     stacklevel=2,
                 )
@@ -815,8 +816,8 @@ def _init_arrays(
         # does read.
         node_offdiag = False
         warnings.warn(
-            "yee_smooth_offdiag_placement='node' was requested but the permittivity array was "
-            "widened to the 9-component tier by another feature of this scene (oriented dispersive "
+            f"yee_smooth_offdiag_placement={offdiag_placement!r} was requested but the permittivity "
+            "array was widened to the 9-component tier by another feature of this scene (oriented dispersive "
             "poles are the case that does this), whose update reads the tensor rows directly. "
             "Falling back to the dense pixel placement for this run.",
             UserWarning,
@@ -969,6 +970,7 @@ def _init_arrays(
             # wrapped -- and symmetry is rejected outright for every yee sampling mode above.
             periodic_axes=objects.periodic_axes,
             offdiag_on_vertices=node_offdiag,
+            offdiag_placement=offdiag_placement,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
         full_index = (slice(None), slice(None), slice(None), slice(None))
