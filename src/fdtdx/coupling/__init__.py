@@ -9,6 +9,7 @@ fields do not act back on the thermal problem.
 
 from fdtdx.coupling.fem_field import (
     LATTICE_NAMES,
+    FemField,
     FemScalarField,
     PointSamples,
     PointTransform,
@@ -20,6 +21,17 @@ from fdtdx.coupling.fem_field import (
     samples_from_callable,
     uniform_samples,
 )
+from fdtdx.coupling.perturbation import (
+    MaterialResponse,
+    PerturbationModel,
+    PerturbationReport,
+    PhotoelasticResponse,
+    PockelsResponse,
+    TensorConstraints,
+    ThermoOpticResponse,
+    apply_permittivity_perturbation,
+    perturb_arrays_with_model,
+)
 from fdtdx.coupling.thermo_optic import (
     ThermoOpticCoefficients,
     ThermoOpticReport,
@@ -30,17 +42,27 @@ from fdtdx.coupling.thermo_optic import (
 
 __all__ = [
     "LATTICE_NAMES",
+    "FemField",
     "FemScalarField",
+    "MaterialResponse",
+    "PerturbationModel",
+    "PerturbationReport",
+    "PhotoelasticResponse",
+    "PockelsResponse",
     "PointSamples",
     "PointTransform",
     "RadialPlaneTransform",
+    "TensorConstraints",
     "ThermoOpticCoefficients",
     "ThermoOpticReport",
+    "ThermoOpticResponse",
     "YeeLatticeSamples",
+    "apply_permittivity_perturbation",
     "apply_thermo_optic_perturbation",
     "lattice_axes",
     "lattice_points",
     "perturb_arrays",
+    "perturb_arrays_with_model",
     "perturbed_permittivity",
     "sample_on_yee_lattices",
     "samples_from_callable",

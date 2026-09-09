@@ -37,11 +37,6 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 from fdtdx.core.physics.geometry_raster import _material_signature
-from fdtdx.core.physics.geometry_smooth import (
-    SmoothingRecord,
-    _isotropic_offdiagonal_entries,
-    kottke_inverse_permittivity,
-)
 from fdtdx.coupling.fem_field import YeeLatticeSamples
 from fdtdx.materials import Material
 
@@ -158,56 +153,6 @@ def perturbed_permittivity(permittivity: np.ndarray, dn_dT: np.ndarray, delta_T:
     return (np.sqrt(permittivity) + dn_dT * delta_T) ** 2
 
 
-def _scalar_permittivities(material_table: Sequence[Material], names: Sequence[str], active: np.ndarray) -> np.ndarray:
-    """``(M,)`` isotropic permittivity per material; refuses anisotropic or dispersive active materials."""
-    table = np.zeros(len(material_table), dtype=np.float64)
-    for index, material in enumerate(material_table):
-        name = names[index]
-        eps = np.asarray(material.permittivity, dtype=np.float64).reshape(3, 3)
-        diag = np.diag(eps)
-        off = eps - np.diag(diag)
-        isotropic = (
-            np.ptp(diag) <= _ISOTROPY_TOL * max(np.max(np.abs(diag)), 1.0) and np.max(np.abs(off)) <= _ISOTROPY_TOL
-        )
-        if active[index]:
-            if not isotropic:
-                raise NotImplementedError(
-                    f"material {name!r} is anisotropic; the thermo-optic perturbation handles isotropic materials only"
-                )
-            if material.is_dispersive:
-                raise NotImplementedError(
-                    f"material {name!r} is dispersive; the thermo-optic perturbation handles the static permittivity only"
-                )
-            if diag[0] <= 0.0:
-                raise ValueError(f"material {name!r} has non-positive permittivity {diag[0]}; no index to perturb")
-        table[index] = diag[0]
-    return table
-
-
-def _check_class_consistency(record: SmoothingRecord, dn: np.ndarray, names: Sequence[str]) -> None:
-    """Materials the loader merged into one value class must share one coefficient."""
-    classes = record.classes.get("permittivity")
-    if classes is None:
-        return
-    for representative in np.unique(classes):
-        members = np.nonzero(classes == representative)[0]
-        coefficients = dn[members]
-        if np.ptp(coefficients) > 0.0:
-            listing = ", ".join(f"{names[m]}: {dn[m]:g}" for m in members)
-            raise ValueError(
-                "materials with identical permittivity were blended as one class but carry different "
-                f"thermo-optic coefficients ({listing}); give them one coefficient or distinct permittivities"
-            )
-
-
-def _sample_at(samples: YeeLatticeSamples, lattice: str, cells: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Temperature and coverage at listed ``(K, 3)`` cell indices of one lattice."""
-    if lattice not in samples.values:
-        raise KeyError(f"temperature samples carry no lattice {lattice!r}; have {samples.lattices}")
-    index = (cells[:, 0], cells[:, 1], cells[:, 2])
-    return samples.values[lattice][index], samples.covered[lattice][index]
-
-
 def apply_thermo_optic_perturbation(
     inv_permittivities: np.ndarray,
     inv_permittivity_offdiag: np.ndarray | None,
@@ -219,13 +164,15 @@ def apply_thermo_optic_perturbation(
 ) -> tuple[np.ndarray, np.ndarray | None, ThermoOpticReport]:
     """Perturb the loader's inverse-permittivity arrays with a sampled temperature field.
 
+    A thin front end of :func:`fdtdx.coupling.perturbation.apply_permittivity_perturbation` with one
+    :class:`~fdtdx.coupling.perturbation.ThermoOpticResponse` per named material.
+
     Args:
         inv_permittivities (np.ndarray): ``(3, Nx, Ny, Nz)`` diagonal-tier inverse permittivity on
             the E lattices, as the loader (and the absorber extension) left it.
         inv_permittivity_offdiag (np.ndarray | None): ``(3, Nx, Ny, Nz)`` vertex off-diagonal
             entries ``(xy, xz, yz)``, or ``None``.
-        material_map (Mapping): ``info["yee_material_map"]`` from ``place_objects``: ``front_E``,
-            ``material_names``, ``smoothing_record``, ``num_perm_components``, ``offdiag_placement``.
+        material_map (Mapping): ``info["yee_material_map"]`` from ``place_objects``.
         materials (Mapping[str, Material]): The scene's material dictionary, keyed by name.
         temperature (YeeLatticeSamples): Sampled on the same grid; must carry ``E0``..``E2`` and,
             when off-diagonal entries exist, ``V``.
@@ -243,134 +190,68 @@ def apply_thermo_optic_perturbation(
         ValueError: For a grid mismatch, an unknown material, an inconsistent value class, or an
             uncovered point under the ``"error"`` policy.
     """
-    if uncovered not in ("error", "unperturbed"):
-        raise ValueError(f"uncovered must be 'error' or 'unperturbed', got {uncovered!r}")
-    if int(material_map.get("num_perm_components", 3)) != 3:
-        raise NotImplementedError("the thermo-optic perturbation supports the 3-component permittivity tier only")
-    placement = material_map.get("offdiag_placement")
-    if inv_permittivity_offdiag is not None and placement not in (None, "node"):
-        raise NotImplementedError(
-            f"off-diagonal placement {placement!r} is not supported; use 'node' (the vertex lattice) or none"
-        )
-    front_E = np.asarray(material_map["front_E"])
-    names = tuple(material_map["material_names"])
-    material_table = tuple(material_map["material_table"])
-    record: SmoothingRecord | None = material_map.get("smoothing_record")
-    inv_eps = np.array(inv_permittivities, dtype=np.float64, copy=True)
-    if inv_eps.shape[0] != 3 or inv_eps.shape[1:] != front_E.shape[1:]:
-        raise ValueError(f"inv_permittivities {inv_eps.shape} does not match front_E {front_E.shape}")
-    offdiag = (
-        None if inv_permittivity_offdiag is None else np.array(inv_permittivity_offdiag, dtype=np.float64, copy=True)
-    )
-    for lattice in ("E0", "E1", "E2"):
-        if lattice not in temperature.values:
-            raise ValueError(f"temperature samples lack lattice {lattice!r}")
-        if temperature.values[lattice].shape != front_E.shape[1:]:
-            raise ValueError(
-                f"temperature lattice {lattice} has shape {temperature.values[lattice].shape}, "
-                f"the material arrays have {front_E.shape[1:]}"
-            )
+    from fdtdx.coupling.perturbation import PerturbationModel, ThermoOpticResponse, apply_permittivity_perturbation
 
-    dn, matched = coefficients.table(materials, material_table)
-    active = dn != 0.0
-    eps_table = _scalar_permittivities(material_table, names, active)
-    if record is not None:
-        _check_class_consistency(record, dn, names)
     T_ref = float(coefficients.reference_temperature)
-
-    report = ThermoOpticReport(
-        uncovered_policy=uncovered,
-        reference_temperature=T_ref,
-        coefficients={user_name: float(dn[i]) for i, user_name in matched.items() if dn[i] != 0.0},
+    unknown = set(coefficients.dn_dT) - set(materials)
+    if unknown:
+        raise KeyError(f"thermo-optic coefficients name materials absent from the scene: {sorted(unknown)}")
+    responses = {
+        name: ThermoOpticResponse(dn_dT=float(value), reference_temperature=T_ref)
+        for name, value in coefficients.dn_dT.items()
+        if float(value) != 0.0
+    }
+    # The thermo-optic front end keeps its historical refusals: an anisotropic perturbed material is
+    # an error here even though the general engine could carry a diagonal one.
+    for name in responses:
+        eps = np.asarray(materials[name].permittivity, dtype=np.float64).reshape(3, 3)
+        diag = np.diag(eps)
+        off = eps - np.diag(diag)
+        scale = max(float(np.max(np.abs(diag))), 1.0)
+        if np.ptp(diag) > _ISOTROPY_TOL * scale or np.max(np.abs(off)) > _ISOTROPY_TOL:
+            raise NotImplementedError(
+                f"material {name!r} is anisotropic; the thermo-optic perturbation handles isotropic materials only"
+            )
+        if diag[0] <= 0.0:
+            raise ValueError(f"material {name!r} has non-positive permittivity {diag[0]}; no index to perturb")
+    model = PerturbationModel(responses=responses)
+    inv_eps, offdiag, general = apply_permittivity_perturbation(
+        inv_permittivities,
+        inv_permittivity_offdiag,
+        material_map,
+        materials,
+        {"T": temperature},
+        model,
+        uncovered=uncovered,
     )
+    # Largest |T - T_ref| and |dn| over the perturbed points, for the report.
+    front_E = np.asarray(material_map["front_E"])
+    material_table = tuple(material_map["material_table"])
+    matched = model.table(materials, material_table)
     max_dT = 0.0
     max_dn = 0.0
-
-    def _uncovered(lattice: str, count: int) -> None:
-        report.num_uncovered[lattice] = report.num_uncovered.get(lattice, 0) + int(count)
-        if count and uncovered == "error":
-            raise ValueError(
-                f"{count} point(s) on lattice {lattice} carry a material with a thermo-optic coefficient "
-                "but lie outside the temperature mesh; extend the thermal domain or pass uncovered='unperturbed'"
-            )
-
-    # 1. Bulk points: every point whose sampled material is perturbed, with the closed form. This
-    #    also overwrites the blended pixels, which step 2 puts right.
     for c in range(3):
         lattice = f"E{c}"
-        material = front_E[c]
-        needs = active[material]
-        cov = temperature.covered[lattice]
-        missing = needs & ~cov
-        _uncovered(lattice, int(np.count_nonzero(missing)))
-        # A point whose temperature equals the reference is left bit-for-bit alone: a zero
-        # perturbation is the identity, not a round trip through sqrt and square.
-        write = needs & cov & (temperature.values[lattice] != T_ref)
-        count = int(np.count_nonzero(write))
-        report.num_bulk_points[lattice] = count
-        if count == 0:
-            continue
-        m = material[write]
-        dT = temperature.values[lattice][write] - T_ref
-        delta_n = dn[m] * dT
-        inv_eps[c][write] = 1.0 / perturbed_permittivity(eps_table[m], dn[m], dT)
-        max_dT = max(max_dT, float(np.max(np.abs(dT))))
-        max_dn = max(max_dn, float(np.max(np.abs(delta_n))))
-
-    # 2. Re-blend the recorded interface pixels and vertices at their own temperature.
-    if record is not None:
-        for entry in record.passes:
-            if entry.field == "E":
-                target_lattice = f"E{entry.component}"
-            elif entry.field == "V":
-                target_lattice = "V"
-            else:
-                continue  # H lattices: permeability is not perturbed
-            hi, lo = entry.material_hi, entry.material_lo
-            involved = active[hi] | active[lo]
-            if not involved.any():
-                continue
-            if entry.write_mode == "row" and entry.full_tensor:
-                raise NotImplementedError("re-blending the 9-component row tier is not supported")
-            if entry.write_mode not in ("row", "offdiag"):
-                raise NotImplementedError(f"re-blending write mode {entry.write_mode!r} is not supported")
-            if not entry.isotropic_pair[involved].all():
-                raise NotImplementedError(
-                    f"lattice {target_lattice}: a tensor (anisotropic) blend involves a perturbed material"
-                )
-            cells = entry.cells[involved]
-            T, cov = _sample_at(temperature, target_lattice, cells)
-            _uncovered(target_lattice, int(np.count_nonzero(~cov)))
-            keep = cov & (T != T_ref)
-            if not keep.any():
-                continue
-            cells = cells[keep]
-            dT = T[keep] - T_ref
-            fill = entry.fill[involved][keep]
-            normal = entry.normal[involved][keep]
-            m_hi = hi[involved][keep]
-            m_lo = lo[involved][keep]
-            eps_hi = perturbed_permittivity(eps_table[m_hi], dn[m_hi], dT)
-            eps_lo = perturbed_permittivity(eps_table[m_lo], dn[m_lo], dT)
-            arithmetic = fill * eps_hi + (1.0 - fill) * eps_lo
-            harmonic = fill / eps_hi + (1.0 - fill) / eps_lo
-            index = (cells[:, 0], cells[:, 1], cells[:, 2])
-            if entry.write_mode == "row":
-                inv_eps[entry.component][index] = kottke_inverse_permittivity(
-                    normal, arithmetic, harmonic, entry.component, False
-                )
-            else:
-                if offdiag is None:
-                    raise ValueError("the record holds vertex entries but no off-diagonal array was given")
-                entries = _isotropic_offdiagonal_entries(normal, arithmetic, harmonic)
-                for q in range(3):
-                    offdiag[q][index] = entries[:, q]
-            report.num_reblended[target_lattice] = report.num_reblended.get(target_lattice, 0) + int(cells.shape[0])
-            max_dT = max(max_dT, float(np.max(np.abs(dT))))
-            max_dn = max(max_dn, float(np.max(np.abs(np.maximum(np.abs(dn[m_hi]), np.abs(dn[m_lo])) * dT))))
-
-    report.max_delta_T = max_dT
-    report.max_delta_n = max_dn
+        for index, (name, response) in matched.items():
+            sel = (front_E[c] == index) & temperature.covered[lattice]
+            if sel.any():
+                dT = np.abs(temperature.values[lattice][sel] - T_ref)
+                max_dT = max(max_dT, float(dT.max()))
+                max_dn = max(max_dn, float(abs(float(coefficients.dn_dT[name])) * dT.max()))
+    report = ThermoOpticReport(
+        num_bulk_points=general.num_bulk_points,
+        num_reblended=general.num_reblended,
+        num_uncovered=general.num_uncovered,
+        uncovered_policy=uncovered,
+        max_delta_T=max_dT,
+        max_delta_n=max_dn,
+        reference_temperature=T_ref,
+        coefficients={
+            name: float(coefficients.dn_dT[name])
+            for name, _ in matched.values()
+            if float(coefficients.dn_dT[name]) != 0.0
+        },
+    )
     return inv_eps, offdiag, report
 
 

@@ -161,7 +161,8 @@ class PointSamples:
     """Values of a field at arbitrary points, with a coverage flag per point.
 
     Attributes:
-        values (np.ndarray): ``(N,)`` float64; ``NaN`` wherever ``covered`` is false.
+        values (np.ndarray): ``(N,)`` float64 for a scalar field, ``(N, n)`` for a field with ``n``
+            components; ``NaN`` wherever ``covered`` is false.
         covered (np.ndarray): ``(N,)`` bool; true when the point lies inside a mesh cell.
         cells (np.ndarray): ``(N,)`` int64 index of the cell that contains the point, ``-1``
             where not covered. When several cells contain a point (it sits on a shared facet) the
@@ -182,26 +183,59 @@ class PointSamples:
         return int(np.count_nonzero(~self.covered))
 
 
-class FemScalarField:
-    """A scalar DOLFINx function with vectorised point evaluation and per-point coverage.
+class FemField:
+    """A DOLFINx function (scalar or vector valued) with vectorised point evaluation and coverage.
 
     Args:
-        function: A ``dolfinx.fem.Function`` on a scalar Lagrange space (any degree).
+        function: A ``dolfinx.fem.Function`` on a Lagrange or discontinuous Lagrange space, scalar
+            or blocked vector valued, any degree.
         name (str): Field name, carried into the sampled artefact.
         unit (str): Unit label, carried into the sampled artefact.
     """
 
-    def __init__(self, function: Any, name: str = "T", unit: str = "K"):
+    def __init__(self, function: Any, name: str = "f", unit: str = ""):
         self.function = function
         self.name = str(name)
         self.unit = str(unit)
         self.mesh = function.function_space.mesh
+        shape = tuple(int(v) for v in getattr(function.function_space, "value_shape", ()))
+        self.value_size = int(np.prod(shape)) if shape else 1
         self._trees: dict[float, Any] = {}
+
+    @classmethod
+    def gradient_of(cls, scalar: "FemField", scale: float = 1.0, name: str = "grad", unit: str = "") -> "FemField":
+        """``scale * grad(f)`` of a scalar field as a discontinuous vector field of one degree less.
+
+        Exact for the finite-element function: the gradient of a degree-``p`` Lagrange function is a
+        degree-``p - 1`` polynomial per cell, discontinuous across cells, and a discontinuous
+        Lagrange vector space of that degree holds it without projection error. With
+        ``scale=-1`` this is the electrostatic field ``E = -grad(V)`` of a solved potential.
+
+        Args:
+            scalar (FemField): The scalar field.
+            scale (float): Multiplier.
+            name (str): Name of the new field.
+            unit (str): Unit label of the new field.
+
+        Returns:
+            FemField: The vector field on the same mesh.
+        """
+        import ufl
+        from dolfinx import fem
+
+        V = scalar.function.function_space
+        degree = int(V.element.basix_element.degree)
+        gdim = int(scalar.mesh.geometry.dim)
+        W = fem.functionspace(scalar.mesh, ("DG", max(degree - 1, 0), (gdim,)))
+        out = fem.Function(W, name=name)
+        expr = fem.Expression(float(scale) * ufl.grad(scalar.function), W.element.interpolation_points)
+        out.interpolate(expr)
+        return cls(out, name=name, unit=unit)
 
     # -- construction -----------------------------------------------------------------------
 
     @classmethod
-    def from_dofs(cls, function_space: Any, dofs: np.ndarray, name: str = "T", unit: str = "K") -> FemScalarField:
+    def from_dofs(cls, function_space: Any, dofs: np.ndarray, name: str = "T", unit: str = "K") -> FemField:
         """Wrap a degree-of-freedom vector on a given function space.
 
         This is the thermalFEM seam: ``thSim`` keeps the space as ``sim._V`` and the solved vector
@@ -238,7 +272,7 @@ class FemScalarField:
         return cls(function, name=name, unit=unit)
 
     @classmethod
-    def from_thermal_sim(cls, sim: Any, dofs: np.ndarray | None = None, unit: str = "K") -> FemScalarField:
+    def from_thermal_sim(cls, sim: Any, dofs: np.ndarray | None = None, unit: str = "K") -> FemField:
         """Wrap the temperature a Kronos ``thermalFEM.thSim`` has solved for, in process.
 
         Reads the private ``sim._V`` (the Lagrange space ``thAssembly.make_function_space`` built)
@@ -320,7 +354,7 @@ class FemScalarField:
             P = np.concatenate([P, np.zeros((P.shape[0], 1))], axis=1)
         P = np.ascontiguousarray(P)
         n = P.shape[0]
-        values = np.full(n, np.nan, dtype=np.float64)
+        values = np.full((n,) if self.value_size == 1 else (n, self.value_size), np.nan, dtype=np.float64)
         covered = np.zeros(n, dtype=bool)
         cells = np.full(n, -1, dtype=np.int64)
         if n == 0:
@@ -341,9 +375,23 @@ class FemScalarField:
             first[hit] = links[offsets[:-1][hit]]
             cells[start:stop] = first
             if hit.any():
-                evaluated = self.function.eval(chunk[hit], first[hit].astype(np.int32))
-                values[start:stop][hit] = np.asarray(evaluated, dtype=np.float64).reshape(-1)
+                evaluated = np.asarray(self.function.eval(chunk[hit], first[hit].astype(np.int32)))
+                if np.iscomplexobj(evaluated):
+                    evaluated = np.real(evaluated)
+                if self.value_size == 1:
+                    values[start:stop][hit] = evaluated.reshape(-1)
+                else:
+                    values[start:stop][hit] = evaluated.reshape(-1, self.value_size)
         return PointSamples(values, covered, cells)
+
+
+class FemScalarField(FemField):
+    """A scalar DOLFINx function; see :class:`FemField`. Kept as the name the thermal path uses."""
+
+    def __init__(self, function: Any, name: str = "T", unit: str = "K"):
+        super().__init__(function, name=name, unit=unit)
+        if self.value_size != 1:
+            raise ValueError(f"FemScalarField needs a scalar function, this one has {self.value_size} components")
 
 
 @dataclass
@@ -356,7 +404,8 @@ class YeeLatticeSamples:
     Attributes:
         edges (tuple[np.ndarray, np.ndarray, np.ndarray]): The grid's cell edges per axis, so a
             consumer can verify it is looking at the grid it built.
-        values (dict[str, np.ndarray]): Lattice name to ``(Nx, Ny, Nz)`` float64 values.
+        values (dict[str, np.ndarray]): Lattice name to ``(Nx, Ny, Nz)`` float64 values, or
+            ``(Nx, Ny, Nz, n)`` for an ``n``-component field.
         covered (dict[str, np.ndarray]): Lattice name to ``(Nx, Ny, Nz)`` bool coverage.
         name (str): Field name (``"T"``).
         unit (str): Unit label (``"K"``).
@@ -388,6 +437,8 @@ class YeeLatticeSamples:
         for lattice in self.lattices:
             mask = self.covered[lattice]
             vals = self.values[lattice][mask]
+            if vals.ndim > 1:
+                vals = np.linalg.norm(vals, axis=-1)
             report[lattice] = {
                 "num_points": int(mask.size),
                 "num_uncovered": int(np.count_nonzero(~mask)),
@@ -471,7 +522,7 @@ def grid_edges(grid: Any) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def sample_on_yee_lattices(
-    fem_field: FemScalarField,
+    fem_field: FemField,
     grid: Any,
     lattices: Sequence[str] = ("E0", "E1", "E2", "V"),
     transform: PointTransform | RadialPlaneTransform | None = None,
@@ -486,7 +537,7 @@ def sample_on_yee_lattices(
     a permeability perturbation would add the H lattices.
 
     Args:
-        fem_field (FemScalarField): The field to sample.
+        fem_field (FemField): The field to sample (scalar or vector valued).
         grid: The resolved ``RectilinearGrid`` or a triple of edge arrays, in metres.
         lattices (Sequence[str]): Names from :data:`LATTICE_NAMES`.
         transform (PointTransform | RadialPlaneTransform | None): Yee-to-mesh coordinate map;
@@ -512,7 +563,8 @@ def sample_on_yee_lattices(
     start = 0
     for lattice, shape in blocks:
         count = int(np.prod(shape))
-        values[lattice] = samples.values[start : start + count].reshape(shape)
+        block = samples.values[start : start + count]
+        values[lattice] = block.reshape(shape) if block.ndim == 1 else block.reshape((*shape, block.shape[1]))
         covered[lattice] = samples.covered[start : start + count].reshape(shape)
         start += count
     return YeeLatticeSamples(
@@ -557,6 +609,7 @@ def samples_from_callable(
     covered: dict[str, np.ndarray] = {}
     for lattice in lattices:
         pts, shape = lattice_points(edges, lattice)
-        values[lattice] = np.asarray(fn(pts), dtype=np.float64).reshape(shape)
+        out = np.asarray(fn(pts), dtype=np.float64)
+        values[lattice] = out.reshape(shape) if out.ndim == 1 else out.reshape((*shape, out.shape[-1]))
         covered[lattice] = np.ones(shape, dtype=bool)
     return YeeLatticeSamples(edges=edges, values=values, covered=covered, name=name, unit=unit)

@@ -248,7 +248,7 @@ def test_an_uncovered_perturbed_point_is_an_error_by_default_and_a_counted_no_op
         samples.covered[lattice][:, _N // 2 - 1 : _N // 2 + 1, :] = False
         samples.values[lattice][~samples.covered[lattice]] = np.nan
 
-    with pytest.raises(ValueError, match="outside the temperature mesh"):
+    with pytest.raises(ValueError, match="outside the sampled field"):
         perturb_arrays(arrays, info, materials, samples, _coefficients())
 
     perturbed, report = perturb_arrays(arrays, info, materials, samples, _coefficients(), uncovered="unperturbed")

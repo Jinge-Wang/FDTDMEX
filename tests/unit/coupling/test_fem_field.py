@@ -15,6 +15,7 @@ from dolfinx import fem, mesh  # noqa: E402
 from mpi4py import MPI  # noqa: E402
 
 from fdtdx.coupling import (  # noqa: E402
+    FemField,
     FemScalarField,
     PointTransform,
     lattice_axes,
@@ -174,3 +175,34 @@ def test_many_points_in_one_call_and_bounds():
     assert samples.covered[inside].all()
     assert not samples.covered[~inside].any()
     np.testing.assert_allclose(samples.values[inside], points[inside, 0], atol=1e-10)
+
+
+def test_the_gradient_of_a_p2_potential_is_a_vector_field_sampled_per_component():
+    """E = -grad(V) for a quadratic potential is linear and exactly represented on DG1 vectors."""
+    f = _cube(4, 2)
+    f.interpolate(lambda x: 1.0 + 2.0 * x[0] ** 2 - 3.0 * x[1] * x[2])
+    E = FemField.gradient_of(FemScalarField(f, name="V", unit="V"), scale=-1.0, name="E", unit="V/m")
+    assert E.value_size == 3
+    rng = np.random.default_rng(5)
+    points = rng.uniform(0.05, 0.95, size=(2000, 3))
+    samples = E.evaluate(points)
+    assert samples.values.shape == (2000, 3)
+    assert samples.covered.all()
+    expected = -np.stack([4.0 * points[:, 0], -3.0 * points[:, 2], -3.0 * points[:, 1]], axis=1)
+    np.testing.assert_allclose(samples.values, expected, atol=1e-10)
+    outside = E.evaluate(np.array([[1.5, 0.5, 0.5]]))
+    assert not outside.covered[0] and np.isnan(outside.values).all()
+    # and on Yee lattices the components keep their trailing axis
+    edges = (np.linspace(0.1, 0.9, 5), np.linspace(0.1, 0.9, 5), np.linspace(0.1, 0.9, 3))
+    yee = sample_on_yee_lattices(E, edges, lattices=("E0", "V"))
+    assert yee.values["E0"].shape == (4, 4, 2, 3)
+    assert yee.covered["E0"].all()
+    pts, _ = lattice_points(edges, "E0")
+    np.testing.assert_allclose(
+        yee.values["E0"].reshape(-1, 3),
+        -np.stack([4.0 * pts[:, 0], -3.0 * pts[:, 2], -3.0 * pts[:, 1]], axis=1),
+        atol=1e-10,
+    )
+    assert FemScalarField(f).value_size == 1
+    with pytest.raises(ValueError, match="scalar"):
+        FemScalarField(E.function)
