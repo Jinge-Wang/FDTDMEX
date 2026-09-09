@@ -973,6 +973,16 @@ def _init_arrays(
             offdiag_placement=offdiag_placement,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
+        # The material map a post-blend perturbation needs (fdtdx.coupling): which material each
+        # E point sampled and the geometry of every blended pixel. Host-side NumPy, never traced.
+        info["yee_material_map"] = {
+            "front_E": scene_arrays.front_E,
+            "material_names": scene_arrays.material_names,
+            "material_table": scene_arrays.material_table,
+            "smoothing_record": scene_arrays.smoothing_record,
+            "num_perm_components": num_perm_components,
+            "offdiag_placement": offdiag_placement if node_offdiag else None,
+        }
         full_index = (slice(None), slice(None), slice(None), slice(None))
         inv_permittivities = sharding_preserving_set(
             inv_permittivities, full_index, jnp.asarray(scene_arrays.inv_permittivities, dtype=config.dtype)

@@ -61,6 +61,7 @@ from fdtdx.materials import (
     compute_allowed_magnetic_conductivities,
     compute_allowed_permeabilities,
     compute_allowed_permittivities,
+    compute_ordered_materials,
     compute_ordered_names,
 )
 from fdtdx.objects.object import SimulationObject
@@ -533,6 +534,17 @@ class YeeSceneArrays:
     front_H: np.ndarray | None
     #: Diagnostic: how many sampled points carry a different material than the ``"box"`` path.
     sampling_difference: dict[str, Any]
+    #: Global material names in table order, so a consumer can map ``front_E`` indices to the
+    #: scene's material dictionary keys.
+    material_names: tuple[str, ...] = ()
+    #: The materials themselves, in the same table order (uniform objects get synthetic names, so
+    #: a consumer matches by material value, not by name).
+    material_table: tuple[Material, ...] = ()
+    #: Fill, normal and material pair of every pixel and vertex the smoothing passes wrote, or
+    #: ``None`` when nothing was smoothed. A later property perturbation (a temperature field
+    #: through :mod:`fdtdx.coupling.thermo_optic`) re-blends exactly these pixels instead of
+    #: overwriting a blended entry with a bulk value.
+    smoothing_record: Any = None
 
 
 def _diagonal_table(values: Sequence[tuple[float, ...]]) -> np.ndarray:
@@ -612,6 +624,7 @@ def load_scene_on_yee_lattices(
     periodic_axes: tuple[bool, bool, bool] = (False, False, False),
     offdiag_on_vertices: bool = False,
     offdiag_placement: str = "node",
+    record_smoothing: bool = True,
 ) -> YeeSceneArrays:
     """Assemble every static material array by sampling the scene at the Yee component positions.
 
@@ -656,12 +669,19 @@ def load_scene_on_yee_lattices(
             every object plus another ``int32`` copy of the domain, and nothing in the simulation
             reads the answer. It is cheaper than the Yee pass it is compared against (it only fills
             each object's rounded box), so the added cost is a fraction rather than a doubling.
+        record_smoothing (bool): Keep the geometry of every blended pixel and vertex in
+            :attr:`YeeSceneArrays.smoothing_record` (fill, normal, material pair; a few arrays of
+            the size of the interface set). On by default: the memory is a small fraction of the
+            material arrays and the record is what a post-blend property perturbation needs.
 
     Returns:
         YeeSceneArrays: The host-side arrays plus the front-material index arrays.
     """
+    from fdtdx.core.physics.geometry_smooth import SmoothingRecord
+
     scene = build_scene(static_objects)
     materials = scene.materials
+    record: SmoothingRecord | None = SmoothingRecord() if (smooth and record_smoothing) else None
     image_axes = periodic_image_axes(grid, periodic_axes)
     periods = grid_periods(grid)
 
@@ -770,6 +790,7 @@ def load_scene_on_yee_lattices(
             # row-major 3x3 lives at 4*c, not at c. The config flag's only job is to force the tier.
             supersample=supersample,
             full_tensor=num_perm_components == 9,
+            record=record,
         )
         difference["smoothing"] = smoothing_stats.as_dict()
 
@@ -781,6 +802,7 @@ def load_scene_on_yee_lattices(
             grid=grid,
             supersample=supersample,
             periodic_axes=image_axes,
+            record=record,
         )
         difference["smoothing_offdiag"] = offdiag_stats.as_dict()
     elif vertex_placement is not None and vertex_placement not in ("node_avg", "vertex_all"):
@@ -880,6 +902,9 @@ def load_scene_on_yee_lattices(
         front_E=front_E,
         front_H=front_H,
         sampling_difference=difference,
+        material_names=tuple(compute_ordered_names(materials)),
+        material_table=tuple(compute_ordered_materials(materials)),
+        smoothing_record=record,
     )
 
 
