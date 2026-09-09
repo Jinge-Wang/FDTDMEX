@@ -83,7 +83,8 @@ def to_mlx_state(arrays, config, periodic_axes: tuple = (False, False, False), o
     """
     # CPML coefficients now live on each PerfectlyMatchedLayer object (upstream #384); re-assemble
     # the fork's global (6, Nx, Ny, Nz) view from them (E-side axis-k in channel k, H-side in k+3).
-    field_shape = tuple(int(s) for s in np.asarray(arrays.fields.E).shape[1:])  # (Nx, Ny, Nz)
+    n_x, n_y, n_z = (int(s) for s in np.asarray(arrays.fields.E).shape[1:])
+    field_shape = (n_x, n_y, n_z)
     pml_objects = [] if objects is None else objects.pml_objects
     a, b, inv_kappa = build_cpml_coeffs_from_pml_objects(pml_objects, field_shape)
     # slab-CPML: ψ and the CPML correction are confined to the PML boundary slabs. Detect each
@@ -174,12 +175,13 @@ def to_array_container(template_arrays, state: MLXState, detector_states=None, o
         # region out into the (psi_1, psi_2) tuple upstream now keys by PML name.
         shape = state.E.shape  # (3, Nx, Ny, Nz)
         ext = state.cpml_extents
-        psi_E_full = np.asarray(
-            mx.stack([slab_to_full(state.psi_E[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
-        )
-        psi_H_full = np.asarray(
-            mx.stack([slab_to_full(state.psi_H[i], _AX[i], *ext[_AX[i]], shape[1 + _AX[i]]) for i in range(6)])
-        )
+
+        def _to_full(slab, i):
+            lo, hi = ext[_AX[i]]
+            return slab_to_full(slab, _AX[i], lo, hi, shape[1 + _AX[i]])
+
+        psi_E_full = np.asarray(mx.stack([_to_full(state.psi_E[i], i) for i in range(6)]))
+        psi_H_full = np.asarray(mx.stack([_to_full(state.psi_H[i], i) for i in range(6)]))
         psi_E_dict: dict = {}
         psi_H_dict: dict = {}
         for pml in objects.pml_objects:

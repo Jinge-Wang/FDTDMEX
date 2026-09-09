@@ -262,11 +262,12 @@ def add_offdiag_correction(
                 # 1/2 either way.
                 offsets = [0, 0, 0]
                 offsets[component] = near
-                vertex = _padded_window(offdiag_pad[entry], tuple(offsets))
-                upper = _padded_window(increment_pad[partner], tuple(offsets))
+                near_offsets = (offsets[0], offsets[1], offsets[2])
+                vertex = _padded_window(offdiag_pad[entry], near_offsets)
+                upper = _padded_window(increment_pad[partner], near_offsets)
                 lower_offsets = list(offsets)
                 lower_offsets[partner] -= 1
-                lower = _padded_window(increment_pad[partner], tuple(lower_offsets))
+                lower = _padded_window(increment_pad[partner], (lower_offsets[0], lower_offsets[1], lower_offsets[2]))
                 if aniso_widths is None:
                     straddling = 0.5 * (upper + lower)
                 else:
@@ -276,6 +277,7 @@ def add_offdiag_correction(
                     straddling = (upper * width_lower + lower * width_upper) / (width_upper + width_lower)
                 term = 0.5 * vertex * straddling
                 row = term if row is None else row + term
+        assert row is not None  # every row has two partners
         rows.append(row)
     return E + jnp.stack(rows, axis=0)
 

@@ -166,8 +166,8 @@ def resolve_metric_shadow_detailed(
             sh = shadows[name][axis]
             if obj.partial_grid_shape[axis] is not None:
                 sh.size_source = "grid_shape"
-            elif obj.partial_real_shape[axis] is not None:
-                sh.set_size(float(obj.partial_real_shape[axis]), "partial_real_shape")
+            elif (real_size := obj.partial_real_shape[axis]) is not None:
+                sh.set_size(float(real_size), "partial_real_shape")
 
     for _ in range(_MAX_ITER):
         changed = False

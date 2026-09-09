@@ -118,6 +118,7 @@ class Scene:
 
         if self.objects is None:
             self.place()
+        assert self.objects is not None
         return plot_setup(config=self.config, objects=self.objects, **kwargs)
 
     def plot_material(self, **kwargs: Any):
@@ -126,6 +127,7 @@ class Scene:
 
         if self.objects is None or self.arrays is None:
             self.place()
+        assert self.arrays is not None
         return plot_material(config=self.config, arrays=self.arrays, **kwargs)
 
     def plot3d(self, *, confirm: bool = False, **kwargs: Any):
@@ -138,6 +140,7 @@ class Scene:
 
         if self.objects is None:
             self.place()
+        assert self.objects is not None
         return plot_setup_3d(self.config, self.objects, material_arrays=self.arrays, confirm=confirm, **kwargs)
 
     # ----- schema / hand-off bridges ------------------------------------------------------------

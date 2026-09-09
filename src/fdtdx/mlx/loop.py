@@ -17,6 +17,7 @@ with periodic ``mx.eval``.
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any, cast
 
 import mlx.core as mx
 import numpy as np
@@ -89,9 +90,10 @@ def _build_cores(state: MLXState, c: float, sb: bool, compile_step: bool, use_me
     def h_core(E, H, psi_H):
         return _update_H(E, H, psi_H, inv_mu, sigma_H, a, b, ik, mfwd, per, ext, awid, c, sb)
 
+    e_core_fn = cast(Callable[..., Any], e_core)
     if compile_step:
-        return mx.compile(e_core), mx.compile(h_core)
-    return e_core, h_core
+        return mx.compile(e_core_fn), mx.compile(h_core)
+    return e_core_fn, h_core
 
 
 def run_forward_mlx(

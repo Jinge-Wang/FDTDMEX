@@ -36,6 +36,8 @@ and scattered/oversized inclusions keep the MLX-op path.
 
 from __future__ import annotations
 
+from typing import Any, Callable, cast
+
 import mlx.core as mx
 import numpy as np
 
@@ -501,31 +503,37 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
     e_outputs = ["out"] + (pso_names if do_cpml else []) + disp_out
     h_outputs = ["out"] + (pso_names if do_cpml else [])
 
-    kE = mx.fast.metal_kernel(
-        name="fdtdmex_E",
-        input_names=e_inputs,
-        output_names=e_outputs,
-        source=_field_source(
-            shape,
-            per,
-            e_diag,
-            None,
-            ext,
-            do_cpml,
-            metric_axes_E,
-            forward=False,
-            dispersive=dispersive,
-            num_poles=num_poles,
-            inv_c=inv_c,
+    kE = cast(
+        Callable[..., Any],
+        mx.fast.metal_kernel(
+            name="fdtdmex_E",
+            input_names=e_inputs,
+            output_names=e_outputs,
+            source=_field_source(
+                shape,
+                per,
+                e_diag,
+                None,
+                ext,
+                do_cpml,
+                metric_axes_E,
+                forward=False,
+                dispersive=dispersive,
+                num_poles=num_poles,
+                inv_c=inv_c,
+            ),
+            ensure_row_contiguous=True,
         ),
-        ensure_row_contiguous=True,
     )
-    kH = mx.fast.metal_kernel(
-        name="fdtdmex_H",
-        input_names=h_inputs,
-        output_names=h_outputs,
-        source=_field_source(shape, per, h_diag, mu_scalar, ext, do_cpml, metric_axes_H, forward=True),
-        ensure_row_contiguous=True,
+    kH = cast(
+        Callable[..., Any],
+        mx.fast.metal_kernel(
+            name="fdtdmex_H",
+            input_names=h_inputs,
+            output_names=h_outputs,
+            source=_field_source(shape, per, h_diag, mu_scalar, ext, do_cpml, metric_axes_H, forward=True),
+            ensure_row_contiguous=True,
+        ),
     )
 
     def _run(kern, base_inputs, metric_bufs, psi, coeff, F_template):
@@ -593,7 +601,7 @@ def build_kernel_cores(state, c: float, sb: bool, compile_step: bool = True):
             H_new = _box_correct(H_new, E, H, box_H, inv_mu, _update_H)
         return H_new, psi_new
 
-    e_core_final = e_core_dispersive if dispersive else e_core
+    e_core_final = cast(Callable[..., Any], e_core_dispersive if dispersive else e_core)
     if compile_step and sb:
         return mx.compile(e_core_final), mx.compile(h_core)
     return e_core_final, h_core

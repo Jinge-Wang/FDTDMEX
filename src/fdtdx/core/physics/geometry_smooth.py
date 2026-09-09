@@ -979,7 +979,7 @@ def _smooth_component_lattice(
     tensor_mode = write_mode == "tensor6"
     vertex_mode = write_mode in ("offdiag", "tensor6")
     ignore_global = invariant_axes(grid)
-    degenerate_axis = tuple(axis in ignore_global for axis in range(3))
+    degenerate_axis = (0 in ignore_global, 1 in ignore_global, 2 in ignore_global)
 
     bounds = pixel_axis_bounds(grid, field, component, periodic_axes)
     corners = pixel_corner_coordinates(grid, field, component, periodic_axes)
@@ -1608,11 +1608,11 @@ def apply_dtoe_map(
             for near in (0, 1):
                 offsets = [0, 0, 0]
                 offsets[component] = near
-                vertex = _numpy_window(entry_pad[entry], tuple(offsets), shape)
-                upper = _numpy_window(field_pad[partner], tuple(offsets), shape)
-                lower_offsets = list(offsets)
-                lower_offsets[partner] -= 1
-                lower = _numpy_window(field_pad[partner], tuple(lower_offsets), shape)
+                near_offsets = (offsets[0], offsets[1], offsets[2])
+                vertex = _numpy_window(entry_pad[entry], near_offsets, shape)
+                upper = _numpy_window(field_pad[partner], near_offsets, shape)
+                offsets[partner] -= 1
+                lower = _numpy_window(field_pad[partner], (offsets[0], offsets[1], offsets[2]), shape)
                 out[component] += 0.5 * vertex * 0.5 * (upper + lower)
     return out
 
@@ -1673,7 +1673,19 @@ def min_eigenvalue_of_symmetric_part(
             inv_permittivities, inv_permittivity_offdiag, flat.reshape(shape).astype(float), periodic_axes
         ).reshape(-1)
 
-    operator = LinearOperator((size, size), matvec=matvec, rmatvec=matvec, dtype=float)
+    class _DtoEOperator(LinearOperator):
+        """The assembled map as a SciPy operator (the subclass form, which the type checker follows)."""
+
+        def __init__(self) -> None:
+            super().__init__(dtype=np.dtype(float), shape=(size, size))
+
+        def _matvec(self, x):
+            return matvec(np.asarray(x).reshape(-1))
+
+        def _rmatvec(self, x):
+            return matvec(np.asarray(x).reshape(-1))
+
+    operator = _DtoEOperator()
 
     # <u, M v> - <M u, v> over random probes: exactly zero for a symmetric map, and the number to
     # look at first if the eigenvalues ever look wrong.

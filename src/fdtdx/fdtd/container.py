@@ -47,7 +47,7 @@ def wrap_padding_axes(boundary_objects) -> tuple[bool, bool, bool]:
     for boundary in boundary_objects:
         if boundary.uses_wrap_padding:
             wrap_axes[boundary.axis] = True
-    return tuple(wrap_axes)  # type: ignore[return-value]
+    return (wrap_axes[0], wrap_axes[1], wrap_axes[2])
 
 
 @autoinit

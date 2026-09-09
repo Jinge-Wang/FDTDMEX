@@ -33,10 +33,19 @@ def inject_sources_E(E: mx.array, plans: list[SourcePlan], n: int) -> mx.array:
         if p.kind == "dipole":
             if p.dipole_field != "E":
                 continue
+            assert p.coeff is not None and p.inv_oriented is not None, (
+                "dipole SourcePlan requires coeff and inv_oriented"
+            )
             cval = float(p.coeff[n])
             if cval != 0.0:
                 E = _add_all(E, p.grid_slice, cval * p.inv_oriented)
         elif p.kind == "tfsf" and bool(p.on_steps[n]):
+            assert (
+                p.amp_H_v is not None
+                and p.spatialE_h is not None
+                and p.amp_H_h is not None
+                and p.spatialE_v is not None
+            ), "tfsf SourcePlan requires amp_H_v, spatialE_h, amp_H_h and spatialE_v"
             E = _add_component(E, p.h_axis, p.grid_slice, (p.sign * p.amp_H_v[n]) * p.spatialE_h)
             E = _add_component(E, p.v_axis, p.grid_slice, (-p.sign * p.amp_H_h[n]) * p.spatialE_v)
     return E
@@ -48,10 +57,19 @@ def inject_sources_H(H: mx.array, plans: list[SourcePlan], n: int) -> mx.array:
         if p.kind == "dipole":
             if p.dipole_field != "H":
                 continue
+            assert p.coeff is not None and p.inv_oriented is not None, (
+                "dipole SourcePlan requires coeff and inv_oriented"
+            )
             cval = float(p.coeff[n])
             if cval != 0.0:
                 H = _add_all(H, p.grid_slice, cval * p.inv_oriented)
         elif p.kind == "tfsf" and bool(p.on_steps[n]):
+            assert (
+                p.amp_E_h is not None
+                and p.spatialH_v is not None
+                and p.amp_E_v is not None
+                and p.spatialH_h is not None
+            ), "tfsf SourcePlan requires amp_E_h, spatialH_v, amp_E_v and spatialH_h"
             H = _add_component(H, p.v_axis, p.grid_slice, (p.sign * p.amp_E_h[n]) * p.spatialH_v)
             H = _add_component(H, p.h_axis, p.grid_slice, (-p.sign * p.amp_E_v[n]) * p.spatialH_h)
     return H

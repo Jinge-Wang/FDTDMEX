@@ -101,6 +101,7 @@ def add_offdiag_correction_mlx(E, increment, offdiag, periodic_axes, aniso_width
                     straddling = (upper * width_lower + lower * width_upper) / (width_upper + width_lower)
                 term = 0.5 * vertex * straddling
                 row = term if row is None else row + term
+        assert row is not None  # every row has two partners
         rows.append(row)
     return E + mx.stack(rows, axis=0)
 
@@ -152,6 +153,7 @@ def _update_E(
         E = factor * E_old + c * curl * inv_eps
         increment = (c * curl) if offdiag is not None else None
         if P_curr is not None:
+            assert P_prev is not None and disp_c1 is not None and disp_c2 is not None and disp_c3 is not None
             # ADE: per-pole P_new = c1*P_curr + c2*P_prev + c3*E^n; back-action E += inv_eps*Σ(P_curr-P_new).
             # disp_c* are (poles,1,N,N,N) and broadcast over E_old's 3 components → (poles,3,N,N,N).
             P_new = disp_c1 * P_curr + disp_c2 * P_prev + disp_c3 * E_old

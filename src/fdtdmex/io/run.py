@@ -17,6 +17,7 @@ Layout of ``results.hdf5``::
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
@@ -46,7 +47,7 @@ def _write_results(path: Path, detector_states: dict, num_steps: int, backend: s
 
 
 def sim_run(
-    config_path: str | Path,
+    config_path: str | Path | os.PathLike,
     results_path: str | Path,
     *,
     backend: Literal["mlx", "mock"] = "mlx",
@@ -55,7 +56,8 @@ def sim_run(
     """Run a config HDF5 and write the results HDF5.
 
     Args:
-        config_path: Path to a ``config.hdf5`` produced by :func:`fdtdmex.io.sim_init`.
+        config_path: Path to a ``config.hdf5`` produced by :func:`fdtdmex.io.sim_init`. A
+            :class:`~fdtdmex.io.pack.PackResult` (as returned by :func:`fdtdmex.io.pack`) works too.
         results_path: Destination ``results.hdf5`` path.
         backend: ``"mlx"`` (the real engine) or ``"mock"`` (schema-valid synthetic results, no GPU).
         progress: Optional ``progress(step, num_steps)`` callback for streamed run telemetry, called

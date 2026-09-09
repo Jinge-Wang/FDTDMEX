@@ -952,7 +952,7 @@ def gds_layer_stack_from_component(
         ValueError: If the resolved cell name is not found in the exported GDS.
     """
     try:
-        import gdsfactory  # type: ignore  # noqa: F401
+        import gdsfactory  # noqa: F401
     except ImportError as exc:
         raise ImportError(
             "gdsfactory is required for gds_layer_stack_from_component. Install it with: pip install gdsfactory"

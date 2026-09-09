@@ -200,7 +200,11 @@ class UniformMaterialObject(OrderableObject):
         """
         bounds = self.metric_bounds
         center = self.metric_center
-        half = tuple(0.5 * (bounds[a][1] - bounds[a][0]) for a in range(3))
+        half = (
+            0.5 * (bounds[0][1] - bounds[0][0]),
+            0.5 * (bounds[1][1] - bounds[1][0]),
+            0.5 * (bounds[2][1] - bounds[2][0]),
+        )
         return _box_face_normal(points, center, half, ignore_axes)
 
     def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:

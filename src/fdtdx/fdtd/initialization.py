@@ -1003,18 +1003,22 @@ def _init_arrays(
                         stacklevel=2,
                     )
         if scene_arrays.inv_permeabilities is not None:
+            assert isinstance(inv_permeabilities, jax.Array)
             inv_permeabilities = sharding_preserving_set(
                 inv_permeabilities, full_index, jnp.asarray(scene_arrays.inv_permeabilities, dtype=config.dtype)
             )
         if scene_arrays.electric_conductivity is not None:
+            assert electric_conductivity is not None
             electric_conductivity = sharding_preserving_set(
                 electric_conductivity, full_index, jnp.asarray(scene_arrays.electric_conductivity, dtype=config.dtype)
             )
         if scene_arrays.magnetic_conductivity is not None:
+            assert magnetic_conductivity is not None
             magnetic_conductivity = sharding_preserving_set(
                 magnetic_conductivity, full_index, jnp.asarray(scene_arrays.magnetic_conductivity, dtype=config.dtype)
             )
         if num_dispersive_poles > 0:
+            assert dispersive_c1 is not None and dispersive_c2 is not None and dispersive_c3 is not None
             disp_index = (slice(None), slice(None), slice(None), slice(None), slice(None))
             dispersive_c1 = sharding_preserving_set(
                 dispersive_c1, disp_index, jnp.asarray(scene_arrays.dispersive_c1, dtype=config.dtype)

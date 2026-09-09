@@ -746,7 +746,7 @@ def _raise_if_anisotropic_property(prop: jax.Array | float, name: str) -> None:
 def _diagonal_components(
     prop: jax.Array | float,
     name: str,
-) -> list[jax.Array] | list[float]:
+) -> list[jax.Array | float]:
     """Return the three diagonal entries of a material property array, one per field component.
 
     Accepts the scalar, legacy ``(Nx, Ny, Nz)``, and ``(1|3|9, Nx, Ny, Nz)`` forms. A 9-component

@@ -70,6 +70,10 @@ from fdtdx.objects.static_material.static import (
     UniformMaterialObject,
 )
 
+#: The two static-object base classes the scene can query (``contains`` / ``material_at`` /
+#: ``normal_at``): what ``ObjectContainer.static_material_objects`` returns.
+StaticObject = UniformMaterialObject | StaticMultiMaterialObject
+
 #: Half-cell offsets of the three E components, in the order (x, y, z) per component.
 E_OFFSETS: tuple[tuple[float, float, float], ...] = ((0.5, 0.0, 0.0), (0.0, 0.5, 0.0), (0.0, 0.0, 0.5))
 #: Half-cell offsets of the three H components, in the order (x, y, z) per component.
@@ -138,7 +142,7 @@ class SceneEntry:
     #: Object name, for reporting.
     name: str
     #: The placed object itself; queried through ``contains`` / ``material_at``.
-    obj: SimulationObject
+    obj: StaticObject
     #: Position in the write order. Higher wins.
     priority: int
     #: Map from the object's own material index to the scene-global material index.
@@ -175,7 +179,7 @@ def _uniform_material_key(obj: SimulationObject) -> str:
     return f"__uniform__::{obj.name}"
 
 
-def build_scene(static_objects: Sequence[SimulationObject]) -> Scene:
+def build_scene(static_objects: Sequence[StaticObject]) -> Scene:
     """Merge every static object's materials into one global list and order the objects by priority.
 
     Args:
@@ -253,7 +257,11 @@ def _nudge_off_ties(coords: tuple[np.ndarray, np.ndarray, np.ndarray]) -> tuple[
     if not widths:
         return coords
     tol = _TIE_NUDGE_FRACTION * float(min(widths))
-    return tuple(np.asarray(c, dtype=float) + tol for c in coords)  # type: ignore[return-value]
+    return (
+        np.asarray(coords[0], dtype=float) + tol,
+        np.asarray(coords[1], dtype=float) + tol,
+        np.asarray(coords[2], dtype=float) + tol,
+    )
 
 
 def _axis_window(coords: np.ndarray, lower: float, upper: float) -> tuple[int, int]:
@@ -294,7 +302,8 @@ def periodic_image_axes(
     Returns:
         tuple: The three flags with the invariant axes cleared.
     """
-    return tuple(bool(periodic_axes[axis]) and grid.shape[axis] > 1 for axis in range(3))  # type: ignore[return-value]
+    flags = [bool(periodic_axes[axis]) and grid.shape[axis] > 1 for axis in range(3)]
+    return (flags[0], flags[1], flags[2])
 
 
 def entry_shifts(
@@ -584,7 +593,7 @@ def _expand_diagonal_to_9(table_3: np.ndarray) -> np.ndarray:
 
 
 def load_scene_on_yee_lattices(
-    static_objects: Sequence[SimulationObject],
+    static_objects: Sequence[StaticObject],
     grid: RectilinearGrid,
     volume_shape: tuple[int, int, int],
     num_perm_components: int,

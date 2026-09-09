@@ -14,8 +14,9 @@ it is installed.
 
 from __future__ import annotations
 
-from typing import List, Literal, Sequence
+from typing import TYPE_CHECKING, List, Literal, Sequence
 
+import jax.numpy as jnp
 import numpy as np
 
 from fdtdx.constants import c
@@ -23,13 +24,16 @@ from fdtdx.core.misc import expand_to_3x3
 from fdtdx.core.physics.mode_backend.operator import build_derivative_matrices
 from fdtdx.core.physics.mode_backend.solve import solve_modes_diagonal
 
+if TYPE_CHECKING:
+    from fdtdx.core.physics.modes import ModeTupleType
+
 # Off-diagonal magnitude above which the cross-section is treated as fully tensorial (deferred).
 TOL_TENSORIAL = 1e-6
 
 
 def _diag_components(cross_section: np.ndarray, nx: int, ny: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return flattened (C-order) xx/yy/zz diagonal components, asserting the tensor is diagonal."""
-    tensor = np.asarray(expand_to_3x3(cross_section))  # (3, 3, Nx, Ny)
+    tensor = np.asarray(expand_to_3x3(jnp.asarray(cross_section)))  # (3, 3, Nx, Ny)
     off = np.ones((3, 3)) - np.eye(3)
     off_mag = np.max(np.abs(tensor[off.astype(bool)])) if tensor.size else 0.0
     if off_mag > TOL_TENSORIAL:
@@ -56,7 +60,7 @@ def fdtdmex_mode_computation_wrapper(
     bend_axis: int | None = None,
     plane_center: tuple[float, float] | None = None,
     symmetry: tuple[int, int] = (0, 0),
-) -> List["ModeTupleType"]:  # noqa: F821 - ModeTupleType imported lazily to avoid an import cycle
+) -> List[ModeTupleType]:
     """Compute waveguide modes with the native full-vectorial FD solver.
 
     Args mirror ``tidy3d_mode_computation_wrapper``: ``coords`` are the two transverse cell-edge
