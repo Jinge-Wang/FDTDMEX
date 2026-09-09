@@ -25,6 +25,7 @@ API
     fdtdx.compute_impedance_corrected_temporal_profile
     fdtdx.compute_integrated_power
     fdtdx.compute_mode
+    fdtdx.compute_mode_expansion
     fdtdx.compute_pole_coefficients
     fdtdx.compute_pole_coefficients_per_axis
     fdtdx.compute_pole_coefficients_tensor
@@ -49,9 +50,9 @@ API
     fdtdx.export_vti
     fdtdx.export_vtr
     fdtdx.extend_material_to_pml
-    fdtdx.ExtrudedPolygon
     fdtdx.extruded_polygon_from_gds
     fdtdx.extruded_polygon_from_gds_path
+    fdtdx.ExtrudedPolygon
     fdtdx.field
     fdtdx.FieldDetector
     fdtdx.FieldProjectionAngleDetector
@@ -77,6 +78,7 @@ API
     fdtdx.LorentzPole
     fdtdx.Material
     fdtdx.metric_efficiency
+    fdtdx.ModeExpansionResult
     fdtdx.ModeOverlapDetector
     fdtdx.ModePlaneSource
     fdtdx.normalize_by_energy
@@ -86,8 +88,8 @@ API
     fdtdx.ParameterContainer
     fdtdx.ParameterTransformation
     fdtdx.PerfectElectricConductor
-    fdtdx.PerfectMagneticConductor
     fdtdx.PerfectlyMatchedLayer
+    fdtdx.PerfectMagneticConductor
     fdtdx.PeriodicBoundary
     fdtdx.PhasorDetector
     fdtdx.PhasorPoyntingFluxDetector
@@ -97,8 +99,11 @@ API
     fdtdx.plot_field_slice_component
     fdtdx.plot_material
     fdtdx.plot_material_from_side
+    fdtdx.plot_mode
+    fdtdx.plot_mode_from_source
     fdtdx.plot_setup
     fdtdx.plot_setup_from_side
+    fdtdx.plot_smatrix
     fdtdx.PointDipoleSource
     fdtdx.PointSymmetry2D
     fdtdx.PointSymmetry3D
@@ -115,6 +120,7 @@ API
     fdtdx.RemoveFloatingMaterial
     fdtdx.resolve_object_constraints
     fdtdx.run_fdtd
+    fdtdx.Scene
     fdtdx.setup_sparams_simulation
     fdtdx.SimulationConfig
     fdtdx.SimulationObject
@@ -123,6 +129,9 @@ API
     fdtdx.SingleFrequencyProfile
     fdtdx.SizeConstraint
     fdtdx.SizeExtensionConstraint
+    fdtdx.SMatrixResult
+    fdtdx.smooth_cross_section_2d
+    fdtdx.smooth_inverse_permittivity
     fdtdx.Sphere
     fdtdx.StandardToCustomRange
     fdtdx.StandardToInversePermittivityRange
@@ -141,6 +150,7 @@ API
     fdtdx.UniformGrid
     fdtdx.UniformMaterialObject
     fdtdx.UniformPlaneSource
+    fdtdx.use_backend
     fdtdx.VerticalSymmetry2D
     fdtdx.VerticalSymmetry3D
     fdtdx.WaveCharacter
