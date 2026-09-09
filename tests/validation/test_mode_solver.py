@@ -45,7 +45,7 @@ def _solve_slab(edges_x: np.ndarray, eps_x, eps_y, eps_z, k0: float, n_guess: fl
     der = build_derivative_matrices(edges_x, np.array([0.0, edges_x[1] - edges_x[0]]), (False, False))
     o = np.ones(n)
     eps_x = eps_x if np.ndim(eps_x) else np.full(n, eps_x)
-    E, H, neff, keff = solve_modes_diagonal(eps_x, eps_y, eps_z, o, o, o, der, k0, 6, n_guess, "+")
+    E, _H, neff, _keff = solve_modes_diagonal(eps_x, eps_y, eps_z, o, o, o, der, k0, 6, n_guess, "+")
     return E, neff
 
 
@@ -56,7 +56,7 @@ def test_slab_te0_uniform_grid():
     neff_a = _analytic_slab_te0(n_core, n_clad, width, k0)
 
     Lx, dx = 6.0e-6, 10e-9
-    nx = int(round(Lx / dx))
+    nx = round(Lx / dx)
     edges_x = (np.arange(nx + 1) - nx / 2) * dx
     centers = 0.5 * (edges_x[:-1] + edges_x[1:])
     eps = np.where(np.abs(centers) <= width / 2, n_core**2, n_clad**2)
@@ -82,7 +82,7 @@ def test_slab_te0_rectilinear_grid():
     while x < Lx / 2 - 1e-12:
         pts.append(x)
         x += 5e-9 if abs(x) < 0.8e-6 else 25e-9  # fine near the core interface, coarse outside
-    edges_x = np.array(pts + [Lx / 2])
+    edges_x = np.array([*pts, Lx / 2])
     centers = 0.5 * (edges_x[:-1] + edges_x[1:])
     eps = np.where(np.abs(centers) <= width / 2, n_core**2, n_clad**2)
 
@@ -99,7 +99,7 @@ def test_slab_te0_diagonal_anisotropy():
     neff_a = _analytic_slab_te0(n_core, n_clad, width, k0)
 
     Lx, dx = 6.0e-6, 10e-9
-    nx = int(round(Lx / dx))
+    nx = round(Lx / dx)
     edges_x = (np.arange(nx + 1) - nx / 2) * dx
     centers = 0.5 * (edges_x[:-1] + edges_x[1:])
     incore = np.abs(centers) <= width / 2

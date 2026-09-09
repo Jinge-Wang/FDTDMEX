@@ -106,7 +106,7 @@ def compute_anisotropic_update_matrices_mlx(
 
 def _forward_avg(f: mx.array, axis: int) -> mx.array:
     """Unweighted edge->center half-step along ``axis`` (forward roll, exact midpoint)."""
-    return 0.5 * (f + mx.roll(f, -1, axis=axis))
+    return 0.5 * (f + mx.roll(f, -1, axis))
 
 
 def _backward_avg(f: mx.array, axis: int, w_pad) -> mx.array:
@@ -116,10 +116,10 @@ def _backward_avg(f: mx.array, axis: int, w_pad) -> mx.array:
     *opposite* cell's width, so the edge value is the correct linear interpolant on a graded mesh
     (the 1/2 in the half-widths cancels, so full widths are used directly).
     """
-    fn = mx.roll(f, 1, axis=axis)
+    fn = mx.roll(f, 1, axis)
     if w_pad is None:
         return 0.5 * (f + fn)
-    wn = mx.roll(w_pad, 1, axis=axis)
+    wn = mx.roll(w_pad, 1, axis)
     return (f * wn + fn * w_pad) / (w_pad + wn)
 
 

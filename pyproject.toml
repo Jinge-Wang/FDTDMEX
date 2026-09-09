@@ -117,7 +117,15 @@ include = ["src", "examples", "checks", "test"]
 exclude = ["**/.venv"]
 
 [tool.ty.src]
-exclude = ["tests"]
+# examples/, benchmarks/ and server/ are scripts, notebooks and the MCP server, not the library;
+# they are not type-checked (tests/ never were).
+exclude = ["tests", "examples", "benchmarks", "server"]
+
+[tool.ty.rules]
+# mlx only installs on Apple silicon (see the dependency marker above) and CI runs on Linux, so
+# `import mlx.core` cannot resolve there; a `# ty: ignore` would be flagged as unused on macOS.
+# pyvista (plot_setup_3d) is an optional extra for the same reason.
+unresolved-import = "ignore"
 
 [tool.ty.environment]
 python-version = "3.14"

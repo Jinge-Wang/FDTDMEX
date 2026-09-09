@@ -30,6 +30,26 @@ ParameterContainer = dict[str, dict[str, jax.Array] | jax.Array]
 _ObjT = TypeVar("_ObjT", bound=SimulationObject)
 
 
+def wrap_padding_axes(boundary_objects) -> tuple[bool, bool, bool]:
+    """Which axes use wrap (periodic) padding, from a sequence of boundary objects.
+
+    Delegates to each boundary's ``uses_wrap_padding`` property, so no boundary-type-specific logic
+    lives in the callers. One face is enough to set the flag, which matches what the padding then
+    does: ``jnp.pad(..., mode="wrap")`` wraps both ends of the axis regardless.
+
+    Args:
+        boundary_objects: The placed boundary objects.
+
+    Returns:
+        tuple[bool, bool, bool]: Which axes (x, y, z) wrap.
+    """
+    wrap_axes = [False, False, False]
+    for boundary in boundary_objects:
+        if boundary.uses_wrap_padding:
+            wrap_axes[boundary.axis] = True
+    return (wrap_axes[0], wrap_axes[1], wrap_axes[2])
+
+
 @autoinit
 class ObjectContainer(TreeClass):
     """Container for managing simulation objects and their relationships.
@@ -135,6 +155,18 @@ class ObjectContainer(TreeClass):
             getattr(o, "subpixel_smoothing", False) and getattr(o, "subpixel_full_tensor", False)
             for o in self.static_material_objects
         )
+
+    @property
+    def periodic_axes(self) -> tuple[bool, bool, bool]:
+        """Axes whose field halo wraps, i.e. that carry a periodic or Bloch boundary.
+
+        The material loader reads the same predicate as the field padding, so the periodicity of
+        the geometry and the periodicity of the fields cannot disagree.
+
+        Returns:
+            tuple[bool, bool, bool]: Which axes (x, y, z) are periodic.
+        """
+        return wrap_padding_axes(self.boundary_objects)
 
     @property
     def all_objects_non_magnetic(self) -> bool:
@@ -423,6 +455,16 @@ class ArrayContainer(TreeClass):
     #: Backup of inverse permittivity values array.
     #: Only used when etching a device.
     initial_inv_permittivities: jax.Array | None = None
+
+    #: Off-diagonal entries ``(xy, xz, yz)`` of the smoothed inverse permittivity, on the
+    #: **cell-vertex** lattice: shape ``(3, Nx, Ny, Nz)``, entry ``q`` at the vertex
+    #: ``(e_x[i], e_y[j], e_z[k])``, zero wherever no interface was blended. ``None`` — the default
+    #: — everywhere except ``material_sampling="yee_smooth"`` with
+    #: ``yee_smooth_offdiag_placement="node"``, and then the E update adds Meep's product-averaged
+    #: stencil of these entries to the otherwise unchanged diagonal update. Both coupled rows read
+    #: the same array, which is what makes the assembled D-to-E map exactly symmetric. It is a
+    #: run-fixed material array, carried like the conductivities rather than as a gradient primal.
+    inv_permittivity_offdiag: jax.Array | None = None
 
     def reset(
         self,

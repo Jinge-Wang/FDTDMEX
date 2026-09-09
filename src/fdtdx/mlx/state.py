@@ -44,6 +44,13 @@ class MLXState:
     #: Optional magnetic conductivity, shape (1|3|9, Nx, Ny, Nz).
     sigma_H: Any = None
 
+    #: Off-diagonal entries ``(xy, xz, yz)`` of the smoothed inverse permittivity on the
+    #: **cell-vertex** lattice, shape (3, Nx, Ny, Nz). ``None`` except under
+    #: ``material_sampling="yee_smooth"`` with ``yee_smooth_offdiag_placement="node"``. When set,
+    #: the diagonal E core adds Meep's product-averaged stencil of these entries; the custom Metal
+    #: kernels do not carry the term, so ``kernel_eligible`` refuses such a run.
+    inv_eps_offdiag: Any = None
+
     #: Per-axis periodic (wrap-padding) flags; True where a periodic/Bloch-k0 boundary sits.
     periodic_axes: tuple = (False, False, False)
 

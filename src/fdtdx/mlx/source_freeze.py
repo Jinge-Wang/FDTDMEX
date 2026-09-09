@@ -73,7 +73,7 @@ def _dipole_plan(source: PointDipoleSource, config) -> SourcePlan:
         if not bool(on_arr[n]):
             continue
         adj = float(adj_idx[n]) + half
-        amp = float(source.temporal_profile.get_amplitude(time=adj * dt, period=period, phase_shift=phase))
+        amp = float(source.temporal_profile.get_amplitude(time=jnp.asarray(adj * dt), period=period, phase_shift=phase))
         coeff[n] = sign * c * static * amp
 
     oriented = source._inv_eps_oriented if electric else source._inv_mu_oriented

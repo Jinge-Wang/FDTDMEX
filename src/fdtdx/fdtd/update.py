@@ -9,9 +9,10 @@ from fdtdx.core.misc import expand_to_3x3, pad_fields
 from fdtdx.core.physics.curl import curl_E, curl_H, interpolate_fields
 from fdtdx.core.physics.symmetry import field_component_parity, mirror_pairs_on_plane
 from fdtdx.core.switch import OnOffSwitch
-from fdtdx.fdtd.container import ArrayContainer, ObjectContainer
+from fdtdx.fdtd.container import ArrayContainer, ObjectContainer, wrap_padding_axes
 from fdtdx.fdtd.misc import (
     add_boundary_interfaces,
+    add_offdiag_correction,
     avg_anisotropic_E_component,
     avg_anisotropic_H_component,
     collect_boundary_interfaces,
@@ -29,8 +30,9 @@ def _source_uses_default_always_on_switch(source) -> bool:
 def get_wrap_padding_axes(objects: ObjectContainer) -> tuple[bool, bool, bool]:
     """Determines which axes should use wrap (periodic) padding.
 
-    Delegates to each boundary's `uses_wrap_padding` property, so no
-    boundary-type-specific logic lives in the update loop.
+    Thin wrapper over :func:`fdtdx.fdtd.container.wrap_padding_axes`, which the container also
+    exposes as ``ObjectContainer.periodic_axes`` for the material loader. Kept under this name
+    because the backend dispatcher, the IO packer, the benchmarks and several tests import it.
 
     Args:
         objects (ObjectContainer): Container with simulation objects including boundaries
@@ -38,11 +40,7 @@ def get_wrap_padding_axes(objects: ObjectContainer) -> tuple[bool, bool, bool]:
     Returns:
         tuple[bool, bool, bool]: Tuple indicating which axes (x,y,z) use wrap padding
     """
-    wrap_axes = [False, False, False]
-    for boundary in objects.boundary_objects:
-        if boundary.uses_wrap_padding:
-            wrap_axes[boundary.axis] = True
-    return tuple(wrap_axes)  # type: ignore
+    return wrap_padding_axes(objects.boundary_objects)
 
 
 def apply_boundary_post_E_update(
@@ -229,6 +227,37 @@ def get_anisotropic_averaging_widths(
     return (widths[0], widths[1], widths[2])
 
 
+def offdiag_correction_terms(
+    increment: jax.Array,
+    offdiag: jax.Array,
+    objects: ObjectContainer,
+    config: SimulationConfig,
+) -> tuple[jax.Array, jax.Array, tuple[jax.Array, jax.Array, jax.Array] | None]:
+    """Halo-pad the two arrays the vertex off-diagonal stencil reads, plus its spacing weights.
+
+    ``increment`` is padded exactly as every other field is (:func:`pad_fields_for_boundaries`):
+    wrapped on a periodic axis, zero at a PML/PEC face, which is the same one-sided treatment the
+    existing off-diagonal averages take there. The vertex entries are padded to match — wrapped on a
+    periodic axis, where the vertex one past the last cell *is* vertex 0, and edge-replicated
+    otherwise, where the entry is inert because every field sample it multiplies is a zero halo
+    value.
+
+    Args:
+        increment (jax.Array): ``(3, Nx, Ny, Nz)`` quantity the diagonal update multiplies by
+            ``inv_eps``.
+        offdiag (jax.Array): ``(3, Nx, Ny, Nz)`` vertex entries ``(xy, xz, yz)``.
+        objects (ObjectContainer): Container with the boundary objects.
+        config (SimulationConfig): Simulation configuration.
+
+    Returns:
+        tuple: ``(increment_pad, offdiag_pad, aniso_widths)`` for
+        :func:`fdtdx.fdtd.misc.add_offdiag_correction`.
+    """
+    increment_pad = pad_fields_for_boundaries(increment, objects, config)
+    offdiag_pad = pad_offdiag_coefficients(offdiag, get_wrap_padding_axes(objects))
+    return increment_pad, offdiag_pad, get_anisotropic_averaging_widths(config)
+
+
 def pad_offdiag_coefficients(cij: jax.Array, periodic_axes: tuple[bool, bool, bool]) -> jax.Array:
     """Coefficient halo for the symmetrized off-diagonal dispersive coupling.
 
@@ -279,6 +308,7 @@ def update_E(
     """
 
     inv_eps = arrays.inv_permittivities
+    offdiag = arrays.inv_permittivity_offdiag
     sigma_E = arrays.electric_conductivity
     c = config.courant_number
     H_pad = pad_fields_for_boundaries(arrays.fields.H, objects, config)
@@ -309,6 +339,11 @@ def update_E(
         # E[i, x, y, z] = factor * E[i, x, y, z] + c * curl[i, x, y, z] * inv_eps[i, x, y, z]
         E = factor * arrays.fields.E + c * curl * inv_eps
 
+        # The quantity inv_eps multiplies above, kept only when the vertex-placed off-diagonal
+        # correction needs it: the correction is the off-diagonal part of the same D-to-E map, so it
+        # acts on exactly this increment. Left as None otherwise so the graph is unchanged.
+        increment = (c * curl) if offdiag is not None else None
+
         # Dispersive (ADE) correction. Non-dispersive cells have c3 = 0, so P_hat =
         # c1*P_curr + c2*P_prev and (P_curr - P_hat) reduces to a purely historical
         # term that is also zero when P_curr and P_prev start at zero — so it's a
@@ -328,12 +363,24 @@ def update_E(
             P_hat = disp_c1 * P_curr + disp_c2 * P_prev + disp_c3 * arrays.fields.E
             delta = jnp.sum(P_curr - P_hat, axis=0)
             E = E + inv_eps * delta
+            if increment is not None:
+                # The polarization enters as a current on the same right-hand side, so the
+                # off-diagonal part of the map acts on it too.
+                increment = increment + delta
             arrays = arrays.aset("fields->dispersive_P_prev", P_curr)
             arrays = arrays.aset("fields->dispersive_P_curr", P_hat)
-            if sigma_E is not None:
-                # lossy update formula. Noop for conductivity = 0; see Schneider 3.12
-                E = E / (1 + c * sigma_E * eta0 * inv_eps / 2)
-        elif sigma_E is not None:
+
+        if offdiag is not None:
+            # The off-diagonal entries live on the cell vertices, half a cell back along each row's
+            # own axis, and are applied with Meep's product-averaged stencil. Added before the lossy
+            # divide so it scales with the same factor as the diagonal term; every vertex whose two
+            # materials are not both lossless carries a zero entry, so no term here is scaled by a
+            # factor that has no off-diagonal form.
+            assert increment is not None
+            increment_pad, offdiag_pad, aniso_widths = offdiag_correction_terms(increment, offdiag, objects, config)
+            E = add_offdiag_correction(E, increment_pad, offdiag_pad, aniso_widths)
+
+        if sigma_E is not None:
             # update formula for lossy material. Simplifies to Noop for conductivity = 0
             # for details see Schneider, chapter 3.12
             E = E / (1 + c * sigma_E * eta0 * inv_eps / 2)
@@ -567,6 +614,7 @@ def update_E_reverse(
         )
 
     inv_eps = arrays.inv_permittivities
+    offdiag = arrays.inv_permittivity_offdiag
     sigma_E = arrays.electric_conductivity
     c = config.courant_number
     H_pad = pad_fields_for_boundaries(arrays.fields.H, objects, config)
@@ -588,6 +636,13 @@ def update_E_reverse(
         if sigma_E is not None:
             E = E * (1 + c * sigma_E * eta0 * inv_eps / 2)
             factor = 1 - c * sigma_E * eta0 * inv_eps / 2
+
+        if offdiag is not None:
+            # The forward step added the correction after the elementwise update and before the
+            # lossy divide, so undoing it in that order inverts a linear map term for term. The
+            # dispersive fold has no reverse (rejected above), so the increment is c * curl alone.
+            increment_pad, offdiag_pad, aniso_widths = offdiag_correction_terms(c * curl, offdiag, objects, config)
+            E = add_offdiag_correction(E, -increment_pad, offdiag_pad, aniso_widths)
 
         E = (E - c * curl * inv_eps) / factor
 

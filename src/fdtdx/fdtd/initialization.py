@@ -4,10 +4,11 @@ from typing import Any, Sequence
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from loguru import logger
 
 from fdtdx import constants
-from fdtdx.config import SimulationConfig
+from fdtdx.config import YEE_OFFDIAG_VERTEX_PLACEMENTS, SimulationConfig
 from fdtdx.core.grid import QuasiUniformGrid, RectilinearGrid
 from fdtdx.core.jax.default_key import default_key
 from fdtdx.core.jax.guards import check_not_tracing
@@ -17,8 +18,14 @@ from fdtdx.core.jax.sharding import (
     sharding_preserving_set,
 )
 from fdtdx.core.jax.ste import straight_through_estimator
+from fdtdx.core.physics.geometry_raster import load_scene_on_yee_lattices
 from fdtdx.dispersion import compute_pole_coefficients_tensor
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer
+from fdtdx.fdtd.metric_shadow import (
+    build_placement_report,
+    format_placement_report,
+    resolve_metric_shadow_detailed,
+)
 from fdtdx.fdtd.symmetry import apply_mode_symmetry, make_symmetry_walls, reduce_resolved_slices
 from fdtdx.materials import (
     compute_allowed_dispersive_coefficients,
@@ -93,6 +100,27 @@ def _resolve_grid_from_volume(
         )
     pre_volume_shape: tuple[int, int, int] = (pre_shape_list[0], pre_shape_list[1], pre_shape_list[2])
     return config.aset("grid", config.grid.resolve(pre_volume_shape))
+
+
+def _shadow_to_bounds(axes) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Reduce the per-axis metric-shadow state to plain ``(lower, upper)`` bound pairs."""
+    out = []
+    for sh in axes:
+        assert sh.lo is not None and sh.hi is not None
+        out.append((float(sh.lo), float(sh.hi)))
+    return (out[0], out[1], out[2])
+
+
+def _box_metric_bounds(
+    slice_tuple, grid: RectilinearGrid
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+    """Metric bounds of a placed integer box: the grid edge coordinates it spans."""
+    out = []
+    for axis in range(3):
+        edges = grid.edges(axis)
+        b0, b1 = slice_tuple[axis]
+        out.append((float(edges[b0]), float(edges[b1])))
+    return (out[0], out[1], out[2])
 
 
 def place_objects(
@@ -196,6 +224,24 @@ def place_objects(
     if grid.shape != volume_shape:
         raise ValueError(f"Configured grid shape {grid.shape} does not match simulation volume shape {volume_shape}.")
 
+    if config.uses_yee_material_sampling and config.has_symmetry:
+        raise NotImplementedError(
+            f"material_sampling={config.material_sampling!r} (per-Yee-point material sampling) does not "
+            "support config.symmetry yet: a per-component lattice does not mirror like a cell-centred "
+            "one. Use material_sampling='box' or drop the symmetry."
+        )
+
+    # Step 5b: Metric shadow of the same solve. Every object keeps the continuous extent and
+    # position it was asked for, in metres, next to the integer box it was rounded onto. Nothing
+    # about the integer placement changes; see fdtdx.fdtd.metric_shadow for the resolution rules.
+    metric_shadows = resolve_metric_shadow_detailed(
+        object_list=object_list,
+        constraints=constraints,
+        config=config,
+        resolved_slices=resolved_slices,
+    )
+    metric_bounds = {name: _shadow_to_bounds(axes) for name, axes in metric_shadows.items()}
+
     # Step 6: Place objects on grid based on resolved slice tuples. Under symmetry each object also
     # remembers its unclipped extent (in reduced coordinates) so object *contents* that depend on
     # the full extent - a Gaussian beam's centre, a mode cross-section - can be derived correctly
@@ -214,6 +260,8 @@ def place_objects(
         )
         if name in unreduced_slices:
             placed = placed.aset("_unreduced_grid_slice_tuple", unreduced_slices[name])
+        if name in metric_bounds:
+            placed = placed.aset("_metric_bounds", metric_bounds[name])
         placed_objects.append(placed)
 
     # Step 7: Place volume first (index 0)
@@ -226,6 +274,8 @@ def place_objects(
     )
     if volume_obj.name in unreduced_slices:
         placed_volume = placed_volume.aset("_unreduced_grid_slice_tuple", unreduced_slices[volume_obj.name])
+    if volume_obj.name in metric_bounds:
+        placed_volume = placed_volume.aset("_metric_bounds", metric_bounds[volume_obj.name])
     placed_objects.insert(0, placed_volume)
 
     # Step 8: Insert the PEC/PMC symmetry walls and forward the per-axis condition to mode
@@ -252,6 +302,13 @@ def place_objects(
             f"fdtdx.unfold_fields to reconstruct the full domain."
         )
 
+    # Step 8b: Objects created after the solve (the symmetry walls) get their metric shadow
+    # straight from their placed box, which is exactly what they asked for.
+    placed_objects = [
+        o if o.has_metric_bounds else o.aset("_metric_bounds", _box_metric_bounds(o.grid_slice_tuple, grid))
+        for o in placed_objects
+    ]
+
     # Step 9: Create object container
     objects_container = ObjectContainer(
         object_list=placed_objects,
@@ -276,6 +333,19 @@ def place_objects(
     key, subkey = jax.random.split(key)
     params = _init_params(objects=objects_container, key=subkey)
     arrays, config, info = _init_arrays(objects=objects_container, config=config)
+
+    # Placement report: requested vs realised extent per object per axis. Useful in both sampling
+    # modes; it is the evidence that motivates the yee path (a 500 nm bus placed as 480 nm).
+    report_rows = build_placement_report(
+        object_list=[o for o in objects_container.objects if o.name in metric_shadows],
+        resolved_slices=resolved_slices,
+        shadows=metric_shadows,
+        config=config,
+    )
+    info["placement_report"] = report_rows
+    report_table = format_placement_report(report_rows)
+    if report_table:
+        logger.info(f"Placement report (requested metric extent vs placed box):\n{report_table}")
 
     # Step 11: Update object configs and apply objects if possible
     disp_c1 = None if arrays.dispersive_c1 is None else jax.lax.stop_gradient(arrays.dispersive_c1)
@@ -610,6 +680,84 @@ def _init_arrays(
         isotropic_permittivity = False
         diagonally_anisotropic_permittivity = not subpixel_full_tensor
 
+    # Per-Yee-point sampling makes a cell's material component-dependent, so a 1-component array can
+    # no longer represent an interface cell: force every property up to at least the diagonal
+    # (3-component) tier. A genuinely full-tensor material or oriented dispersion can still push it
+    # to 9 further down. The 3-component tier keeps the Metal block-hybrid kernel eligible.
+    yee_sampling = config.uses_yee_material_sampling
+    yee_smoothing = config.uses_yee_smoothing
+    node_offdiag = False
+    offdiag_placement = config.yee_smooth_offdiag_placement_resolved
+    if yee_sampling:
+        if subpixel_permittivity and not yee_smoothing:
+            raise NotImplementedError(
+                "material_sampling='yee' (per-Yee-point point sampling) cannot be combined with "
+                "subpixel_smoothing=True; use material_sampling='yee_smooth' instead, which smooths "
+                "every object's interfaces on the Yee pixels."
+            )
+        if subpixel_permittivity and yee_smoothing:
+            raise NotImplementedError(
+                "material_sampling='yee_smooth' already smooths every interface on the Yee pixels; "
+                "the per-object subpixel_smoothing=True flag is redundant and its cell-centred blend "
+                "would fight the per-component one. Drop subpixel_smoothing from the objects."
+            )
+        isotropic_permittivity = False
+        isotropic_permeability = False
+        isotropic_electric_conductivity = False
+        isotropic_magnetic_conductivity = False
+        # The tier stays derived from the materials. Forcing the diagonal tier here used to drop a
+        # material's off-diagonal entries before the loader ever saw them, silently and without a
+        # counter, because compute_allowed_* is then asked for a 3-wide table. Every isotropic and
+        # every diagonal material still lands on the 3-component tier, since the "diagonally
+        # anisotropic" predicate tests only the six off-diagonal entries; only a material that
+        # genuinely carries one moves to 9. yee_smooth_full_tensor keeps forcing 9 for the two
+        # smoothed properties, because the smoothing itself produces off-diagonal terms at a tilted
+        # interface even when every material is isotropic; it governs eps and mu together, since
+        # there is no reading in which the Kottke off-diagonal terms are kept for E and dropped
+        # for H in one run.
+        #
+        # Under the node placement the permittivity does *not* widen: the diagonal entries stay
+        # where they are, on the 3-component array, and the three off-diagonal entries move to a
+        # separate array on the cell-vertex lattice, which the update applies as an additive
+        # correction. The gate is that every material's own permittivity is diagonal — the vertex
+        # array carries smoothing-induced off-diagonals, and a material with off-diagonal entries of
+        # its own has a bulk term that belongs at its own cells. Such a scene keeps the dense pixel
+        # placement (which the material tier forces to 9 anyway). The permeability is untouched by
+        # the placement: the H off-diagonals stay on the dense path.
+        node_offdiag = (
+            yee_smoothing
+            and config.yee_smooth_full_tensor
+            and offdiag_placement in YEE_OFFDIAG_VERTEX_PLACEMENTS
+            and objects.all_objects_diagonally_anisotropic_permittivity
+        )
+        if yee_smoothing and config.yee_smooth_full_tensor and not node_offdiag:
+            if offdiag_placement in YEE_OFFDIAG_VERTEX_PLACEMENTS:
+                warnings.warn(
+                    f"yee_smooth_offdiag_placement={offdiag_placement!r} was requested but a "
+                    "material carries off-diagonal permittivity entries of its own, so the "
+                    "smoothing-induced off-diagonals cannot be separated onto the vertex lattice. "
+                    "Falling back to the dense 9-component pixel placement for this run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            else:
+                warnings.warn(
+                    "yee_smooth_offdiag_placement='pixel' writes the whole Kottke row at each "
+                    "component's own pixel. The two coupled rows then read different arrays, the "
+                    "assembled D-to-E map is 1-5% asymmetric, and growing modes appear on a curved "
+                    "interface from a permittivity contrast of about 6 upwards. Use 'node' unless "
+                    "you are reproducing a recorded run.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        force_full_tensor = yee_smoothing and config.yee_smooth_full_tensor and not node_offdiag
+        diagonally_anisotropic_permittivity = (
+            objects.all_objects_diagonally_anisotropic_permittivity and not force_full_tensor
+        )
+        diagonally_anisotropic_permeability = objects.all_objects_diagonally_anisotropic_permeability and not (
+            yee_smoothing and config.yee_smooth_full_tensor
+        )
+
     # Dispersion tiers. The recurrence coefficients c1/c2 carry 1 (isotropic,
     # broadcast) or 3 (per-axis) components; the field coupling c3
     # additionally widens to 9 (row-major 3x3 tensor per pole) when any pole is
@@ -632,7 +780,7 @@ def _init_arrays(
             "Use GradientConfig(method='checkpointed') instead."
         )
 
-    num_disp_components = 1 if objects.all_objects_isotropic_dispersion else 3
+    num_disp_components = 1 if (objects.all_objects_isotropic_dispersion and not yee_sampling) else 3
     axis_aligned_dispersion = objects.all_objects_axis_aligned_dispersion
     num_disp_coupling_components = num_disp_components if axis_aligned_dispersion else 9
     tensor_dispersion_path = num_dispersive_poles > 0 and (
@@ -659,6 +807,22 @@ def _init_arrays(
         num_perm_components = 3
     else:
         num_perm_components = 9
+
+    if node_offdiag and num_perm_components != 3:
+        # Something downstream of the placement decision widened the permittivity anyway — oriented
+        # dispersive poles are the case that exists today. The 9-component update reads the whole
+        # row from the array itself and never looks at the vertex entries, so writing them would
+        # allocate an array nothing applies. Fall back to the dense placement, which that update
+        # does read.
+        node_offdiag = False
+        warnings.warn(
+            f"yee_smooth_offdiag_placement={offdiag_placement!r} was requested but the permittivity "
+            "array was widened to the 9-component tier by another feature of this scene (oriented dispersive "
+            "poles are the case that does this), whose update reads the tensor rows directly. "
+            "Falling back to the dense pixel placement for this run.",
+            UserWarning,
+            stacklevel=2,
+        )
 
     if isotropic_permeability:
         num_permeability_components = 1
@@ -723,6 +887,10 @@ def _init_arrays(
             sharding_axis=1,
             backend=config.backend,
         )
+    # Written only by the yee_smooth loader under the node placement; stays None otherwise, which is
+    # what makes every other run bit-identical (the update's correction is guarded on it).
+    inv_permittivity_offdiag = None
+
     conductivity_spacing = None
     if electric_conductivity is not None or magnetic_conductivity is not None:
         conductivity_spacing = constants.c * config.time_step_duration / config.courant_number
@@ -776,7 +944,95 @@ def _init_arrays(
         key=lambda o: o.placement_order,
     )
     info = {}
-    for o in sorted_obj:
+    if yee_sampling:
+        scene_arrays = load_scene_on_yee_lattices(
+            static_objects=objects.static_material_objects,
+            grid=grid,
+            volume_shape=volume_shape,
+            num_perm_components=num_perm_components,
+            num_permeability_components=(
+                num_permeability_components if isinstance(inv_permeabilities, jax.Array) else None
+            ),
+            num_electric_cond_components=(num_electric_cond_components if electric_conductivity is not None else None),
+            num_magnetic_cond_components=(num_magnetic_cond_components if magnetic_conductivity is not None else None),
+            num_dispersive_poles=num_dispersive_poles,
+            num_disp_components=num_disp_components,
+            num_disp_coupling_components=num_disp_coupling_components,
+            conductivity_spacing=conductivity_spacing,
+            time_step_duration=config.time_step_duration,
+            smooth=yee_smoothing,
+            supersample=config.yee_smooth_supersample,
+            full_tensor=config.yee_smooth_full_tensor,
+            report_box_difference=config.yee_sampling_diagnostics_enabled,
+            # The same predicate the field halo uses, so the material periodicity and the field
+            # periodicity cannot disagree. Symmetry is the one case where they could -- a symmetry
+            # axis keeps its far-side periodic boundary while its min-side halo is deliberately not
+            # wrapped -- and symmetry is rejected outright for every yee sampling mode above.
+            periodic_axes=objects.periodic_axes,
+            offdiag_on_vertices=node_offdiag,
+            offdiag_placement=offdiag_placement,
+        )
+        info["yee_sampling_difference"] = scene_arrays.sampling_difference
+        full_index = (slice(None), slice(None), slice(None), slice(None))
+        inv_permittivities = sharding_preserving_set(
+            inv_permittivities, full_index, jnp.asarray(scene_arrays.inv_permittivities, dtype=config.dtype)
+        )
+        if scene_arrays.inv_permittivity_offdiag is not None:
+            inv_permittivity_offdiag = jnp.asarray(scene_arrays.inv_permittivity_offdiag, dtype=config.dtype)
+            if config.yee_smooth_check_definiteness:
+                from fdtdx.core.physics.geometry_smooth import min_eigenvalue_of_symmetric_part
+
+                smoothing_info = scene_arrays.sampling_difference.get("smoothing")
+                estimate = min_eigenvalue_of_symmetric_part(
+                    np.asarray(scene_arrays.inv_permittivities, dtype=np.float64),
+                    np.asarray(scene_arrays.inv_permittivity_offdiag, dtype=np.float64),
+                    objects.periodic_axes,
+                )
+                if smoothing_info is not None:
+                    smoothing_info.update(estimate)
+                if estimate["min_eig_sym_dtoe"] <= 0.0:
+                    warnings.warn(
+                        "The symmetric part of the assembled D-to-E map has smallest eigenvalue "
+                        f"{estimate['min_eig_sym_dtoe']:.4g} <= 0, so the semi-discrete system is "
+                        "not guaranteed to have real frequencies and a purely growing mode is "
+                        "possible. This is the high-contrast failure of the node placement (it "
+                        "appears above a permittivity contrast of roughly 30 on a curved rim); "
+                        "reduce the contrast, refine the grid around the interface, or accept the "
+                        "risk knowingly.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+        if scene_arrays.inv_permeabilities is not None:
+            assert isinstance(inv_permeabilities, jax.Array)
+            inv_permeabilities = sharding_preserving_set(
+                inv_permeabilities, full_index, jnp.asarray(scene_arrays.inv_permeabilities, dtype=config.dtype)
+            )
+        if scene_arrays.electric_conductivity is not None:
+            assert electric_conductivity is not None
+            electric_conductivity = sharding_preserving_set(
+                electric_conductivity, full_index, jnp.asarray(scene_arrays.electric_conductivity, dtype=config.dtype)
+            )
+        if scene_arrays.magnetic_conductivity is not None:
+            assert magnetic_conductivity is not None
+            magnetic_conductivity = sharding_preserving_set(
+                magnetic_conductivity, full_index, jnp.asarray(scene_arrays.magnetic_conductivity, dtype=config.dtype)
+            )
+        if num_dispersive_poles > 0:
+            assert dispersive_c1 is not None and dispersive_c2 is not None and dispersive_c3 is not None
+            disp_index = (slice(None), slice(None), slice(None), slice(None), slice(None))
+            dispersive_c1 = sharding_preserving_set(
+                dispersive_c1, disp_index, jnp.asarray(scene_arrays.dispersive_c1, dtype=config.dtype)
+            )
+            dispersive_c2 = sharding_preserving_set(
+                dispersive_c2, disp_index, jnp.asarray(scene_arrays.dispersive_c2, dtype=config.dtype)
+            )
+            dispersive_c3 = sharding_preserving_set(
+                dispersive_c3, disp_index, jnp.asarray(scene_arrays.dispersive_c3, dtype=config.dtype)
+            )
+    # In yee mode the scene loader has written every static array already; the sequential
+    # per-object write loop below is the box path and must not run.
+    static_write_order = () if yee_sampling else sorted_obj
+    for o in static_write_order:
         if isinstance(o, UniformMaterialObject):
             # Material properties are tuples (εxx, εxy, εxz, εyx, εyy, εyz, εzx, εzy, εzz)
             # Arrays have shape (num_components, Nx, Ny, Nz) where num_components is 1 (isotropic), 3 (diagonally anisotropic), or 9 (fully anisotropic)
@@ -1106,6 +1362,7 @@ def _init_arrays(
         dispersive_c2=dispersive_c2,
         dispersive_c3=dispersive_c3,
         initial_inv_permittivities=initial_inv_permittivities,
+        inv_permittivity_offdiag=inv_permittivity_offdiag,
     )
     return arrays, config, info
 

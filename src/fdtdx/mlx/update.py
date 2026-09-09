@@ -31,6 +31,81 @@ def _is_full_tensor(arr) -> bool:
     return isinstance(arr, mx.array) and arr.ndim > 0 and arr.shape[0] == 9
 
 
+def _pad_vertex_entries(offdiag, periodic_axes):
+    """One-cell halo on the vertex off-diagonal entries, matching ``pad_fields_mlx``'s semantics.
+
+    Wrap on a periodic axis, where the vertex one past the last cell *is* vertex 0; edge-replicate
+    elsewhere, where the entry is inert because every field sample it multiplies is a zero halo
+    value. Mirrors ``fdtdx.fdtd.update.pad_offdiag_coefficients``.
+    """
+    padded = offdiag
+    for index, periodic in enumerate(periodic_axes):
+        axis = index + 1
+        low = [slice(None)] * padded.ndim
+        high = [slice(None)] * padded.ndim
+        low[axis] = slice(-1, None) if periodic else slice(0, 1)
+        high[axis] = slice(0, 1) if periodic else slice(-1, None)
+        padded = mx.concatenate([padded[tuple(low)], padded, padded[tuple(high)]], axis=axis)
+    return padded
+
+
+def _window(array, offsets, shape):
+    """The interior of a halo-padded array's three trailing axes, shifted by whole cells."""
+    lead = array.ndim - 3
+    index = [slice(None)] * lead
+    for axis in range(3):
+        index.append(slice(1 + offsets[axis], 1 + offsets[axis] + shape[axis]))
+    return array[tuple(index)]
+
+
+def _width_window(widths, axis, offset, extent):
+    """One axis's padded cell widths, shifted by whole cells, still broadcasting along that axis."""
+    index = [slice(None)] * 3
+    index[axis] = slice(1 + offset, 1 + offset + extent)
+    return widths[tuple(index)]
+
+
+def add_offdiag_correction_mlx(E, increment, offdiag, periodic_axes, aniso_widths=None):
+    """MLX twin of :func:`fdtdx.fdtd.misc.add_offdiag_correction` — Meep's ``OFFDIAG`` stencil.
+
+    At each of the two vertices bracketing the ``E_c`` point along ``c``'s own axis (weights exactly
+    1/2 and 1/2 on any grid), average the two partner samples straddling that vertex along the
+    partner's own axis (dual-cell weights on a graded mesh, plain midpoint otherwise), multiply by
+    the vertex's own entry, and average the two vertex products. Both coupled rows read the same
+    vertex entry, so the assembled D-to-E map is exactly symmetric.
+
+    ``increment`` is the un-padded quantity the diagonal update multiplies by ``inv_eps``.
+    """
+    from fdtdx.fdtd.misc import OFFDIAG_ROW_PARTNERS
+
+    shape = tuple(int(s) for s in increment.shape[1:])
+    increment_pad = pad_fields_mlx(increment, periodic_axes)
+    offdiag_pad = _pad_vertex_entries(offdiag, periodic_axes)
+    rows = []
+    for component in range(3):
+        row = None
+        for partner, entry in OFFDIAG_ROW_PARTNERS[component]:
+            for near in (0, 1):
+                offsets = [0, 0, 0]
+                offsets[component] = near
+                vertex = _window(offdiag_pad[entry], tuple(offsets), shape)
+                upper = _window(increment_pad[partner], tuple(offsets), shape)
+                lower_offsets = list(offsets)
+                lower_offsets[partner] -= 1
+                lower = _window(increment_pad[partner], tuple(lower_offsets), shape)
+                if aniso_widths is None:
+                    straddling = 0.5 * (upper + lower)
+                else:
+                    width_upper = _width_window(aniso_widths[partner], partner, offsets[partner], shape[partner])
+                    width_lower = _width_window(aniso_widths[partner], partner, offsets[partner] - 1, shape[partner])
+                    straddling = (upper * width_lower + lower * width_upper) / (width_upper + width_lower)
+                term = 0.5 * vertex * straddling
+                row = term if row is None else row + term
+        assert row is not None  # every row has two partners
+        rows.append(row)
+    return E + mx.stack(rows, axis=0)
+
+
 def _update_E(
     E,
     H,
@@ -51,6 +126,7 @@ def _update_E(
     disp_c3=None,
     P_curr=None,
     P_prev=None,
+    offdiag=None,
 ):
     """Pure E update from ``dE/dt = (1/eps) curl(H)``. All inputs explicit (compilable).
 
@@ -58,6 +134,12 @@ def _update_E(
     Drude-Lorentz dispersion is active (``P_curr is not None``). Dispersion is only ever iso/diagonal
     (fdtdx forbids it with off-diagonal tensors), so the ADE term lives only in the fast path; the
     ``P_curr is not None`` guard is evaluated at trace time, so the non-dispersive graph is unchanged.
+
+    ``offdiag`` carries the vertex-placed off-diagonal entries of the smoothed inverse permittivity
+    (``material_sampling="yee_smooth"`` with ``yee_smooth_offdiag_placement="node"``). When present,
+    the diagonal branch adds Meep's product-averaged stencil of them to the same increment
+    ``inv_eps`` multiplies; the custom Metal kernels do not carry that term, so ``kernel_eligible``
+    refuses such a run and the update runs on these MLX-op cores.
     """
     curl, psi_E_new = curl_H_mlx(H, psi_E, cpml_a, cpml_b, inv_kappa, sb, metric_bwd, periodic_axes, extents)
 
@@ -69,11 +151,18 @@ def _update_E(
         if sigma_E is not None:
             factor = 1.0 - c * sigma_E * eta0 * inv_eps / 2.0
         E = factor * E_old + c * curl * inv_eps
+        increment = (c * curl) if offdiag is not None else None
         if P_curr is not None:
+            assert P_prev is not None and disp_c1 is not None and disp_c2 is not None and disp_c3 is not None
             # ADE: per-pole P_new = c1*P_curr + c2*P_prev + c3*E^n; back-action E += inv_eps*Σ(P_curr-P_new).
             # disp_c* are (poles,1,N,N,N) and broadcast over E_old's 3 components → (poles,3,N,N,N).
             P_new = disp_c1 * P_curr + disp_c2 * P_prev + disp_c3 * E_old
-            E = E + inv_eps * mx.sum(P_curr - P_new, axis=0)
+            delta = mx.sum(P_curr - P_new, axis=0)
+            E = E + inv_eps * delta
+            if increment is not None:
+                increment = increment + delta
+        if offdiag is not None:
+            E = add_offdiag_correction_mlx(E, increment, offdiag, periodic_axes, aniso_widths)
         if sigma_E is not None:
             E = E / (1.0 + c * sigma_E * eta0 * inv_eps / 2.0)
         if P_curr is not None:

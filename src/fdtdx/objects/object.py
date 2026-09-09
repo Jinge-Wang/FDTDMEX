@@ -249,7 +249,55 @@ class SimulationObject(TreeClass, ABC):
     _unreduced_grid_slice_tuple: SliceTuple3D = frozen_private_field(
         default=INVALID_SLICE_TUPLE_3D,
     )
+    #: Continuous (metric) extent this object was placed with, as ``((lo, hi), (lo, hi), (lo, hi))``
+    #: in metres on the grid's own axes. This is the "metric shadow" of the placement solve: the
+    #: extent the user asked for, before it was rounded to whole cells. Set by place_objects; read
+    #: through :attr:`metric_bounds`, :attr:`metric_extent` and :attr:`metric_center`. ``None`` means
+    #: the object was not placed through place_objects (or an older pickle).
+    _metric_bounds: tuple[tuple[float, float], tuple[float, float], tuple[float, float]] | None = frozen_private_field(
+        default=None
+    )
     _config: SimulationConfig = private_field()
+
+    @property
+    def metric_bounds(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float]]:
+        """Continuous per-axis ``(lower, upper)`` metric bounds of this object, in metres.
+
+        These are the bounds the placement solve produced *without* rounding to whole cells. On an
+        axis where the request carried no metric intent (a grid-cell shape, an extension to the
+        domain edge) they fall back to the placed box's own edge coordinates, so the metric shadow
+        never contradicts the integer box where nothing better was asked for.
+
+        Returns:
+            tuple: Per-axis ``(lower, upper)`` coordinates in metres.
+
+        Raises:
+            Exception: If the object was not placed through :func:`fdtdx.place_objects`.
+        """
+        if self._metric_bounds is None:
+            raise Exception(f"Object has no metric bounds (not placed by place_objects): {self.name}")
+        return self._metric_bounds
+
+    @property
+    def has_metric_bounds(self) -> bool:
+        """Whether a metric shadow was recorded for this object."""
+        return self._metric_bounds is not None
+
+    @property
+    def metric_extent(self) -> tuple[float, float, float]:
+        """Continuous per-axis side lengths in metres (``hi - lo`` of :attr:`metric_bounds`)."""
+        b = self.metric_bounds
+        return (b[0][1] - b[0][0], b[1][1] - b[1][0], b[2][1] - b[2][0])
+
+    @property
+    def metric_center(self) -> tuple[float, float, float]:
+        """Continuous per-axis centre coordinates in metres (mid-point of :attr:`metric_bounds`)."""
+        b = self.metric_bounds
+        return (
+            0.5 * (b[0][0] + b[0][1]),
+            0.5 * (b[1][0] + b[1][1]),
+            0.5 * (b[2][0] + b[2][1]),
+        )
 
     @property
     def grid_slice_tuple(self) -> SliceTuple3D:

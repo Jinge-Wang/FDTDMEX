@@ -171,6 +171,117 @@ def avg_anisotropic_E_component(
     return on_edge[1:-1, 1:-1, 1:-1]
 
 
+#: For each E row ``c``, the two ``(partner component, vertex entry index)`` pairs that couple into
+#: it. The vertex array stores the symmetric tensor's independent off-diagonal entries in the order
+#: ``(xy, xz, yz)``, so row x reads xy and xz, row y reads xy and yz, row z reads xz and yz — and
+#: every entry is read by exactly the two rows it couples, from the same array. The partner's own
+#: axis is its component index: ``D_y`` samples straddle a vertex along y, ``D_z`` along z.
+OFFDIAG_ROW_PARTNERS: tuple[tuple[tuple[int, int], ...], ...] = (
+    ((1, 0), (2, 1)),
+    ((0, 0), (2, 2)),
+    ((0, 1), (1, 2)),
+)
+
+
+def _padded_window(array: jax.Array, offsets: tuple[int, int, int]) -> jax.Array:
+    """The interior of a halo-padded array, shifted by whole cells on each spatial axis.
+
+    ``array`` has its three trailing axes padded by one cell each way. Offset ``0`` returns the
+    interior, ``+1`` the neighbour one cell up, ``-1`` the neighbour one cell down.
+    """
+    lead = array.ndim - 3
+    index: list[slice] = [slice(None)] * lead
+    for axis in range(3):
+        extent = array.shape[lead + axis] - 2
+        offset = offsets[axis]
+        index.append(slice(1 + offset, 1 + offset + extent))
+    return array[tuple(index)]
+
+
+def _padded_width_window(widths: jax.Array, axis: int, offset: int, extent: int) -> jax.Array:
+    """One axis's padded cell widths, shifted by whole cells, still broadcasting along that axis."""
+    index: list[slice] = [slice(None)] * 3
+    index[axis] = slice(1 + offset, 1 + offset + extent)
+    return widths[tuple(index)]
+
+
+def add_offdiag_correction(
+    E: jax.Array,
+    increment_pad: jax.Array,
+    offdiag_pad: jax.Array,
+    aniso_widths: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> jax.Array:
+    """Add the vertex-placed off-diagonal term to an otherwise diagonal E update.
+
+    This is Meep's ``OFFDIAG`` stencil (Werner & Cary 2007), written out for all three rows. Let
+    ``u_xy[i,j,k]`` be the ``xy`` entry of the smoothed inverse-permittivity tensor at the vertex
+    ``(e_x[i], e_y[j], e_z[k])`` and ``K`` the quantity the diagonal update multiplies by
+    ``inv_eps``. Then, on a uniform grid::
+
+        E_x[i,j,k] += 0.25 * ( u_xy[i  ,j,k] * (K_y[i  ,j,k] + K_y[i  ,j-1,k])
+                             + u_xy[i+1,j,k] * (K_y[i+1,j,k] + K_y[i+1,j-1,k]) )
+                    + 0.25 * ( u_xz[i  ,j,k] * (K_z[i  ,j,k] + K_z[i  ,j,k-1])
+                             + u_xz[i+1,j,k] * (K_z[i+1,j,k] + K_z[i+1,j,k-1]) )
+
+    and the same with the indices rotated for the other two rows. Read it as: at each of the two
+    vertices bracketing the ``E_x`` point along its own axis (weights exactly 1/2 and 1/2 on any
+    grid, because the component point is the midpoint of its own two edges), average the two ``K_y``
+    samples straddling that vertex along the partner's axis, multiply by the vertex's own entry, and
+    average the two vertex products.
+
+    On a non-uniform grid only the partner average is re-weighted: the two samples are neighbouring
+    cell centres and the vertex is the edge between them, so the weight is the dual-cell weight
+    ``(v[j] w[j-1] + v[j-1] w[j]) / (w[j-1] + w[j])`` that
+    :func:`avg_anisotropic_E_component` already uses.
+
+    Both coupled rows read one shared entry — ``E_x <- K_y`` and ``E_y <- K_x`` both take
+    ``u_xy`` at the vertex they share — so the assembled map is its own transpose entry for entry.
+    That is the whole point of the placement: with the row written at each component's own pixel
+    instead, the two rows read different boxes and the map is 1-5% asymmetric.
+
+    Args:
+        E (jax.Array): ``(3, Nx, Ny, Nz)`` field after the elementwise diagonal update.
+        increment_pad (jax.Array): ``(3, Nx+2, Ny+2, Nz+2)`` halo-padded ``K``, the quantity the
+            diagonal branch multiplies by ``inv_eps`` (``c * curl`` plus the folded ADE polarization
+            delta where there is one).
+        offdiag_pad (jax.Array): ``(3, Nx+2, Ny+2, Nz+2)`` halo-padded vertex entries
+            ``(xy, xz, yz)``.
+        aniso_widths (tuple | None): Per-axis padded cell widths from
+            :func:`fdtdx.fdtd.update.get_anisotropic_averaging_widths`, or None on a uniform grid.
+
+    Returns:
+        jax.Array: ``(3, Nx, Ny, Nz)`` field with the off-diagonal term added.
+    """
+    rows = []
+    for component in range(3):
+        row = None
+        for partner, entry in OFFDIAG_ROW_PARTNERS[component]:
+            for near in (0, 1):
+                # The two vertices bracketing the E_c point along c's own axis: the cell's own two
+                # edges, so the sample point is their exact midpoint on any grid and the weight is
+                # 1/2 either way.
+                offsets = [0, 0, 0]
+                offsets[component] = near
+                near_offsets = (offsets[0], offsets[1], offsets[2])
+                vertex = _padded_window(offdiag_pad[entry], near_offsets)
+                upper = _padded_window(increment_pad[partner], near_offsets)
+                lower_offsets = list(offsets)
+                lower_offsets[partner] -= 1
+                lower = _padded_window(increment_pad[partner], (lower_offsets[0], lower_offsets[1], lower_offsets[2]))
+                if aniso_widths is None:
+                    straddling = 0.5 * (upper + lower)
+                else:
+                    extent = increment_pad.shape[1 + partner] - 2
+                    width_upper = _padded_width_window(aniso_widths[partner], partner, offsets[partner], extent)
+                    width_lower = _padded_width_window(aniso_widths[partner], partner, offsets[partner] - 1, extent)
+                    straddling = (upper * width_lower + lower * width_upper) / (width_upper + width_lower)
+                term = 0.5 * vertex * straddling
+                row = term if row is None else row + term
+        assert row is not None  # every row has two partners
+        rows.append(row)
+    return E + jnp.stack(rows, axis=0)
+
+
 def avg_anisotropic_H_component(
     field: jax.Array,
     component: int,

@@ -10,6 +10,7 @@ import gdstk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from matplotlib.path import Path
 
 from fdtdx.colors import XKCD_LIGHT_GREY, Color
 from fdtdx.core.axis import get_transverse_axes
@@ -20,7 +21,13 @@ from fdtdx.materials import Material, compute_ordered_names
 from fdtdx.objects.detectors.mode import ModeOverlapDetector
 from fdtdx.objects.object import RealCoordinateConstraint
 from fdtdx.objects.sources.mode import ModePlaneSource
-from fdtdx.objects.static_material.static import SimulationVolume, StaticMultiMaterialObject
+from fdtdx.objects.static_material.static import (
+    SimulationVolume,
+    StaticMultiMaterialObject,
+    interval_overlap_fraction,
+    nearest_polygon_edge_normal,
+    points_in_metric_slab,
+)
 
 
 @dataclass(frozen=True)
@@ -304,6 +311,173 @@ class GDSLayerObject(StaticMultiMaterialObject):
             slices.append(_offset_mask(mask_2d, offset, pitch_h, pitch_v))
         return np.stack(slices, axis=self.axis)
 
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Continuous point-in-shape test on the GDS polygons, extruded over the metric thickness.
+
+        The z extent runs from the object's metric lower bound over ``self.thickness``, so the layer
+        keeps the thickness that was asked for instead of the rounded cell count. In plane, a point
+        is inside when its offset from :attr:`metric_center`, shifted back into GDS coordinates by
+        ``gds_center``, falls inside any polygon. A non-vertical ``sidewall_angle`` is handled the
+        same way the voxel path handles it — the polygons are inset/outset by
+        ``(z - z_ref) * tan(90deg - angle)`` — except that ``z`` and ``z_ref`` are now the sample's
+        own height and the metric reference face, not cell centres.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+
+        Raises:
+            ValueError: If ``self.axis != 2``.
+        """
+        if self.axis != 2:
+            raise ValueError(
+                f"GDSLayerObject.contains only supports axis=2 (z-extrusion); got axis={self.axis}. "
+                "GDS layouts encode x/y coordinates only."
+            )
+        pts = np.asarray(points, dtype=float)
+        bounds = self.metric_bounds
+        center = self.metric_center
+        z_lower = bounds[self.axis][0]
+        z_upper = z_lower + self.thickness
+        z_coord = pts[..., self.axis]
+        inside = points_in_metric_slab(z_coord, z_lower, z_upper)
+        if not inside.any() or len(self.polygons) == 0:
+            return inside
+
+        origin = np.array([self.gds_center[0], self.gds_center[1]])
+        query_h = pts[..., self.horizontal_axis] - center[self.horizontal_axis] + origin[0]
+        query_v = pts[..., self.vertical_axis] - center[self.vertical_axis] + origin[1]
+
+        if self.sidewall_angle == 90.0:
+            return inside & _points_in_polygons(list(self.polygons), query_h, query_v)
+
+        if self.reference_plane == "bottom":
+            z_ref = z_lower
+        elif self.reference_plane == "top":
+            z_ref = z_upper
+        else:
+            z_ref = 0.5 * (z_lower + z_upper)
+        tan = float(np.tan(np.deg2rad(90.0 - self.sidewall_angle)))
+
+        result = np.zeros(inside.shape, dtype=bool)
+        for z in np.unique(z_coord[inside]):
+            selected = inside & (z_coord == z)
+            offset = (float(z) - z_ref) * tan
+            polygons = list(self.polygons)
+            if abs(offset) > 1e-15:
+                polygons = _offset_polygons(polygons, offset)
+            if len(polygons) == 0:
+                continue
+            result[selected] = _points_in_polygons(polygons, query_h[selected], query_v[selected])
+        return result
+
+    def _layer_z_bounds(self) -> tuple[float, float, float]:
+        """Metric ``(z_lo, z_hi, z_ref)`` of the layer, from the continuous lower face."""
+        z_lo = self.metric_bounds[self.axis][0]
+        z_hi = z_lo + self.thickness
+        if self.reference_plane == "bottom":
+            z_ref = z_lo
+        elif self.reference_plane == "top":
+            z_ref = z_hi
+        else:
+            z_ref = 0.5 * (z_lo + z_hi)
+        return z_lo, z_hi, z_ref
+
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward normal of the nearest surface: a side wall or one of the two extrusion faces.
+
+        The side wall is taken on the polygon set offset to the sample's own height, so the normal
+        and the fill fraction see the same wall. A non-vertical ``sidewall_angle`` tilts the wall, and
+        the normal tilts with it: with ``t = tan(90deg - sidewall_angle)`` the outward normal of the
+        wall is ``(n_h, n_v, t)`` normalised, which reduces to the vertical wall at ``t = 0``.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces. See :meth:`~fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` for the rule that decides which axes are listed.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.
+
+        Raises:
+            ValueError: If ``self.axis != 2``.
+        """
+        if self.axis != 2:
+            raise ValueError(f"GDSLayerObject.normal_at only supports axis=2 (z-extrusion); got axis={self.axis}.")
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        query_h = pts[..., h_axis] - center[h_axis] + self.gds_center[0]
+        query_v = pts[..., v_axis] - center[v_axis] + self.gds_center[1]
+        z_lo, z_hi, z_ref = self._layer_z_bounds()
+        z = pts[..., self.axis]
+        tan = float(np.tan(np.deg2rad(90.0 - self.sidewall_angle)))
+
+        edge_normal = np.zeros((*pts.shape[:-1], 2), dtype=float)
+        edge_distance = np.full(pts.shape[:-1], np.inf)
+        polygons = list(self.polygons)
+        if not polygons:
+            return np.zeros(pts.shape, dtype=float)
+        if abs(tan) < 1e-15:
+            edge_normal, edge_distance = nearest_polygon_edge_normal(polygons, query_h, query_v)
+        else:
+            for height in np.unique(z):
+                selected = z == height
+                offset = (float(height) - z_ref) * tan
+                shifted = _offset_polygons(polygons, offset) if abs(offset) > 1e-15 else polygons
+                if not shifted:
+                    continue
+                local_normal, local_distance = nearest_polygon_edge_normal(
+                    shifted, query_h[selected], query_v[selected]
+                )
+                edge_normal[selected] = local_normal
+                edge_distance[selected] = local_distance
+
+        cap_distance = np.minimum(np.abs(z - z_lo), np.abs(z - z_hi))
+        if self.axis in ignore_axes:
+            cap_wins = np.zeros(cap_distance.shape, dtype=bool)
+        else:
+            cap_wins = cap_distance < edge_distance
+        normal = np.zeros(pts.shape, dtype=float)
+        cap_sign = np.where(np.abs(z - z_hi) <= np.abs(z - z_lo), 1.0, -1.0)
+        normal[..., self.axis] = np.where(cap_wins, cap_sign, tan)
+        normal[..., h_axis] = np.where(cap_wins, 0.0, edge_normal[..., 0])
+        normal[..., v_axis] = np.where(cap_wins, 0.0, edge_normal[..., 1])
+        length = np.linalg.norm(normal, axis=-1)
+        safe = length > 0.0
+        return np.where(safe[..., None], normal / np.where(safe, length, 1.0)[..., None], 0.0)
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact polygon-rectangle overlap times the z overlap, for a vertical sidewall only.
+
+        A tapered wall has no separable exact form here, so it returns ``None`` and the caller
+        super-samples :meth:`contains` instead.
+        """
+        from fdtdx.core.physics.geometry_smooth import polygons_rectangle_area
+
+        if self.axis != 2 or self.sidewall_angle != 90.0 or not self.polygons:
+            return None
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        if np.any(upper[..., h_axis] <= lower[..., h_axis]) or np.any(upper[..., v_axis] <= lower[..., v_axis]):
+            return None
+        center = self.metric_center
+        shift_h = center[h_axis] - self.gds_center[0]
+        shift_v = center[v_axis] - self.gds_center[1]
+        area = polygons_rectangle_area(
+            [np.asarray(poly, dtype=float) for poly in self.polygons],
+            lower[..., h_axis] - shift_h,
+            upper[..., h_axis] - shift_h,
+            lower[..., v_axis] - shift_v,
+            upper[..., v_axis] - shift_v,
+        )
+        rect = (upper[..., h_axis] - lower[..., h_axis]) * (upper[..., v_axis] - lower[..., v_axis])
+        z_lo, z_hi, _ = self._layer_z_bounds()
+        along = interval_overlap_fraction(lower[..., self.axis], upper[..., self.axis], z_lo, z_hi)
+        return np.clip(area / rect * along, 0.0, 1.0)
+
     def get_material_mapping(self) -> jax.Array:
         """Return an integer array filled with the index of ``material_name`` in the sorted material list.
 
@@ -452,6 +626,24 @@ class GDSLayerObject(StaticMultiMaterialObject):
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _points_in_polygons(polygons: list[np.ndarray], x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Union point-in-polygon test over a list of polygons, at explicit coordinates.
+
+    Args:
+        polygons (list[np.ndarray]): Polygon vertex arrays of shape ``(N, 2)``.
+        x (np.ndarray): Horizontal coordinates.
+        y (np.ndarray): Vertical coordinates, same shape as ``x``.
+
+    Returns:
+        np.ndarray: Boolean array of the same shape as ``x``.
+    """
+    query = np.column_stack((np.asarray(x).ravel(), np.asarray(y).ravel()))
+    inside = np.zeros(query.shape[0], dtype=bool)
+    for polygon in polygons:
+        inside |= Path(np.asarray(polygon)).contains_points(query)
+    return inside.reshape(np.asarray(x).shape)
 
 
 def _offset_polygons(polygons: list[np.ndarray], offset: float) -> list[np.ndarray]:
@@ -760,7 +952,7 @@ def gds_layer_stack_from_component(
         ValueError: If the resolved cell name is not found in the exported GDS.
     """
     try:
-        import gdsfactory  # type: ignore  # noqa: F401
+        import gdsfactory  # noqa: F401
     except ImportError as exc:
         raise ImportError(
             "gdsfactory is required for gds_layer_stack_from_component. Install it with: pip install gdsfactory"

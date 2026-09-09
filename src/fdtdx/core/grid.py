@@ -717,6 +717,73 @@ def calculate_spatial_offsets_yee() -> tuple[jax.Array, jax.Array]:
     return offset_E, offset_H
 
 
+def _raise_if_anisotropic_property(prop: jax.Array | float, name: str) -> None:
+    """Reject a material array that is not isotropic, as the legacy source path requires.
+
+    A 3-component array must have all three diagonal entries equal; a 9-component array must be a
+    scalar times the identity. Anything else has no single phase velocity to broadcast.
+    """
+    if not isinstance(prop, jax.Array) or prop.ndim != 4:
+        return
+    if prop.shape[0] == 3:
+        is_isotropic = jnp.allclose(prop[0], prop[1]) & jnp.allclose(prop[1], prop[2])
+    elif prop.shape[0] == 9:
+        is_isotropic = jnp.allclose(prop[0], prop[4]) & jnp.allclose(prop[4], prop[8])
+        for idx in (1, 2, 3, 5, 6, 7):
+            is_isotropic = is_isotropic & jnp.allclose(prop[idx], 0.0)
+    else:
+        return
+
+    def _raise_if_anisotropic(is_iso):
+        if not is_iso:
+            raise NotImplementedError(
+                "Gaussian or planewave sources within anisotropic materials are not supported yet."
+            )
+
+    jax.debug.callback(_raise_if_anisotropic, is_isotropic)
+
+
+def _diagonal_components(
+    prop: jax.Array | float,
+    name: str,
+) -> list[jax.Array | float]:
+    """Return the three diagonal entries of a material property array, one per field component.
+
+    Accepts the scalar, legacy ``(Nx, Ny, Nz)``, and ``(1|3|9, Nx, Ny, Nz)`` forms. A 9-component
+    tensor whose off-diagonal entries are not negligible has no per-component scalar phase velocity,
+    so it is still rejected.
+
+    Args:
+        prop (jax.Array | float): The inverse permittivity or permeability.
+        name (str): Property name, for the error message.
+
+    Returns:
+        list: Three arrays (or three copies of the scalar), one per component.
+    """
+    if not isinstance(prop, jax.Array) or prop.ndim == 0:
+        return [prop, prop, prop]
+    if prop.ndim == 3:
+        return [prop, prop, prop]
+    if prop.shape[0] == 1:
+        return [prop[0], prop[0], prop[0]]
+    if prop.shape[0] == 3:
+        return [prop[0], prop[1], prop[2]]
+    if prop.shape[0] == 9:
+        off_diagonal_is_zero = jnp.asarray(True)
+        for idx in (1, 2, 3, 5, 6, 7):
+            off_diagonal_is_zero = off_diagonal_is_zero & jnp.allclose(prop[idx], 0.0)
+
+        def _raise_if_off_diagonal(is_zero):
+            if not is_zero:
+                raise NotImplementedError(
+                    f"Gaussian or planewave sources within materials with off-diagonal {name} are not supported yet."
+                )
+
+        jax.debug.callback(_raise_if_off_diagonal, off_diagonal_is_zero)
+        return [prop[0], prop[4], prop[8]]
+    raise Exception(f"Invalid {name} shape: {prop.shape}")
+
+
 def calculate_time_offset_yee(
     center: jax.Array,
     wave_vector: jax.Array,
@@ -729,7 +796,18 @@ def calculate_time_offset_yee(
     h_polarization: jax.Array | None = None,
     coordinate_edges: tuple[jax.Array, jax.Array, jax.Array] | None = None,
     center_physical: jax.Array | None = None,
+    allow_anisotropic: bool = False,
 ) -> tuple[jax.Array, jax.Array]:
+    """Per-component launch-time phase-front delay of a source plane.
+
+    ``allow_anisotropic`` selects how a per-component material is handled. ``False`` (default) keeps
+    the legacy behaviour: a diagonal or full-tensor array that is not isotropic raises, because the
+    delay was computed from one component and broadcast. ``True`` computes the delay per component
+    from that component's own material, which is what per-Yee-point material sampling
+    (``SimulationConfig.material_sampling='yee'``) produces — every waveguide a source plane cuts
+    then has ``eps_xx != eps_yy != eps_zz`` in its interface cells. For an isotropic input both
+    settings give the same numbers.
+    """
     if inv_permittivities.ndim == 4:
         # Extract spatial shape from (1, Nx, Ny, Nz) or (3, Nx, Ny, Nz) or (9, Nx, Ny, Nz)
         spatial_shape = inv_permittivities.shape[1:]
@@ -793,90 +871,41 @@ def calculate_time_offset_yee(
     travel_offset_H = -jnp.dot(xyz_H, wave_vector)
 
     if effective_index is not None:
-        refractive_idx = effective_index * jnp.ones(spatial_shape)
-    else:
-        # adjust speed for material and calculate time offset
-        if inv_permittivities.ndim == 4:
-            # Remove when anisotropic case is verified
-            if inv_permittivities.shape[0] == 3 or inv_permittivities.shape[0] == 9:
-                # Check if diagonal isotropic (shape[0] == 3)
-                is_diagonal_isotropic = (
-                    (inv_permittivities.shape[0] == 3)
-                    & jnp.allclose(inv_permittivities[0], inv_permittivities[1])
-                    & jnp.allclose(inv_permittivities[1], inv_permittivities[2])
-                )
-
-                # Check if full tensor isotropic (shape[0] == 9)
-                is_full_isotropic = (
-                    (inv_permittivities.shape[0] == 9)
-                    & jnp.allclose(inv_permittivities[0], inv_permittivities[4])
-                    & jnp.allclose(inv_permittivities[4], inv_permittivities[8])
-                    & jnp.allclose(inv_permittivities[1], 0.0)
-                    & jnp.allclose(inv_permittivities[2], 0.0)
-                    & jnp.allclose(inv_permittivities[3], 0.0)
-                    & jnp.allclose(inv_permittivities[5], 0.0)
-                    & jnp.allclose(inv_permittivities[6], 0.0)
-                    & jnp.allclose(inv_permittivities[7], 0.0)
-                )
-
-                is_isotropic = is_diagonal_isotropic | is_full_isotropic
-
-                def _raise_if_anisotropic(is_iso):
-                    if not is_iso:
-                        raise NotImplementedError(
-                            "Gaussian or planewave sources within anisotropic materials are not supported yet."
-                        )
-
-                jax.debug.callback(_raise_if_anisotropic, is_isotropic)
-
-            # For now just return the isotropic result
-            inv_perm_eff = inv_permittivities[0]
-        else:
-            inv_perm_eff = inv_permittivities
-
+        refractive_idx_E = jnp.broadcast_to(effective_index * jnp.ones(spatial_shape), (3, *spatial_shape))
+        refractive_idx_H = refractive_idx_E
+    elif not allow_anisotropic:
+        _raise_if_anisotropic_property(inv_permittivities, "permittivity")
+        _raise_if_anisotropic_property(inv_permeabilities, "permeability")
+        inv_perm_eff = inv_permittivities[0] if inv_permittivities.ndim == 4 else inv_permittivities
         if isinstance(inv_permeabilities, jax.Array) and inv_permeabilities.ndim == 4:
-            # Remove when anisotropic case is verified
-            if inv_permeabilities.shape[0] == 3 or inv_permeabilities.shape[0] == 9:
-                # Check if diagonal isotropic (shape[0] == 3)
-                is_diagonal_isotropic = (
-                    (inv_permeabilities.shape[0] == 3)
-                    & jnp.allclose(inv_permeabilities[0], inv_permeabilities[1])
-                    & jnp.allclose(inv_permittivities[1], inv_permittivities[2])
-                )
-
-                # Check if full tensor isotropic (shape[0] == 9)
-                is_full_isotropic = (
-                    (inv_permeabilities.shape[0] == 9)
-                    & jnp.allclose(inv_permeabilities[0], inv_permeabilities[4])
-                    & jnp.allclose(inv_permeabilities[4], inv_permeabilities[8])
-                    & jnp.allclose(inv_permeabilities[1], 0.0)
-                    & jnp.allclose(inv_permeabilities[2], 0.0)
-                    & jnp.allclose(inv_permeabilities[3], 0.0)
-                    & jnp.allclose(inv_permeabilities[5], 0.0)
-                    & jnp.allclose(inv_permeabilities[6], 0.0)
-                    & jnp.allclose(inv_permeabilities[7], 0.0)
-                )
-
-                is_isotropic = is_diagonal_isotropic | is_full_isotropic
-
-                def _raise_if_anisotropic(is_iso):
-                    if not is_iso:
-                        raise NotImplementedError(
-                            "Gaussian or planewave sources within anisotropic materials are not supported yet."
-                        )
-
-                jax.debug.callback(_raise_if_anisotropic, is_isotropic)
-
-            # For now just return the isotropic result
             inv_perm_eff_perm = inv_permeabilities[0]
         else:
             inv_perm_eff_perm = inv_permeabilities
-
         refractive_idx = 1 / jnp.sqrt(inv_perm_eff * inv_perm_eff_perm)
+        refractive_idx_E = jnp.broadcast_to(refractive_idx, (3, *spatial_shape))
+        refractive_idx_H = refractive_idx_E
+    else:
+        # Per-component phase-front delay. travel_offset_E/H already carry one entry per field
+        # component at that component's own Yee position, so the material must be read per component
+        # too: E_c sees inv_permittivities[c] and H_c sees inv_permeabilities[c]. For an isotropic
+        # input all three components are equal and this reproduces the previous scalar result
+        # exactly; for a per-component (yee-sampled) input it is the physically correct delay
+        # instead of an exception.
+        eps_diag = _diagonal_components(inv_permittivities, "permittivity")
+        mu_diag = _diagonal_components(inv_permeabilities, "permeability")
+        # The permittivity is not available at the H positions, so H uses the cell's arithmetic mean
+        # of the three diagonal inverse permittivities. This only sets the launch-time phase front of
+        # a tilted plane wave, and it is exact wherever the three components agree, which is
+        # everywhere except the interface cells. The isotropic branch is kept bit-identical.
+        eps_is_isotropic = jnp.allclose(eps_diag[0], eps_diag[1]) & jnp.allclose(eps_diag[1], eps_diag[2])
+        eps_for_H = jnp.where(eps_is_isotropic, eps_diag[0], (eps_diag[0] + eps_diag[1] + eps_diag[2]) / 3.0)
+        refractive_idx_E = jnp.stack([1 / jnp.sqrt(eps_diag[c] * mu_diag[c]) for c in range(3)])
+        refractive_idx_H = jnp.stack([1 / jnp.sqrt(eps_for_H * mu_diag[c]) for c in range(3)])
 
-    velocity = (constants.c / refractive_idx)[None, ...]
-    time_offset_E = travel_offset_E * distance_scale / (velocity * time_step_duration)
-    time_offset_H = travel_offset_H * distance_scale / (velocity * time_step_duration)
+    velocity_E = constants.c / refractive_idx_E
+    velocity_H = constants.c / refractive_idx_H
+    time_offset_E = travel_offset_E * distance_scale / (velocity_E * time_step_duration)
+    time_offset_H = travel_offset_H * distance_scale / (velocity_H * time_step_duration)
     return time_offset_E, time_offset_H
 
 

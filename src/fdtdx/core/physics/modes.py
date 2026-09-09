@@ -107,11 +107,12 @@ def sort_modes(
 
 def _resolve_mode_backend(mode_backend: Literal["fdtdmex", "tidy3d"] | None) -> str:
     """Resolve the active mode backend from the argument, env var, or the module default."""
-    if mode_backend is None:
-        mode_backend = os.environ.get("FDTDMEX_MODE_BACKEND", _DEFAULT_MODE_BACKEND)
-    if mode_backend not in ("fdtdmex", "tidy3d"):
-        raise ValueError(f"mode_backend must be 'fdtdmex' or 'tidy3d', got {mode_backend!r}")
-    return mode_backend
+    resolved: str = (
+        mode_backend if mode_backend is not None else os.environ.get("FDTDMEX_MODE_BACKEND", _DEFAULT_MODE_BACKEND)
+    )
+    if resolved not in ("fdtdmex", "tidy3d"):
+        raise ValueError(f"mode_backend must be 'fdtdmex' or 'tidy3d', got {resolved!r}")
+    return resolved
 
 
 def _dispatch_mode_solver(mode_backend: str, **kwargs) -> List[ModeTupleType]:

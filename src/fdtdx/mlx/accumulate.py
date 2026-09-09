@@ -42,6 +42,7 @@ def _volume_weighted_spatial_mean(values: mx.array, weights: mx.array, leading_d
 def _record_energy(p: DetectorPlan, E: mx.array, H: mx.array, inv_eps: Any, inv_mu: Any) -> mx.array:
     energy = compute_energy_mlx(E, H, _slice_material(inv_eps, p.grid_slice), _slice_material(inv_mu, p.grid_slice))
     if p.reduce_volume:
+        assert p.cell_volume_weights is not None, "reduce_volume requires cell_volume_weights"
         return mx.sum(energy * p.cell_volume_weights).reshape(1)
     return energy
 
@@ -50,6 +51,7 @@ def _record_field(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
     parts = [(E[idx] if which == "E" else H[idx]) for which, idx in p.component_picks]
     EH = mx.stack(parts, axis=0)
     if p.reduce_volume:
+        assert p.cell_volume_weights is not None, "reduce_volume requires cell_volume_weights"
         EH = _volume_weighted_spatial_mean(EH, p.cell_volume_weights, leading_dims=1)
     return EH
 
@@ -60,6 +62,7 @@ def _record_poynting(p: DetectorPlan, E: mx.array, H: mx.array) -> mx.array:
         pf = pf[p.propagation_axis]
     pf = p.direction_sign * pf
     if p.reduce_volume:
+        assert p.face_area_weights is not None, "reduce_volume requires face_area_weights"
         pf = pf * p.face_area_weights
         if p.keep_all_components:
             pf = mx.sum(pf, axis=(1, 2, 3))
@@ -72,10 +75,12 @@ def _record_phasor(p: DetectorPlan, E: mx.array, H: mx.array, n: int) -> mx.arra
     parts = [(E[idx] if which == "E" else H[idx]) for which, idx in p.component_picks]
     EH = mx.stack(parts, axis=0)  # (C, *grid) real
 
+    assert p.phasors is not None, "phasor detector plan requires phasors"
     ph = p.phasors[n]  # (num_freqs,) complex
     ph = ph.reshape((ph.shape[0], *(1,) * EH.ndim))  # (F, 1, 1, 1, 1)
     new = (EH.astype(ph.dtype) * ph) * p.static_scale  # (F, C, *grid) complex
     if p.reduce_volume:
+        assert p.cell_volume_weights is not None, "reduce_volume requires cell_volume_weights"
         new = _volume_weighted_spatial_mean(new, p.cell_volume_weights, leading_dims=2)
     return new
 

@@ -198,6 +198,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            inv_permittivity_offdiag=arrays.inv_permittivity_offdiag,
         )
         state = reversible_fdtd_base(arr)
         return (
@@ -235,6 +236,7 @@ def reversible_fdtd(
                 simulate_boundaries=True,
                 electric_conductivity=arrays.electric_conductivity,
                 magnetic_conductivity=arrays.magnetic_conductivity,
+                inv_permittivity_offdiag=arrays.inv_permittivity_offdiag,
             ),
             state[0],
             state[1].fields.E,
@@ -290,6 +292,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            inv_permittivity_offdiag=arrays.inv_permittivity_offdiag,
         )
 
         # For a single slice ``checkpoints`` is empty and the reverse loop runs the unmodified
@@ -356,6 +359,7 @@ def reversible_fdtd(
             electric_conductivity=arrays.electric_conductivity,
             magnetic_conductivity=arrays.magnetic_conductivity,
             initial_inv_permittivities=arrays.initial_inv_permittivities,
+            inv_permittivity_offdiag=arrays.inv_permittivity_offdiag,
         )
         s_k, checkpoints = segmented_forward(arr)
 
@@ -414,6 +418,7 @@ def reversible_fdtd(
         electric_conductivity=arrays.electric_conductivity,
         magnetic_conductivity=arrays.magnetic_conductivity,
         initial_inv_permittivities=arrays.initial_inv_permittivities,
+        inv_permittivity_offdiag=arrays.inv_permittivity_offdiag,
     )
     return time_step, out_arrs
 

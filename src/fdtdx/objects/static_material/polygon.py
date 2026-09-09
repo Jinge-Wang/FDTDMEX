@@ -4,12 +4,17 @@ import gdstk
 import jax
 import jax.numpy as jnp
 import numpy as np
+from matplotlib.path import Path
 
 from fdtdx.core.axis import get_transverse_axes
 from fdtdx.core.grid import polygon_to_mask, polygon_to_mask_at_points
 from fdtdx.core.jax.pytrees import autoinit, frozen_field
 from fdtdx.materials import compute_ordered_names
-from fdtdx.objects.static_material.static import StaticMultiMaterialObject
+from fdtdx.objects.static_material.static import (
+    StaticMultiMaterialObject,
+    nearest_polygon_edge_normal,
+    points_in_metric_slab,
+)
 
 
 @autoinit
@@ -105,6 +110,89 @@ class ExtrudedPolygon(StaticMultiMaterialObject):
         )
 
         return mask
+
+    def contains(self, points: np.ndarray) -> np.ndarray:
+        """Continuous point-in-shape test: the polygon cross-section, extruded over the metric extent.
+
+        The vertices are already centred on the object's bounding-box centre, so they are compared
+        against the point offsets from :attr:`metric_center`, and the extrusion runs over the
+        object's metric extent along ``axis``.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+
+        Returns:
+            np.ndarray: Boolean array of shape ``points.shape[:-1]``.
+        """
+        pts = np.asarray(points, dtype=float)
+        bounds = self.metric_bounds
+        center = self.metric_center
+        inside = points_in_metric_slab(pts[..., self.axis], bounds[self.axis][0], bounds[self.axis][1])
+        if not inside.any():
+            return inside
+        local_h = pts[..., self.horizontal_axis] - center[self.horizontal_axis]
+        local_v = pts[..., self.vertical_axis] - center[self.vertical_axis]
+        query = np.column_stack((local_h.ravel(), local_v.ravel()))
+        in_plane = Path(np.asarray(self.vertices)).contains_points(query).reshape(local_h.shape)
+        return inside & in_plane
+
+    def normal_at(self, points: np.ndarray, ignore_axes: tuple[int, ...] = ()) -> np.ndarray:
+        """Outward normal of the nearest surface: a polygon side wall or one of the extrusion caps.
+
+        Args:
+            points (np.ndarray): Array of shape ``(..., 3)`` with coordinates in metres.
+            ignore_axes (tuple[int, ...]): Axes whose surfaces are not physical interfaces. With the
+                extrusion axis listed the caps are dropped and a side wall always wins. See :meth:`~fdtdx.objects.static_material.static.StaticMultiMaterialObject.normal_at` for the rule that decides which axes are listed.
+
+        Returns:
+            np.ndarray: Array of shape ``(..., 3)`` with unit normals, zero where undefined.
+        """
+        pts = np.asarray(points, dtype=float)
+        center = self.metric_center
+        extent = self.metric_extent
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        edge_normal, edge_distance = nearest_polygon_edge_normal(
+            [np.asarray(self.vertices, dtype=float)],
+            pts[..., h_axis] - center[h_axis],
+            pts[..., v_axis] - center[v_axis],
+        )
+        proj = pts[..., self.axis] - center[self.axis]
+        cap_distance = np.abs(np.abs(proj) - 0.5 * extent[self.axis])
+        if self.axis in ignore_axes:
+            cap_wins = np.zeros(cap_distance.shape, dtype=bool)
+        else:
+            cap_wins = cap_distance < edge_distance
+        sign = np.where(np.sign(proj) == 0.0, 1.0, np.sign(proj))
+        normal = np.zeros(pts.shape, dtype=float)
+        normal[..., self.axis] = np.where(cap_wins, sign, 0.0)
+        normal[..., h_axis] = np.where(cap_wins, 0.0, edge_normal[..., 0])
+        normal[..., v_axis] = np.where(cap_wins, 0.0, edge_normal[..., 1])
+        return normal
+
+    def box_fill_fraction(self, lower: np.ndarray, upper: np.ndarray) -> np.ndarray | None:
+        """Exact polygon-rectangle overlap in plane times the extrusion overlap along ``axis``."""
+        from fdtdx.core.physics.geometry_smooth import polygons_rectangle_area
+        from fdtdx.objects.static_material.static import interval_overlap_fraction
+
+        lower = np.asarray(lower, dtype=float)
+        upper = np.asarray(upper, dtype=float)
+        h_axis, v_axis = self.horizontal_axis, self.vertical_axis
+        if np.any(upper[..., h_axis] <= lower[..., h_axis]) or np.any(upper[..., v_axis] <= lower[..., v_axis]):
+            return None
+        center = self.metric_center
+        bounds = self.metric_bounds
+        area = polygons_rectangle_area(
+            [np.asarray(self.vertices, dtype=float)],
+            lower[..., h_axis] - center[h_axis],
+            upper[..., h_axis] - center[h_axis],
+            lower[..., v_axis] - center[v_axis],
+            upper[..., v_axis] - center[v_axis],
+        )
+        rect = (upper[..., h_axis] - lower[..., h_axis]) * (upper[..., v_axis] - lower[..., v_axis])
+        along = interval_overlap_fraction(
+            lower[..., self.axis], upper[..., self.axis], bounds[self.axis][0], bounds[self.axis][1]
+        )
+        return np.clip(area / rect * along, 0.0, 1.0)
 
     def get_material_mapping(
         self,

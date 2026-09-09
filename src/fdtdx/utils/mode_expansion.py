@@ -32,7 +32,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax.numpy as jnp
 import numpy as np
@@ -167,7 +167,13 @@ def _load_mode_cache(path: Path, fingerprint: dict) -> dict[ModeKey, tuple] | No
 
 
 def _save_mode_cache(path: Path, fingerprint: dict, modes: dict[ModeKey, tuple]) -> None:
-    arrays = {"__meta__": np.asarray(json.dumps(fingerprint)), "__keys__": np.asarray(json.dumps(list(modes.keys())))}
+    # `arrays` values are always ndarrays; the `Any` annotation only keeps ty from treating the
+    # `**arrays` splat below as a possible (str -> ndarray) match against `savez`'s unrelated
+    # `allow_pickle: bool` keyword parameter.
+    arrays: dict[str, Any] = {
+        "__meta__": np.asarray(json.dumps(fingerprint)),
+        "__keys__": np.asarray(json.dumps(list(modes.keys()))),
+    }
     for (pol, idx), (E, H, neff) in modes.items():
         p = f"{pol}_{idx}_"
         arrays[p + "E"] = np.asarray(E)
@@ -211,6 +217,7 @@ def compute_mode_expansion(
         A :class:`ModeExpansionResult` with per-mode ``transmission`` and ``power_fraction``.
     """
     direction = direction or detector.direction
+    assert direction in ("+", "-"), f"direction must be '+' or '-', got {direction!r}"
     freq = detector.wave_characters[freq_index].get_frequency()
     resolution = detector._mode_solver_resolution()
 
@@ -225,6 +232,7 @@ def compute_mode_expansion(
     path = Path(cache_path) if cache_path is not None else None
     cached = _load_mode_cache(path, fingerprint) if path is not None else None
     if cached is not None:
+        assert path is not None  # `cached` is only non-None when `path` was not None above
         logger.info(f"mode expansion: reusing {len(cached)} cached mode(s) from {path.name}")
 
     transverse_coords = detector._transverse_edge_coordinates()
@@ -235,6 +243,7 @@ def compute_mode_expansion(
         if (pol, idx) in solved:
             E_m, H_m, neff = solved[(pol, idx)]
         else:
+            assert pol in ("te", "tm"), f"mode pol must be 'te' or 'tm', got {pol!r}"
             E_m, H_m, neff = compute_mode(
                 frequency=freq,
                 inv_permittivities=inv_eps_slice,

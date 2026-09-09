@@ -25,6 +25,7 @@ def forward_single_args_wrapper(
     simulate_boundaries: bool,
     electric_conductivity: jax.Array | None = None,
     magnetic_conductivity: jax.Array | None = None,
+    inv_permittivity_offdiag: jax.Array | None = None,
 ) -> tuple[
     jax.Array,
     jax.Array,
@@ -37,9 +38,12 @@ def forward_single_args_wrapper(
     RecordingState | None,
 ]:
     # Wrapper function that unpacks ArrayContainer into individual arrays for JAX transformations.
-    # ``electric_conductivity`` and ``magnetic_conductivity`` are passed as defaulted kwargs so
-    # callers can closure-capture them via ``functools.partial`` without exposing them as VJP
-    # primals.
+    # ``electric_conductivity``, ``magnetic_conductivity`` and ``inv_permittivity_offdiag`` are
+    # passed as defaulted kwargs so callers can closure-capture them via ``functools.partial``
+    # without exposing them as VJP primals. The off-diagonal vertex entries are a run-fixed material
+    # array in the same sense the conductivities are: nothing upstream of the loader writes them, so
+    # they carry no cotangent, but the update reads them and dropping them here would silently turn
+    # the correction off inside the reverse pass.
     #
     # This wrapper only serves the reversible gradient path, which rejects dispersive materials
     # (see ``reversible_fdtd``), so the ADE polarization state and coefficient arrays are always
@@ -57,6 +61,7 @@ def forward_single_args_wrapper(
         recording_state=recording_state,
         electric_conductivity=electric_conductivity,
         magnetic_conductivity=magnetic_conductivity,
+        inv_permittivity_offdiag=inv_permittivity_offdiag,
     )
     state = forward(
         state=(time_step, arr),

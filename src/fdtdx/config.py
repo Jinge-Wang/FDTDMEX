@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Literal
 
 import jax
@@ -51,6 +52,36 @@ class GradientConfig(TreeClass):
             raise Exception("Need Checkpoint Number in gradient config to compute checkpointed gradients")
         if self.num_checkpoints_reversible < 0:
             raise Exception("num_checkpoints_reversible must be >= 0")
+
+
+#: The accepted values of :attr:`SimulationConfig.material_sampling`, in widening order.
+MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("box", "yee", "yee_smooth")
+
+#: The subset of :data:`MATERIAL_SAMPLING_MODES` that samples per Yee component position rather
+#: than once per cell centre. Test membership through
+#: :attr:`SimulationConfig.uses_yee_material_sampling`, never by comparing the string literal:
+#: a literal ``== "yee"`` silently excludes ``"yee_smooth"``, which is how the source gates in
+#: ``linear_polarization.py`` and ``tfsf_region.py`` first went wrong.
+YEE_MATERIAL_SAMPLING_MODES: tuple[str, ...] = ("yee", "yee_smooth")
+
+#: Environment variable that turns the box-vs-Yee sampling diagnostic on without touching the config.
+YEE_DIAGNOSTICS_ENV_VAR = "FDTDX_YEE_SAMPLING_DIAGNOSTICS"
+
+#: The accepted values of :attr:`SimulationConfig.yee_smooth_offdiag_placement`.
+YEE_OFFDIAG_PLACEMENTS: tuple[str, ...] = ("node", "node_avg", "vertex_all", "pixel")
+
+#: The subset of :data:`YEE_OFFDIAG_PLACEMENTS` that keeps the permittivity array on the cheap
+#: 3-component diagonal tier and carries the three off-diagonal entries in a second array on the
+#: cell-vertex lattice, applied by the additive stencil. All three are exactly symmetric, because
+#: both coupled rows read one shared array; they differ only in which boxes the entries are
+#: integrated over. Test membership through this tuple rather than comparing to ``"node"``.
+YEE_OFFDIAG_VERTEX_PLACEMENTS: tuple[str, ...] = ("node", "node_avg", "vertex_all")
+
+#: Environment variable that selects the off-diagonal placement without touching the config, so a
+#: recorded case script can be re-run under either one.
+YEE_OFFDIAG_PLACEMENT_ENV_VAR = "FDTDX_YEE_OFFDIAG_PLACEMENT"
+
+_TRUTHY = ("1", "true", "yes", "on")
 
 
 @autoinit
@@ -111,11 +142,102 @@ class SimulationConfig(TreeClass):
     #: cell-for-cell); otherwise :func:`fdtdx.place_objects` raises a ``ValueError``.
     symmetry: tuple[int, int, int] = frozen_field(default=(0, 0, 0))
 
+    #: Where the material of a static object is sampled when the arrays are assembled.
+    #: ``"box"`` (default, legacy) samples every object once per cell centre and broadcasts the
+    #: single mask to all field components, after the object's extent has been rounded to a whole
+    #: number of cells. ``"yee"`` keeps every static object's requested metric extent continuous and
+    #: samples the material once per Yee component position (E_x, E_y, E_z, and the H positions when
+    #: a permeability or magnetic-conductivity array exists), taking the material of the
+    #: highest-priority object that contains that point. Priority is the order in which objects are
+    #: written today (``placement_order`` ascending, later wins), with the simulation volume as the
+    #: background. Devices, sources, detectors and PML keep their integer boxes in both modes.
+    #: ``"yee_smooth"`` is ``"yee"`` plus a Kottke/Farjadpour sub-pixel post-pass: at every pixel
+    #: where exactly two materials meet, the point sample is replaced by the effective inverse
+    #: permittivity of that pixel (harmonic mean along the interface normal, arithmetic mean in the
+    #: interface plane), which removes the first-order staircasing error. Uniform pixels and pixels
+    #: holding three or more materials keep their point sample; conductivity and dispersion are never
+    #: averaged. Note that ``"yee_smooth"`` is not bit-identical to ``"box"`` with object-level
+    #: ``subpixel_smoothing`` for tilted interfaces: it takes the diagonal of the *inverse* effective
+    #: tensor, which is the entry the elementwise update applies to ``E_c``.
+    material_sampling: Literal["box", "yee", "yee_smooth"] = frozen_field(default="box")
+
+    #: Samples per axis used by ``material_sampling="yee_smooth"`` for a pixel fill fraction or an
+    #: interface normal that the object's shape cannot answer analytically (a sphere, a tapered
+    #: sidewall). Boxes, cylinders and polygon extrusions are exact and never use it.
+    yee_smooth_supersample: int = frozen_field(default=8)
+
+    #: Keep the off-diagonal Kottke terms under ``material_sampling="yee_smooth"``. They are the
+    #: second-order correction at a tilted interface and are exactly zero at an axis-aligned one, so
+    #: this changes nothing on a Manhattan scene. Where they are stored is
+    #: :attr:`yee_smooth_offdiag_placement`; under its default the permittivity array itself stays on
+    #: the cheap diagonal tier and only a second 3-component array is added. Either way the run
+    #: leaves the Metal bulk kernel for the MLX-op cores.
+    yee_smooth_full_tensor: bool = frozen_field(default=False)
+
+    #: Where the three off-diagonal Kottke entries live when ``yee_smooth_full_tensor`` is set.
+    #: ``"node"`` (default) puts them on the **cell-vertex** lattice and applies them with Meep's
+    #: product-averaged stencil (Werner & Cary 2007) as an additive term in the otherwise unchanged
+    #: diagonal update: the 3-component ``inv_permittivities`` array stays bit-identical to the
+    #: diagonal tier and a separate 3-component ``inv_permittivity_offdiag`` array carries
+    #: ``(xy, xz, yz)`` at the vertices. Because both coupled rows then read one shared array, the
+    #: assembled D-to-E map is exactly symmetric. ``"pixel"`` keeps the earlier behaviour — the whole
+    #: Kottke row written at the component's own pixel into a dense 9-component tensor — which is
+    #: 1-5% asymmetric and grows modes at high contrast; it is kept for comparison and regression and
+    #: warns when selected. A genuinely anisotropic *bulk* material (a user tensor with non-zero
+    #: off-diagonal entries) always takes the ``"pixel"`` path, because the vertex array can only
+    #: carry the smoothing-induced off-diagonals of isotropic and diagonal materials.
+    #:
+    #: ``"node"`` mixes two families of box: the diagonal entries are integrated over the component
+    #: pixels and the off-diagonal entries over the vertex dual cell, so the effective tensor at one
+    #: unknown is not the Kottke tensor of any single region and the first-order term of the
+    #: smoothing error no longer cancels (measured: about 27% of the error at 10 nm on a 2-D disk).
+    #: Two further values keep the exact symmetry and use one consistent family of boxes:
+    #: ``"node_avg"`` computes the full Kottke row at every component pixel, as ``"pixel"`` does,
+    #: and forms the vertex entry as the plain mean of the four component pixels adjacent to the
+    #: vertex in that entry's plane; ``"vertex_all"`` computes the whole Kottke tensor on the vertex
+    #: dual cells and takes the diagonal entry of component ``c`` as the mean of the two vertices
+    #: bracketing it along its own axis.
+    yee_smooth_offdiag_placement: Literal["node", "node_avg", "vertex_all", "pixel"] = frozen_field(default="node")
+
+    #: Estimate the smallest eigenvalue of the symmetric part of the assembled D-to-E map at build
+    #: time (a few dozen sparse mat-vecs, no per-step cost) and report it under
+    #: ``info["yee_sampling_difference"]["smoothing"]["min_eig_sym_dtoe"]``. Symmetry alone does not
+    #: bound the spectrum: above a permittivity contrast of roughly 30 the symmetric part of the
+    #: node-placed map can lose positive definiteness, which shows up as a purely growing mode. Off
+    #: by default because the check costs a sparse eigensolve on the whole domain.
+    yee_smooth_check_definiteness: bool = frozen_field(default=False)
+
+    #: Report how many Yee sample points disagree with what the legacy ``"box"`` path would have
+    #: written, in ``info["yee_sampling_difference"]``. Off by default: answering it rasterises the
+    #: whole scene a second time on the cell-centre lattice and holds another ``int32`` copy of the
+    #: domain, and nothing in the simulation reads the answer. The measured cost is scene-dependent
+    #: and smaller than a doubling — about 8% on a 120 x 120 x 30 grid with three nested cylinders,
+    #: because the comparison pass only touches each object's rounded box while the Yee pass
+    #: evaluates three full-domain lattices — but it is pure diagnostic work either way. The
+    #: environment variable ``FDTDX_YEE_SAMPLING_DIAGNOSTICS=1`` turns it on without editing the
+    #: config. The smoothing counters under ``info["yee_sampling_difference"]["smoothing"]`` come
+    #: out of the pass that has to run anyway and are always reported.
+    yee_sampling_diagnostics: bool = frozen_field(default=False)
+
     #: Optional configuration for gradient computation.
     gradient_config: GradientConfig | None = field(default=None)
 
     def __post_init__(self):
         from jax import extend
+
+        if self.material_sampling not in MATERIAL_SAMPLING_MODES:
+            raise ValueError(
+                f"config.material_sampling must be 'box', 'yee' or 'yee_smooth', got {self.material_sampling!r}"
+            )
+
+        if self.yee_smooth_supersample < 1:
+            raise ValueError(f"config.yee_smooth_supersample must be >= 1, got {self.yee_smooth_supersample}")
+
+        if self.yee_smooth_offdiag_placement not in YEE_OFFDIAG_PLACEMENTS:
+            raise ValueError(
+                f"config.yee_smooth_offdiag_placement must be one of {YEE_OFFDIAG_PLACEMENTS}, "
+                f"got {self.yee_smooth_offdiag_placement!r}"
+            )
 
         if len(self.symmetry) != 3 or any(s not in (-1, 0, 1) for s in self.symmetry):
             raise ValueError(
@@ -161,6 +283,54 @@ class SimulationConfig(TreeClass):
                 domain will be reduced and a PEC/PMC wall placed on the symmetry plane(s).
         """
         return any(s != 0 for s in self.symmetry)
+
+    @property
+    def uses_yee_material_sampling(self) -> bool:
+        """Whether static materials are sampled at the Yee component positions.
+
+        True for both ``material_sampling="yee"`` and ``material_sampling="yee_smooth"``. This is
+        the predicate every caller should use: the two modes share one lattice, one priority rule
+        and one set of array-tier consequences, and they differ only in what happens afterwards at
+        the two-material pixels.
+
+        Returns:
+            bool: True when the per-Yee-point loader assembles the static arrays.
+        """
+        return self.material_sampling in YEE_MATERIAL_SAMPLING_MODES
+
+    @property
+    def uses_yee_smoothing(self) -> bool:
+        """Whether the Kottke sub-pixel post-pass runs on top of the Yee sampling.
+
+        Returns:
+            bool: True only for ``material_sampling="yee_smooth"``.
+        """
+        return self.material_sampling == "yee_smooth"
+
+    @property
+    def yee_sampling_diagnostics_enabled(self) -> bool:
+        """Whether to spend a second rasterisation on the box-vs-Yee difference diagnostic.
+
+        Returns:
+            bool: True when :attr:`yee_sampling_diagnostics` is set or the environment variable
+                ``FDTDX_YEE_SAMPLING_DIAGNOSTICS`` is one of ``1``/``true``/``yes``/``on``.
+        """
+        if self.yee_sampling_diagnostics:
+            return True
+        return os.environ.get(YEE_DIAGNOSTICS_ENV_VAR, "").strip().lower() in _TRUTHY
+
+    @property
+    def yee_smooth_offdiag_placement_resolved(self) -> str:
+        """The off-diagonal placement actually used, after the environment override.
+
+        Returns:
+            str: one of :data:`YEE_OFFDIAG_PLACEMENTS`. ``FDTDX_YEE_OFFDIAG_PLACEMENT`` wins over
+                the config field when it names one of them; any other value is ignored.
+        """
+        override = os.environ.get(YEE_OFFDIAG_PLACEMENT_ENV_VAR, "").strip().lower()
+        if override in YEE_OFFDIAG_PLACEMENTS:
+            return override
+        return self.yee_smooth_offdiag_placement
 
     @property
     def courant_number(self) -> float:

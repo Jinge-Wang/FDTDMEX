@@ -23,10 +23,9 @@ if TYPE_CHECKING:
 class SMatrixResult:
     """An S-matrix indexed by ``(output_port, input_port)`` over one or more frequencies.
 
-    Attributes:
-        data: maps ``(out_port, in_port)`` to a complex 1-D array of scattering amplitudes, one per
-            frequency (the shape produced by :func:`fdtdx.utils.sparams.calculate_sparams`).
-        frequencies: optional frequencies (Hz) labelling the array axis.
+    ``data`` maps ``(out_port, in_port)`` to a complex 1-D array of scattering amplitudes, one per
+    frequency (the shape produced by :func:`fdtdx.utils.sparams.calculate_sparams`);
+    ``frequencies`` optionally labels the array axis in Hz.
     """
 
     data: dict[tuple[str, str], np.ndarray]
@@ -116,7 +115,7 @@ def plot_smatrix(
     Args:
         result: the :class:`SMatrixResult`.
         freq_index: which frequency slice to show.
-        value: ``"magnitude"`` (|S|), ``"magnitude_db"`` (20·log10|S|), or ``"phase"`` (deg).
+        value: ``"magnitude"`` (``|S|``), ``"magnitude_db"`` (``20·log10|S|``), or ``"phase"`` (deg).
         filename: if given, save (300 dpi) and close.
 
     Returns:
