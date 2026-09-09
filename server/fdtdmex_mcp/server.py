@@ -195,8 +195,8 @@ def get_doc(ref: str) -> str:
             "that is FORBIDDEN; do NOT copy the run section. To execute, REWRITE it as: "
             "pack(scene, '.') → run_simulation_from_hdf5(bundle, 'jobs', simulation_name=...) (detached, "
             "non-blocking) → read outputs/result.hdf5 (sim_postproc for scalars, h5py for full fields)."
-            if runs_in_proc else
-            "Next: adapt this setup — assemble the fdtdx.Scene, then pack(scene, '.') → "
+            if runs_in_proc
+            else "Next: adapt this setup — assemble the fdtdx.Scene, then pack(scene, '.') → "
             "run_simulation_from_hdf5(bundle, 'jobs', ...) → read outputs/result.hdf5 "
             "(sim_postproc for scalars, h5py for full fields). NEVER run fdtdx in-process (run_fdtd)."
         )

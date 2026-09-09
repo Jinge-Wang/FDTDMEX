@@ -77,7 +77,7 @@ def test_smoothing_reduces_mode_staircase_error():
     k0 = 2 * np.pi / lam
     n_core, n_clad = 1.5, 1.0
     Lx, dx, fac = 6e-6, 40e-9, 20
-    nx = int(round(Lx / dx))
+    nx = round(Lx / dx)
     edges = (np.arange(nx + 1) - nx / 2) * dx
     centers = 0.5 * (edges[:-1] + edges[1:])
     fcent = (np.arange(nx * fac) - nx * fac / 2 + 0.5) * (dx / fac)

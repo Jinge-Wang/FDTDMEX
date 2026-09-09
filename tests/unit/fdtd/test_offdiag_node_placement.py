@@ -887,7 +887,9 @@ def _explicit_vertex_offdiagonals(rows: np.ndarray, periodic) -> np.ndarray:
         for axis in range(3):
             if 0 <= wrapped[axis] < shape[axis]:
                 continue
-            wrapped[axis] = wrapped[axis] % shape[axis] if periodic[axis] else min(max(wrapped[axis], 0), shape[axis] - 1)
+            wrapped[axis] = (
+                wrapped[axis] % shape[axis] if periodic[axis] else min(max(wrapped[axis], 0), shape[axis] - 1)
+            )
         return float(rows[(plane, *wrapped)])
 
     for entry, (i, j) in enumerate(OFFDIAGONAL_ENTRIES):

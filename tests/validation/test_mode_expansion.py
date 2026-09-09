@@ -29,7 +29,9 @@ def _straight_bus():
     wg, slab = 0.40e-6, 0.22e-6
     verts = np.array([[-wg / 2, -slab / 2], [wg / 2, -slab / 2], [wg / 2, slab / 2], [-wg / 2, slab / 2]])
     bus = ExtrudedPolygon(
-        vertices=verts, axis=0, material_name="si",
+        vertices=verts,
+        axis=0,
+        material_name="si",
         materials={"si": fdtdx.Material(permittivity=12.25), "air": fdtdx.Material(permittivity=1.0)},
         partial_real_shape=(4.0e-6, None, None),
     )
@@ -42,19 +44,32 @@ def _run_and_decompose(modes, cache_path=None):
     bus = _straight_bus()
     o, a, c = setup_sparams_simulation(
         polygons=[(bus, (LX / 2, yb, LZ / 2))],
-        input_ports=[PortSpec(center=(0.7e-6, yb, LZ / 2), axis=0, direction="+", width=1.2e-6, height=0.5e-6, name="in")],
-        output_ports=[PortSpec(center=(LX - 0.7e-6, yb, LZ / 2), axis=0, direction="+", width=1.2e-6, height=0.5e-6, name="thru")],
-        wavelength=1.55e-6, resolution=res, max_time=200e-15, domain_size=(LX, LY, LZ), pml_layers=6,
+        input_ports=[
+            PortSpec(center=(0.7e-6, yb, LZ / 2), axis=0, direction="+", width=1.2e-6, height=0.5e-6, name="in")
+        ],
+        output_ports=[
+            PortSpec(center=(LX - 0.7e-6, yb, LZ / 2), axis=0, direction="+", width=1.2e-6, height=0.5e-6, name="thru")
+        ],
+        wavelength=1.55e-6,
+        resolution=res,
+        max_time=200e-15,
+        domain_size=(LX, LY, LZ),
+        pml_layers=6,
     )
     a, o, _ = fdtdx.apply_params(a, o, {})
     _, sr = fdtdx.run_fdtd(
-        arrays=a, objects=o, config=c, show_progress=False,
+        arrays=a,
+        objects=o,
+        config=c,
+        show_progress=False,
         stopping_condition=EnergyThresholdCondition(min_steps=round(c.time_steps_total / 5)),
     )
     states = sr.detector_states
     in_name = determine_input_norm_detector_name("in", o)
     alpha_in = complex(o[in_name].compute_overlap(states[in_name])[0])
-    decomp = compute_mode_expansion(o["thru"], states["thru"], a, c, modes, input_overlap=alpha_in, cache_path=cache_path)
+    decomp = compute_mode_expansion(
+        o["thru"], states["thru"], a, c, modes, input_overlap=alpha_in, cache_path=cache_path
+    )
     # The through detector's own (fundamental TE0) |overlap / input|² — the same quantity the
     # ModeOverlapDetector reports — used here only to check decomposition self-consistency.
     te0_self_T = abs(complex(o["thru"].compute_overlap(states["thru"])[0]) / alpha_in) ** 2

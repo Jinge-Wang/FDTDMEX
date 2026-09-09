@@ -42,9 +42,13 @@ def _build_objects():
     constraints += cl
     object_list += list(bd.values())
     source = fdtdx.GaussianPlaneSource(
-        partial_grid_shape=(1, None, None), partial_real_shape=(None, 1.2e-6, 1.2e-6),
-        fixed_E_polarization_vector=(0, 1, 0), wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
-        radius=0.6e-6, std=1 / 3, direction="+",
+        partial_grid_shape=(1, None, None),
+        partial_real_shape=(None, 1.2e-6, 1.2e-6),
+        fixed_E_polarization_vector=(0, 1, 0),
+        wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
+        radius=0.6e-6,
+        std=1 / 3,
+        direction="+",
     )
     constraints.append(
         source.place_relative_to(volume, axes=(0, 1, 2), own_positions=(-1, 0, 0), other_positions=(-0.6, 0, 0))
@@ -74,15 +78,29 @@ def test_serialize_roundtrip_exact():
     from fdtdx.mlx.source_freeze import SourcePlan
 
     sp = SourcePlan(
-        kind="tfsf", grid_slice=(slice(0, 1), slice(2, 5), slice(None)),
-        on_steps=np.array([True, False, True]), sign=-1.0, h_axis=1, v_axis=2,
-        spatialE_h=mx.ones((2, 3)), amp_E_h=mx.zeros((4, 2, 3)),
+        kind="tfsf",
+        grid_slice=(slice(0, 1), slice(2, 5), slice(None)),
+        on_steps=np.array([True, False, True]),
+        sign=-1.0,
+        h_axis=1,
+        v_axis=2,
+        spatialE_h=mx.ones((2, 3)),
+        amp_E_h=mx.zeros((4, 2, 3)),
     )
     dp = DetectorPlan(
-        name="d", kind="phasor", buffer_key="phasor", grid_slice=(slice(None),),
-        on_steps=np.array([1, 0]), time_to_idx=np.array([0, 1]), exact_interp=True, reduce_volume=False,
-        buffer_shapes={"phasor": (1, 2, 3)}, buffer_dtypes={"phasor": mx.complex64},
-        phasors=mx.zeros((2, 1), dtype=mx.complex64), component_picks=[("E", 0), ("H", 2)], static_scale=2.0,
+        name="d",
+        kind="phasor",
+        buffer_key="phasor",
+        grid_slice=(slice(None),),
+        on_steps=np.array([1, 0]),
+        time_to_idx=np.array([0, 1]),
+        exact_interp=True,
+        reduce_volume=False,
+        buffer_shapes={"phasor": (1, 2, 3)},
+        buffer_dtypes={"phasor": mx.complex64},
+        phasors=mx.zeros((2, 1), dtype=mx.complex64),
+        component_picks=[("E", 0), ("H", 2)],
+        static_scale=2.0,
     )
     skel, arrs = serialize({"sources": [sp], "detectors": [dp], "n": 10})
     out = deserialize(skel, arrs)

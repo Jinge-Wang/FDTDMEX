@@ -20,7 +20,7 @@ from ._hdf5 import SCHEMA_VERSION, read_json
 
 
 def _mock_duration() -> float:
-    """How long a naive mock run should span, in seconds. Defaults to a random 1–60 s so
+    """How long a naive mock run should span, in seconds. Defaults to a random 1-60 s so
     the streamed status/progress telemetry is exercised like a real run; set
     ``FDTDMEX_MOCK_SECONDS`` (e.g. ``0`` in fast tests) to override with a fixed duration."""
     env = os.environ.get("FDTDMEX_MOCK_SECONDS")
@@ -30,6 +30,7 @@ def _mock_duration() -> float:
         except ValueError:
             pass
     return random.uniform(1.0, 60.0)
+
 
 _NP_DTYPE = {
     "float32": np.float32,
@@ -59,7 +60,7 @@ def mock_run(
     """Write a synthetic ``results.hdf5`` matching the detector spec in ``config_path``.
 
     ``progress``, when given, drives a NAIVE RUNNING PROCESS: it emits a random number of
-    ``progress(step, num_steps)`` ticks spread over a random ~1–10 s span (see
+    ``progress(step, num_steps)`` ticks spread over a random ~1-10 s span (see
     :func:`_mock_duration`), sleeping an artificial per-step delay between them — so the streamed
     status/progress telemetry advances over real time exactly like a GPU run would, end-to-end and
     GPU-free. The results themselves are still fabricated instantly at the end.
@@ -77,7 +78,7 @@ def mock_run(
 
     if progress:
         ticks = max(1, min(num_steps, random.randint(5, 25)))  # a random number of progress steps
-        per_tick = _mock_duration() / ticks                    # artificial per-step delay
+        per_tick = _mock_duration() / ticks  # artificial per-step delay
         for i in range(1, ticks + 1):
             time.sleep(per_tick)
             progress(round(i * num_steps / ticks), num_steps)
