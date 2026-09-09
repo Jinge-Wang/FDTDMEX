@@ -11,56 +11,62 @@ authors = [
 requires-python = ">=3.11, <3.15"
 dependencies = [
     "loguru>=0.7.3",
-    "pytreeclass>=0.11",
-    "jax>=0.4.36",
+    "pytreeclass>=0.11.1",
+    "jax>=0.10.2",
     "moviepy@git+https://github.com/Zulko/moviepy@7ffa4f00376237137a25fe1c777355c37753e9af",
     "optax>=0.2.4",
-    "equinox>=0.11.10",
-    "trimesh>=4.5.3",
-    "scipy>=1.11",
+    "equinox>=0.13.8",
+    "trimesh>=5.1.0",
+    "scipy>=1.17.1",
     "seaborn>=0.13.2",
-    "matplotlib>=3.9.4",
-    "rich>=13.9.4",
-    "typing-extensions>=4.14.1",
-    "gdstk>=0.9",
+    "matplotlib>=3.11.1",
+    "rich>=15.0.0",
+    "typing-extensions>=4.16.0",
+    "gdstk>=1.0.1",
     # MLX (Metal) forward backend — Apple Silicon only. The dispatch layer guards
     # every use with mlx_available(), so non-Darwin/non-arm64 installs simply run JAX.
-    "mlx>=0.18; platform_system=='Darwin' and platform_machine=='arm64'",
+    "mlx>=0.32.2; platform_system=='Darwin' and platform_machine=='arm64'",
 ]
 
 [project.optional-dependencies]
 # Tidy3D mode solver — now an optional, legacy backend. The native full-vectorial FD solver
 # (mode_backend="fdtdmex", default) removes the hard dependency; install this only to use
 # mode_backend="tidy3d" for fully tensorial media, bends, or dev-time cross-checks.
-tidy3d = ["tidy3d>=2.8.0"]
+tidy3d = ["tidy3d>=2.12.0"]
 # Config schema + HDF5 sim_init/sim_run/sim_postproc IO layer (the agentic hand-off seam).
-io = ["h5py>=3.10", "pydantic>=2.6"]
+io = ["h5py>=3.16.0", "pydantic>=2.13.5"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
-viz = ["plotly>=5.22", "pyvista>=0.44", "trame>=3.6"]
+viz = ["plotly>=7.0.0", "pyvista>=0.48.4", "trame>=3.13.2"]
 # MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
-mcp = ["mcp>=1.0", "h5py>=3.10", "pydantic>=2.6", "plotly>=5.22"]
+mcp = ["mcp>=1.28.1", "h5py>=3.16.0", "pydantic>=2.13.5", "plotly>=7.0.0"]
 dev = [
-    "black>=24.10.0",
-    "ipykernel>=6.29.5",
-    "pre-commit>=4.0.1",
-    "pymdown-extensions>=10.12",
-    "pytest>=8.3.4",
-    "pytest-cov>=6.0.0",
-    "ruff>=0.8.2",
-    "tox-uv>=1.16.1",
-    "pydoclint>=0.6.6",
+    "black>=26.5.1",
+    "ipykernel>=7.3.0",
+    "pre-commit>=4.6.2",
+    "pymdown-extensions>=11.0.2",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.5",
+    "tox-uv>=1.36.0",
+    "pydoclint>=0.9.1",
+    # Held at <9.0 deliberately: Sphinx 9 autodoc calls
+    # sphinx.util.inspect.object_description on class attributes, and the
+    # pytreeclass field descriptors (DispersionModel.poles, DrudePole.damping,
+    # .orientation, .plasma_frequency) raise ValueError from their repr, which
+    # aborts the strict docs build. Dependabot's proposed <10.0 is otherwise fine.
     "sphinx<9.0",
     "sphinx-autobuild>=2025.8.25",
-    "sphinx-book-theme>=1.1.4",
-    "nbsphinx>=0.9",
+    "sphinx-book-theme>=1.4.0",
+    "nbsphinx>=0.9.8",
+    # Held with sphinx: 3.6.1+ requires sphinx>=9.0.4 (see the sphinx pin above).
     "sphinx-autodoc-typehints>=3.2.0",
-    "myst_nb>=1.3.0",
+    "myst_nb>=1.4.0",
     "sphinx-copybutton>=0.5.2",
     "chex>=0.1.91",
     "sphinx-design",
     "ty==0.0.66",
     # Legacy Tidy3D mode backend, kept in dev for the native-solver cross-check tests.
-    "tidy3d>=2.8.0",
+    "tidy3d>=2.12.0",
 ]
 
 [project.scripts]

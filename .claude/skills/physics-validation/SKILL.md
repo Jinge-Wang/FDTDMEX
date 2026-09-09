@@ -34,8 +34,10 @@ Generated FDTD kernels routinely pass smoke tests while being physically wrong (
 Normalize out source/grid factors by taking a ratio of a "test" run to a "reference" run that shares a helper:
 
 ```python
-def _run(setup): ...                       # place → bridge → forward → detector states
-def _mean_flux(arrays, name): ...          # mean over last N steady-state steps
+def _run(setup): ...  # place → bridge → forward → detector states
+def _mean_flux(arrays, name): ...  # mean over last N steady-state steps
+
+
 transmission = _mean_flux(_run(test), "det") / _mean_flux(_run(ref), "det")
 ```
 
@@ -45,7 +47,7 @@ Average over the last few optical periods:
 
 ```python
 steps_per_period = round(wavelength / (c0 * dt))
-steady = float(mx.mean(flux[-10 * steps_per_period:]))
+steady = float(mx.mean(flux[-10 * steps_per_period :]))
 ```
 
 ## Non-uniform-grid checks

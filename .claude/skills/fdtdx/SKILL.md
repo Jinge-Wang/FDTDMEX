@@ -239,12 +239,12 @@ config = fdtdx.SimulationConfig(
     symmetry=(0, -1, 1),
 )  # PEC y-plane, PMC z-plane
 # ... build the FULL volume/sources/detectors/boundaries as usual ...
-objects, arrays, params, config, _ = fdtdx.place_objects(...)   # reduced internally
+objects, arrays, params, config, _ = fdtdx.place_objects(...)  # reduced internally
 arrays, objects, _ = fdtdx.apply_params(arrays, objects, params, key)
 _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=objects, config=config, key=key)  # runs on reduced domain
 
 # Unfold to full domain (explicit, post-processing — NOT auto-run by run_fdtd):
-full = fdtdx.unfold_detector_states(arrays, objects, config)     # full-domain detector_states
+full = fdtdx.unfold_detector_states(arrays, objects, config)  # full-domain detector_states
 E_full = fdtdx.unfold_fields(arrays.fields.E, config.symmetry, "E")  # (3, Nx, Ny, Nz)
 ```
 
@@ -323,8 +323,9 @@ device = fdtdx.Device(
 
 **`SimulationObject.apply()` signature** — `apply_params` passes dispersive coefficients through to every object:
 ```python
-def apply(self, *, key, inv_permittivities, inv_permeabilities,
-          dispersive_c1=None, dispersive_c2=None, dispersive_c3=None): ...
+def apply(
+    self, *, key, inv_permittivities, inv_permeabilities, dispersive_c1=None, dispersive_c2=None, dispersive_c3=None
+): ...
 ```
 Coefficient arrays are passed with `stop_gradient` (matching how `inv_permittivities` is passed to source apply) — the FDTD VJP itself still differentiates through them, this only avoids gradient noise from the source amplitude path. Objects that don't use them (detectors, boundaries, uniform material objects) just `del` the kwargs; sources use them to sample the real medium at the carrier frequency.
 
@@ -388,15 +389,20 @@ All state arrays have a leading time dimension: `(num_time_steps_on, ...)`. Use 
 def _run(objects, constraints, config):
     key = jax.random.PRNGKey(0)
     obj_container, arrays, params, config, _ = fdtdx.place_objects(
-        object_list=objects, config=config, constraints=constraints, key=key,
+        object_list=objects,
+        config=config,
+        constraints=constraints,
+        key=key,
     )
     arrays, obj_container, _ = fdtdx.apply_params(arrays, obj_container, params, key)
     _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=obj_container, config=config, key=key)
     return arrays
 
+
 def _mean_flux(arrays, name):
     flux = np.array(arrays.detector_states[name]["poynting_flux"][:, 0])
     return float(np.mean(flux[-N_AVG_STEPS:]))
+
 
 ref_flux = _mean_flux(_run(ref_objects, ref_constraints, config), "detector")
 test_flux = _mean_flux(_run(test_objects, test_constraints, config), "detector")

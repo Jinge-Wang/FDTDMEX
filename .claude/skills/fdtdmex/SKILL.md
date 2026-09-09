@@ -19,7 +19,7 @@ Forward-first FDTD on **MLX** (Apple Silicon / Metal). Inverse design is out of 
 MLX ops return new arrays. Each step computes a **new** `E` from the **old** `E`/`H` and returns it — never mutate in place. This guarantees no read-after-write hazard between neighbouring cells (the framework effectively double-buffers). Do not hand-roll ping-pong buffers or atomics.
 
 ```python
-E_new = factor * E_old + c * curl_H * inv_eps   # new buffer; old E still intact for neighbours
+E_new = factor * E_old + c * curl_H * inv_eps  # new buffer; old E still intact for neighbours
 ```
 
 ## Yee grid + leapfrog
@@ -34,14 +34,15 @@ Every curl / interpolation / update **must** take per-axis Yee cell-size arrays 
 
 ```python
 @mx.compile
-def step(state):           # one E/H/source/detector update
+def step(state):  # one E/H/source/detector update
     ...
     return state
+
 
 for t in range(num_steps):
     state = step(state)
     if t % EVAL_EVERY == 0:
-        mx.eval(state)     # bound the lazy graph; avoids unbounded memory growth
+        mx.eval(state)  # bound the lazy graph; avoids unbounded memory growth
 ```
 
 ## Material tensor consumption

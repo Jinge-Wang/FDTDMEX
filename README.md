@@ -5,7 +5,7 @@
 FDTDMEX is a **fork of fdtdx** (the JAX FDTD Maxwell solver) that adds a native **MLX** backend so the *forward* time loop runs on the **Metal GPU with unified memory**. You keep fdtdx's entire mature front end — geometry, GDS, constraints, materials, sources, detectors, boundaries — and import it the same way:
 
 ```python
-import fdtdx   # this fork; the MLX backend is built in
+import fdtdx  # this fork; the MLX backend is built in
 ```
 
 On Apple Silicon a supported forward `run_fdtd` **automatically** routes to the Metal engine; everywhere else (and for gradients / inverse design) it runs the unchanged JAX engine, so results cross-check element-wise against the JAX reference.
@@ -51,9 +51,9 @@ The injection point is the **whole forward loop** (you can't interleave JAX trac
 - **Auto (default):** on Apple Silicon, a forward-only `run_fdtd` whose features are all supported runs on MLX; anything unsupported (see Status) falls back to JAX, warned once. On other platforms `mlx` isn't installed and everything runs on JAX.
 - **Force / disable a backend:**
   ```python
-  with fdtdx.use_backend("jax"):   # disable MLX — force the JAX engine (also the CPU reference oracle)
+  with fdtdx.use_backend("jax"):  # disable MLX — force the JAX engine (also the CPU reference oracle)
       ref = fdtdx.run_fdtd(arrays, objects, config)
-  with fdtdx.use_backend("mlx"):   # force the Metal engine (raises if the case is unsupported)
+  with fdtdx.use_backend("mlx"):  # force the Metal engine (raises if the case is unsupported)
       out = fdtdx.run_fdtd(arrays, objects, config)
   ```
   or set `FDTDMEX_BACKEND=mlx|jax` in the environment.
@@ -121,7 +121,8 @@ constraints, objects = [], []
 volume = fdtdx.SimulationVolume(partial_real_shape=(6e-6, 6e-6, 6e-6))
 objects.append(volume)
 bdict, clist = fdtdx.boundary_objects_from_config(
-    fdtdx.BoundaryConfig.from_uniform_bound(thickness=10, boundary_type="pml"), volume)
+    fdtdx.BoundaryConfig.from_uniform_bound(thickness=10, boundary_type="pml"), volume
+)
 constraints += clist
 objects += list(bdict.values())
 
@@ -142,24 +143,27 @@ source = fdtdx.UniformPlaneSource(
     wave_character=fdtdx.WaveCharacter(wavelength=1.55e-6),
     direction="+",
 )
-constraints.append(source.place_relative_to(
-    volume, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, -0.6)))
+constraints.append(
+    source.place_relative_to(volume, axes=(0, 1, 2), own_positions=(0, 0, 0), other_positions=(0, 0, -0.6))
+)
 objects.append(source)
 
 # Transmitted Poynting flux on a plane past the slab.
-flux = fdtdx.PoyntingFluxDetector(
-    name="T", direction="+", reduce_volume=True, partial_grid_shape=(None, None, 1))
-constraints += [flux.same_size(volume, axes=(0, 1)),
-                flux.place_relative_to(volume, axes=(2,), own_positions=(0,), other_positions=(0.6,))]
+flux = fdtdx.PoyntingFluxDetector(name="T", direction="+", reduce_volume=True, partial_grid_shape=(None, None, 1))
+constraints += [
+    flux.same_size(volume, axes=(0, 1)),
+    flux.place_relative_to(volume, axes=(2,), own_positions=(0,), other_positions=(0.6,)),
+]
 objects.append(flux)
 
 key = jax.random.PRNGKey(0)
 oc, arrays, params, config, _ = fdtdx.place_objects(
-    object_list=objects, config=config, constraints=constraints, key=key)
+    object_list=objects, config=config, constraints=constraints, key=key
+)
 arrays, oc, _ = fdtdx.apply_params(arrays, oc, params, key)
 
 _, arrays = fdtdx.run_fdtd(arrays=arrays, objects=oc, config=config, key=key)  # Metal on Apple Silicon
-print(arrays.detector_states["T"])   # transmitted flux vs time
+print(arrays.detector_states["T"])  # transmitted flux vs time
 ```
 
 ## Showcase — an O-band silicon microring modulator
