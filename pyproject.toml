@@ -38,7 +38,7 @@ io = ["h5py>=3.16.0", "pydantic>=2.13.5"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
 viz = ["plotly>=7.0.0", "pyvista>=0.48.4", "trame>=3.13.2"]
 # MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
-mcp = ["mcp>=1.28.1", "h5py>=3.16.0", "pydantic>=2.13.5", "plotly>=7.0.0"]
+mcp = ["mcp>=2.1.1", "h5py>=3.16.0", "pydantic>=2.13.5", "plotly>=7.0.0"]
 dev = [
     "black>=26.5.1",
     "ipykernel>=7.3.0",
@@ -54,12 +54,12 @@ dev = [
     # pytreeclass field descriptors (DispersionModel.poles, DrudePole.damping,
     # .orientation, .plasma_frequency) raise ValueError from their repr, which
     # aborts the strict docs build. Dependabot's proposed <10.0 is otherwise fine.
-    "sphinx<9.0",
+    "sphinx<10.0",
     "sphinx-autobuild>=2025.8.25",
     "sphinx-book-theme>=1.4.0",
     "nbsphinx>=0.9.8",
     # Held with sphinx: 3.6.1+ requires sphinx>=9.0.4 (see the sphinx pin above).
-    "sphinx-autodoc-typehints>=3.2.0",
+    "sphinx-autodoc-typehints>=3.6.1",
     "myst_nb>=1.4.0",
     "sphinx-copybutton>=0.5.2",
     "chex>=0.1.91",
