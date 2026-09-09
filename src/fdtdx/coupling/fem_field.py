@@ -95,18 +95,26 @@ class PointTransform:
             before the offset, so a 3-D Yee grid with one cell along ``z`` samples a 2-D mesh in
             the ``z = collapse_value`` plane.
         collapse_value (float): The coordinate written on the collapsed axes.
+        permute (tuple[int, int, int] | None): Reorder the axes after the steps above, so mesh
+            coordinate ``i`` is taken from Yee axis ``permute[i]``. A cross-section mesh drawn in
+            ``(x, z)`` sampled by a grid whose propagation axis is ``y`` uses ``(0, 2, 1)``.
     """
 
     offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     scale: float = 1.0
     collapse_axes: tuple[int, ...] = ()
     collapse_value: float = 0.0
+    permute: tuple[int, int, int] | None = None
 
     def apply(self, points: np.ndarray) -> np.ndarray:
         out = np.array(points, dtype=np.float64, copy=True) * float(self.scale)
         for axis in self.collapse_axes:
             out[:, axis] = float(self.collapse_value)
         out += np.asarray(self.offset, dtype=np.float64)[None, :]
+        if self.permute is not None:
+            if sorted(self.permute) != [0, 1, 2]:
+                raise ValueError(f"permute must reorder (0, 1, 2), got {self.permute}")
+            out = out[:, list(self.permute)]
         return out
 
     def as_dict(self) -> dict[str, Any]:
@@ -115,6 +123,7 @@ class PointTransform:
             "scale": float(self.scale),
             "collapse_axes": [int(a) for a in self.collapse_axes],
             "collapse_value": float(self.collapse_value),
+            "permute": None if self.permute is None else [int(a) for a in self.permute],
         }
 
 
