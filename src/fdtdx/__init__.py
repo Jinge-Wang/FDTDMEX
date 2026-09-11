@@ -32,7 +32,9 @@ from fdtdx.core.physics.metrics import (
     normalize_by_energy,
     normalize_by_poynting_flux,
 )
-from fdtdx.core.physics.modes import compute_mode
+from fdtdx.core.physics.mode_backend import ModeLongitudinalOffdiagWarning
+from fdtdx.core.physics.mode_backend.jax_modes import compute_modes_jax
+from fdtdx.core.physics.modes import compute_mode, compute_modes, filter_spurious_modes, group_index
 from fdtdx.core.physics.subpixel import smooth_cross_section_2d, smooth_inverse_permittivity
 from fdtdx.core.switch import OnOffSwitch
 from fdtdx.core.wavelength import WaveCharacter
@@ -220,6 +222,7 @@ __all__ = [
     "LorentzPole",
     "Material",
     "ModeExpansionResult",
+    "ModeLongitudinalOffdiagWarning",
     "ModeOverlapDetector",
     "ModePlaneSource",
     "ObjectContainer",
@@ -284,6 +287,8 @@ __all__ = [
     "compute_integrated_power",
     "compute_mode",
     "compute_mode_expansion",
+    "compute_modes",
+    "compute_modes_jax",
     "compute_pole_coefficients",
     "compute_pole_coefficients_per_axis",
     "compute_pole_coefficients_tensor",
@@ -299,12 +304,14 @@ __all__ = [
     "extruded_polygon_from_gds",
     "extruded_polygon_from_gds_path",
     "field",
+    "filter_spurious_modes",
     "frozen_field",
     "frozen_private_field",
     "full_backward",
     "gaussian_mode_function",
     "gds_layer_stack",
     "gds_layer_stack_from_component",
+    "group_index",
     "import_from_json",
     "metric_efficiency",
     "normalize_by_energy",

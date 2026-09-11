@@ -10,6 +10,7 @@ from fdtdx.core.physics.modes import (
     compute_mode,
     compute_mode_polarization_fraction,
     compute_mode_symmetry_reduced,
+    compute_modes,
     sort_modes,
     tidy3d_mode_computation_wrapper,
 )
@@ -861,7 +862,14 @@ class TestTidy3DModeComputationWrapper:
 
 
 class TestComputeModeBendPassthrough:
-    """Tests that bend args are correctly converted and passed to tidy3d_mode_computation_wrapper."""
+    """Bend args are converted and passed to tidy3d_mode_computation_wrapper on the Tidy3D backend.
+
+    The pass-through is still the contract, but only for ``mode_backend="tidy3d"``: since the native
+    bend (2026-09-09) the fdtdmex backend removes the curvature from the cross-section itself and
+    hands the straight problem on, so on that backend nothing bend-shaped reaches any wrapper. Every
+    test here therefore selects the backend whose contract it is describing, instead of relying on
+    the native backend falling through to Tidy3D as it did before the native bend existed.
+    """
 
     def _make_mock_mode(self, shape=(5, 6)):
         return ModeTupleType(
@@ -901,7 +909,7 @@ class TestComputeModeBendPassthrough:
             jnp.ones((3, 5, 6, 1), dtype=jnp.complex64),
         )
 
-        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+", bend_radius=5e-6, bend_axis=0)
+        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+", bend_radius=5e-6, bend_axis=0, mode_backend="tidy3d")
 
         kwargs = mock_wrapper.call_args.kwargs
         assert kwargs["bend_radius"] == pytest.approx(5.0)  # 5e-6 m = 5.0 µm
@@ -917,7 +925,9 @@ class TestComputeModeBendPassthrough:
         )
 
         # z-propagation: inv_permittivities shape (1, 5, 6, 1), singleton at dim 3
-        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+", bend_radius=10e-6, bend_axis=1)
+        compute_mode(
+            2e14, jnp.ones((1, 5, 6, 1)), 1.0, 1e-8, "+", bend_radius=10e-6, bend_axis=1, mode_backend="tidy3d"
+        )
 
         kwargs = mock_wrapper.call_args.kwargs
         assert kwargs["bend_axis"] == 1  # transverse_axes=[0,1], index(1)=1
@@ -933,7 +943,9 @@ class TestComputeModeBendPassthrough:
         )
 
         # x-propagation: inv_permittivities shape (1, 1, 5, 6), singleton at dim 1
-        compute_mode(2e14, jnp.ones((1, 1, 5, 6)), 1.0, 1e-8, "+", bend_radius=10e-6, bend_axis=2)
+        compute_mode(
+            2e14, jnp.ones((1, 1, 5, 6)), 1.0, 1e-8, "+", bend_radius=10e-6, bend_axis=2, mode_backend="tidy3d"
+        )
 
         kwargs = mock_wrapper.call_args.kwargs
         assert kwargs["bend_axis"] == 1  # transverse_axes=[1,2], index(2)=1
@@ -952,11 +964,38 @@ class TestComputeModeBendPassthrough:
         # z-propagation with transverse dims 5 (x) and 6 (y)
         # coords[0] = np.arange(6) * resolution/1e-6, so last = 5 * resolution/1e-6
         # coords[1] = np.arange(7) * resolution/1e-6, so last = 6 * resolution/1e-6
-        compute_mode(2e14, jnp.ones((1, 5, 6, 1)), 1.0, resolution, "+", bend_radius=5e-6, bend_axis=0)
+        compute_mode(
+            2e14, jnp.ones((1, 5, 6, 1)), 1.0, resolution, "+", bend_radius=5e-6, bend_axis=0, mode_backend="tidy3d"
+        )
 
         kwargs = mock_wrapper.call_args.kwargs
         expected = (0.5 * 5 * resolution / 1e-6, 0.5 * 6 * resolution / 1e-6)
         assert kwargs["plane_center"] == pytest.approx(expected)
+
+    @patch("fdtdx.core.physics.modes.tidy3d_mode_computation_wrapper")
+    def test_the_native_backend_consumes_the_bend_instead_of_passing_it_on(self, mock_wrapper):
+        """On the fdtdmex backend the bend never reaches a wrapper: it is folded into the material.
+
+        The other side of the contract above. Since 2026-09-09 the curvature is removed from the
+        cross-section before the dispatch, so an isotropic bent solve stays native and the Tidy3D
+        wrapper is not called at all - which is why the four pass-through tests have to name the
+        Tidy3D backend explicitly to test what they mean to test.
+        """
+        mock_wrapper.side_effect = AssertionError("the native bend path must not call Tidy3D")
+
+        _E, _H, neff = compute_mode(
+            2e14,
+            jnp.full((1, 12, 10, 1), 1 / 4.0),
+            1.0,
+            1e-7,
+            "+",
+            bend_radius=20e-6,
+            bend_axis=1,
+            mode_backend="fdtdmex",
+        )
+
+        mock_wrapper.assert_not_called()
+        assert jnp.isfinite(jnp.real(neff))
 
 
 class TestComputeModeSymmetryReduced:
@@ -987,22 +1026,27 @@ class TestComputeModeSymmetryReduced:
         kwargs.update(overrides)
         return kwargs
 
-    def test_bend_about_a_mirrored_axis_raises(self):
-        # The conformal bend transform scales the index linearly across bend_axis, so the mirrored
-        # cross-section is not symmetric about a plane normal to it and the reduced run cannot
-        # represent the mode. Rejected before any solve.
-        with pytest.raises(ValueError, match="bends about the z-axis"):
-            compute_mode_symmetry_reduced(**self._kwargs(bend_radius=5e-6, bend_axis=2))
+    def test_bend_whose_radial_axis_is_mirrored_raises(self):
+        # Convention settled 2026-09-09: bend_axis is normal to the bend plane, so the radius - and
+        # the index the bend transform scales - grows along the OTHER transverse axis. Here
+        # x-propagation makes the transverse pair (y, z); bend_axis=y puts the radial direction on z,
+        # which is exactly the axis config.symmetry mirrors, so the mirrored cross-section is not
+        # symmetric and the reduced run cannot represent the mode. Rejected before any solve.
+        with pytest.raises(ValueError, match="radius grows along the z-axis"):
+            compute_mode_symmetry_reduced(**self._kwargs(bend_radius=5e-6, bend_axis=1))
 
     @patch("fdtdx.core.physics.modes.tidy3d_mode_computation_wrapper")
     @patch("fdtdx.core.physics.modes.normalize_by_poynting_flux")
-    def test_bend_about_the_other_transverse_axis_is_allowed(self, mock_normalize, mock_wrapper):
-        # A bend leaves the axis it does not bend about mirror-symmetric, so mirroring that one is
-        # consistent: the pair (mirror z, bend y) is fine, unlike (mirror z, bend z) above.
+    def test_bend_about_the_mirrored_axis_itself_is_allowed(self, mock_normalize, mock_wrapper):
+        # The complement of the case above, and the one the old guard wrongly refused: bend_axis=z is
+        # the normal of the bend plane, so the radius grows along y and the z mirror plane survives
+        # the bend untouched. Allowed, and the solve goes through.
         mock_wrapper.return_value = [self._make_mock_mode((4, 6))]
         mock_normalize.side_effect = lambda E, H, axis, area_weights=None: (E, H)
 
-        mode_E, mode_H, _neff = compute_mode_symmetry_reduced(**self._kwargs(bend_radius=5e-6, bend_axis=1))
+        mode_E, mode_H, _neff = compute_mode_symmetry_reduced(
+            **self._kwargs(bend_radius=5e-6, bend_axis=2, mode_backend="tidy3d")
+        )
 
         assert mode_E.shape == (3, 1, 4, 3)  # solved on the mirrored plane, restricted to the kept half
         assert mode_H.shape == (3, 1, 4, 3)
@@ -1026,3 +1070,322 @@ class TestComputeModeSymmetryReduced:
         jitted = jax.jit(traced)(jnp.ones((1, 1, 4, 3)))
         assert jitted.shape == eager.shape
         assert jnp.allclose(jitted, eager)
+
+
+# ================================================================================================
+# Track J phase 0: target_neff, the plural entry point, the 2-D collapse, and precision.
+# Every test below runs on the native ("fdtdmex") backend.
+# ================================================================================================
+
+LAM = 1.55e-6
+FREQ = 299792458.0 / LAM
+N_SI, N_SIO2 = 3.48, 1.55
+N_TIN, K_TIN = 3.1477, 5.8429
+#: TiN at 1.55 um in the exp(+i k0 n z) convention the solver returns, so Im(n_eff) > 0 is loss.
+EPS_TIN = (N_TIN**2 - K_TIN**2) + 2j * N_TIN * K_TIN
+
+
+@pytest.fixture
+def float64():
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", previous)
+
+
+def _strip(nx: int = 40, ny: int = 30) -> jnp.ndarray:
+    """A 40 x 30 cell Si strip in silica at 40 nm; propagation along the first axis."""
+    eps = np.full((nx, ny), 2.25)
+    eps[14:26, 10:16] = 12.0
+    return jnp.asarray(eps)[None, None, :, :]
+
+
+def _phase_shifter_cross_section(cell_um: float = 0.02, window=(6.0, 2.4), w_metal: float = 4.0):
+    """The reference device of Jokisch et al. 2024, section 2: Si guide, SiO2 cladding, TiN heater.
+
+    The same cross-section the mode-adjoint tests use, at the same reduced window.
+    """
+    nx = round(window[0] / cell_um)
+    ny = round(window[1] / cell_um)
+    x = -window[0] / 2 + (np.arange(nx) + 0.5) * cell_um
+    y = -window[1] / 2 + (np.arange(ny) + 0.5) * cell_um
+    grid_x, grid_y = np.meshgrid(x, y, indexing="ij")
+    eps = np.full((nx, ny), N_SIO2**2, dtype=np.complex128)
+    eps[(np.abs(grid_x) < 5.0) & (np.abs(grid_y) < 0.5)] = N_SI**2
+    metal = (grid_x >= -5.0) & (grid_x <= -5.0 + w_metal) & (grid_y >= 0.5) & (grid_y <= 0.75)
+    eps[metal] = EPS_TIN
+    return jnp.asarray(eps)[None, :, :, None]
+
+
+class TestTargetNeff:
+    """``target_neff`` aims the shift-invert solve and, when given, the ordering."""
+
+    def test_the_default_solve_is_unchanged(self, float64):
+        """The regression bar for the whole change: no target, same number as before, to 1e-12.
+
+        The recorded value is the 300 x 120 phase-shifter cross-section at 20 nm solved on
+        ``feat/coupling-shared`` at 00e3195, before any of the track J phase 0 edits.
+        """
+        eps = _phase_shifter_cross_section()
+        _E, _H, neff = compute_mode(
+            frequency=FREQ,
+            inv_permittivities=1.0 / eps,
+            inv_permeabilities=1.0,
+            resolution=20e-9,
+            dtype=jnp.float64,
+        )
+        recorded = 3.4146019256819313 + 0.00010527080358643824j
+        assert complex(neff).real == pytest.approx(recorded.real, abs=1e-12)
+        assert complex(neff).imag == pytest.approx(recorded.imag, abs=1e-12)
+
+    def test_it_selects_the_mode_nearest_the_target(self, float64):
+        """Aiming at the third mode's index makes it mode_index=0."""
+        eps = _strip()
+        kwargs = {
+            "frequency": FREQ,
+            "inv_permittivities": 1.0 / eps,
+            "inv_permeabilities": 1.0,
+            "resolution": 40e-9,
+            "dtype": jnp.float64,
+        }
+        _E, _H, neffs = compute_modes(num_modes=4, **kwargs)
+        aim = float(np.real(neffs[2]))
+        assert aim < float(np.real(neffs[0]))  # it is not the mode the default would return
+
+        _E, _H, aimed = compute_mode(mode_index=0, target_neff=aim, **kwargs)
+        assert complex(aimed).real == pytest.approx(aim, rel=1e-10)
+
+    @patch("fdtdx.core.physics.modes.tidy3d_mode_computation_wrapper")
+    @patch("fdtdx.core.physics.modes.normalize_by_poynting_flux")
+    def test_it_reaches_the_backend(self, mock_normalize, mock_wrapper):
+        """The value is forwarded, not swallowed by ``compute_mode``."""
+        mock_wrapper.return_value = [
+            ModeTupleType(
+                neff=1.5 + 0.0j,
+                **{f"{f}{a}": np.ones((4, 3), dtype=np.complex64) for f in "EH" for a in "xyz"},
+            )
+        ]
+        mock_normalize.side_effect = lambda E, H, axis, area_weights=None: (E, H)
+
+        compute_mode(
+            frequency=FREQ,
+            inv_permittivities=jnp.ones((1, 1, 4, 3)),
+            inv_permeabilities=1.0,
+            resolution=1e-8,
+            mode_backend="tidy3d",
+            target_neff=2.75,
+        )
+        assert mock_wrapper.call_args.kwargs["target_neff"] == 2.75
+
+    def test_sort_modes_orders_by_distance_to_the_target(self):
+        modes = [
+            ModeTupleType(neff=n, Ex=None, Ey=None, Ez=None, Hx=None, Hy=None, Hz=None) for n in (3.0, 2.0, 1.2, 0.5)
+        ]
+        assert [m.neff for m in sort_modes(modes, None, (0, 1))] == [3.0, 2.0, 1.2, 0.5]
+        assert [m.neff for m in sort_modes(modes, None, (0, 1), target_neff=1.9)] == [2.0, 1.2, 3.0, 0.5]
+
+
+class TestComputeModes:
+    """The plural entry point returns the list the backend already solved."""
+
+    def test_it_reproduces_compute_mode_index_by_index(self, float64):
+        eps = _strip()
+        kwargs = {
+            "frequency": FREQ,
+            "inv_permittivities": 1.0 / eps,
+            "inv_permeabilities": 1.0,
+            "resolution": 40e-9,
+            "dtype": jnp.float64,
+        }
+        fields_E, fields_H, neffs = compute_modes(num_modes=4, **kwargs)
+        assert fields_E.shape == (4, 3, 1, 40, 30)
+        assert fields_H.shape == (4, 3, 1, 40, 30)
+        assert neffs.shape == (4,)
+
+        for index in range(4):
+            single_E, single_H, single_neff = compute_mode(mode_index=index, **kwargs)
+            assert complex(single_neff) == pytest.approx(complex(neffs[index]), abs=1e-12)
+            scale = float(np.max(np.abs(np.asarray(single_E))))
+            assert np.max(np.abs(np.asarray(single_E) - np.asarray(fields_E[index]))) < 1e-10 * scale
+            scale_h = float(np.max(np.abs(np.asarray(single_H))))
+            assert np.max(np.abs(np.asarray(single_H) - np.asarray(fields_H[index]))) < 1e-10 * scale_h
+
+    def test_it_costs_one_eigen_solve_whatever_the_count(self, float64):
+        """The point of the entry point: N candidates, one solve."""
+        import fdtdx.core.physics.mode_backend.solve as backend_solve
+
+        eps = _strip()
+        kwargs = {
+            "frequency": FREQ,
+            "inv_permittivities": 1.0 / eps,
+            "inv_permeabilities": 1.0,
+            "resolution": 40e-9,
+            "dtype": jnp.float64,
+        }
+        original = backend_solve.spl.eigs
+        calls = []
+        try:
+            backend_solve.spl.eigs = lambda *a, **kw: (calls.append(1), original(*a, **kw))[1]
+            compute_modes(num_modes=6, **kwargs)
+            assert len(calls) == 1
+            calls.clear()
+            for index in range(6):
+                compute_mode(mode_index=index, **kwargs)
+            assert len(calls) == 6
+        finally:
+            backend_solve.spl.eigs = original
+
+    def test_it_refuses_more_modes_than_the_operator_has(self):
+        with pytest.raises(ValueError, match="exceeds the"):
+            compute_modes(
+                frequency=FREQ,
+                inv_permittivities=jnp.ones((1, 1, 3, 3)),
+                inv_permeabilities=1.0,
+                num_modes=100,
+                resolution=40e-9,
+            )
+        with pytest.raises(ValueError, match="at least 1"):
+            compute_modes(
+                frequency=FREQ,
+                inv_permittivities=jnp.ones((1, 1, 8, 8)),
+                inv_permeabilities=1.0,
+                num_modes=0,
+                resolution=40e-9,
+            )
+
+
+def _analytic_slab_te0(
+    n_core: float = N_SI,
+    thickness: float = 0.5e-6,
+    n_clad: float = N_SIO2,
+    lam: float = LAM,
+) -> float:
+    """Effective index of the fundamental even TE mode of a symmetric slab, by bisection.
+
+    Solves ``kappa tan(kappa d / 2) = gamma`` with ``kappa = k0 sqrt(n_core^2 - neff^2)`` and
+    ``gamma = k0 sqrt(neff^2 - n_clad^2)`` on the first branch, ``kappa d / 2 < pi / 2``.
+    """
+    k0 = 2 * np.pi / lam
+
+    def residual(neff: float) -> float:
+        kappa = k0 * np.sqrt(n_core**2 - neff**2)
+        gamma = k0 * np.sqrt(neff**2 - n_clad**2)
+        return kappa * np.tan(kappa * thickness / 2) - gamma
+
+    lo = max(n_clad + 1e-12, np.sqrt(n_core**2 - (np.pi / (k0 * thickness)) ** 2) + 1e-12)
+    hi = n_core - 1e-12
+    for _ in range(300):
+        mid = 0.5 * (lo + hi)
+        if residual(lo) * residual(mid) <= 0:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+
+def _slab_cross_section(cell: float, collapsed_axis: int, height: float = 4e-6, thickness: float = 0.5e-6):
+    """A layered slab, invariant along one transverse axis, given to the 2-D collapse path.
+
+    The invariant axis carries exactly two cells, which is how ``compute_mode`` detects a
+    two-dimensional cross-section. Propagation is along the third (length-one) axis.
+    """
+    n = round(height / cell)
+    n_core = round(thickness / cell)
+    low = (n - n_core) // 2
+    profile = np.full(n, N_SIO2**2)
+    profile[low : low + n_core] = N_SI**2
+    if collapsed_axis == 1:
+        eps = np.broadcast_to(profile[:, None], (n, 2))
+    else:
+        eps = np.broadcast_to(profile[None, :], (2, n))
+    return jnp.asarray(np.array(eps))[None, :, :, None]
+
+
+class TestTwoDimensionalCollapse:
+    """A transverse axis of exactly two cells: the slab path."""
+
+    @pytest.mark.parametrize("collapsed_axis", [0, 1])
+    def test_it_returns_the_declared_shape(self, float64, collapsed_axis):
+        """It used to raise: the collapsed axis survived the slice and was expanded twice."""
+        eps = _slab_cross_section(20e-9, collapsed_axis)
+        mode_E, mode_H, neff = compute_mode(
+            frequency=FREQ,
+            inv_permittivities=1.0 / eps,
+            inv_permeabilities=1.0,
+            resolution=20e-9,
+            dtype=jnp.float64,
+        )
+        assert mode_E.shape == (3, *eps.shape[1:])
+        assert mode_H.shape == (3, *eps.shape[1:])
+        # The mode is invariant along the collapsed axis, so the two cells carry the same field.
+        first = np.take(np.asarray(mode_E), 0, axis=collapsed_axis + 1)
+        second = np.take(np.asarray(mode_E), 1, axis=collapsed_axis + 1)
+        assert np.array_equal(first, second)
+        assert complex(neff).real > N_SIO2
+
+    @pytest.mark.parametrize("collapsed_axis", [0, 1])
+    def test_te0_matches_the_analytic_slab_dispersion_relation(self, float64, collapsed_axis):
+        """J1 Slide 18 rung 1, on the collapsed path.
+
+        The finite-difference operator is second order, so a single grid is accurate to ``C h^2``
+        (2.1e-4 at 10 nm, 5.3e-5 at 5 nm on this slab): reaching 1e-6 on one grid would need a
+        sub-nanometre cell. Two grids and one Richardson step remove the ``h^2`` term, which both
+        pins the value to the analytic root and pins the convergence order - a collapse that
+        silently changed the effective spacing would break the ratio, not just the value.
+        """
+        reference = _analytic_slab_te0()
+        indices = {}
+        for cell in (20e-9, 10e-9, 5e-9):
+            eps = _slab_cross_section(cell, collapsed_axis)
+            _E, _H, neff = compute_mode(
+                frequency=FREQ,
+                inv_permittivities=1.0 / eps,
+                inv_permeabilities=1.0,
+                resolution=cell,
+                dtype=jnp.float64,
+            )
+            indices[cell] = complex(neff).real
+
+        errors = {cell: value - reference for cell, value in indices.items()}
+        # second order: the error quarters with each halving of the cell
+        assert errors[20e-9] / errors[10e-9] == pytest.approx(4.0, rel=0.05)
+        assert errors[10e-9] / errors[5e-9] == pytest.approx(4.0, rel=0.05)
+
+        richardson = (4 * indices[5e-9] - indices[10e-9]) / 3
+        assert richardson == pytest.approx(reference, abs=1e-6)
+
+
+class TestModeSolvePrecision:
+    """The mode solve is double precision whatever the simulation runs at."""
+
+    def test_the_operator_is_complex128_from_single_precision_material(self):
+        from fdtdx.core.physics.mode_backend.operator import build_derivative_matrices
+        from fdtdx.core.physics.mode_backend.solve import assemble_mode_operator
+
+        coords = np.arange(5) * 40e-9
+        der_mats = build_derivative_matrices(coords, coords)
+        single = np.full(16, 2.25, dtype=np.float32)
+        operator = assemble_mode_operator(single, single, single, single, single, single, der_mats, k0=2 * np.pi / LAM)
+        assert operator.mat.dtype == np.complex128
+        assert operator.qmat.dtype == np.complex128
+        assert operator.q_ep.dtype == np.complex128
+
+    def test_a_float32_simulation_gets_the_same_index_as_a_float64_one(self, float64):
+        """Every permittivity here is exact in float32, so only the solve's own precision differs."""
+        from fdtdx.core.physics.mode_backend import fdtdmex_mode_computation_wrapper
+
+        eps = np.asarray(_strip()[0, 0])  # values 2.25 and 12.0, both exact in float32
+        coords_x = np.arange(eps.shape[0] + 1) * 0.04
+        coords_y = np.arange(eps.shape[1] + 1) * 0.04
+
+        def solve(dtype):
+            modes = fdtdmex_mode_computation_wrapper(
+                frequency=FREQ,
+                permittivity_cross_section=eps.astype(dtype)[None],
+                coords=[coords_x, coords_y],
+                direction="+",
+                num_modes=4,
+            )
+            return complex(modes[0].neff)
+
+        assert solve(np.complex64) == solve(np.complex128)

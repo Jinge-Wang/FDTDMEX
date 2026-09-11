@@ -26,6 +26,9 @@ API
     fdtdx.compute_integrated_power
     fdtdx.compute_mode
     fdtdx.compute_mode_expansion
+    fdtdx.compute_modes
+    fdtdx.compute_modes_jax
+    fdtdx.ModeLongitudinalOffdiagWarning
     fdtdx.compute_pole_coefficients
     fdtdx.compute_pole_coefficients_per_axis
     fdtdx.compute_pole_coefficients_tensor
@@ -59,6 +62,7 @@ API
     fdtdx.FieldProjectionCartesianDetector
     fdtdx.FieldProjectionKSpaceDetector
     fdtdx.FieldState
+    fdtdx.filter_spurious_modes
     fdtdx.frozen_field
     fdtdx.frozen_private_field
     fdtdx.full_backward
@@ -70,6 +74,7 @@ API
     fdtdx.GaussianWindow
     fdtdx.GradientConfig
     fdtdx.GridCoordinateConstraint
+    fdtdx.group_index
     fdtdx.HorizontalSymmetry2D
     fdtdx.HorizontalSymmetry3D
     fdtdx.import_from_json
