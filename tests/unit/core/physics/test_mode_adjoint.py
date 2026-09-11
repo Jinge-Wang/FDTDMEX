@@ -9,6 +9,7 @@ signal at all in complex64.
 """
 
 import os
+import warnings
 
 import jax
 import jax.numpy as jnp
@@ -377,18 +378,47 @@ def test_the_isotropic_and_diagonal_tiers_give_the_same_gradient(float64):
     assert grad_isotropic == pytest.approx(grad_diagonal, rel=1e-10)
 
 
-def test_the_nine_component_tier_now_has_a_mode_gradient(float64):
-    """Track J phase 2: the tensor tier solves, and every entry of it carries a sensitivity."""
+def test_the_nine_component_tier_has_a_mode_gradient_for_every_entry(float64):
+    """The tensor tier solves, and every one of the nine entries carries a sensitivity.
+
+    Track J phase 2 shipped this for the five entries the transverse operator carries and reported
+    exactly zero for the other four. The four-component formulation carries all nine, so the
+    gradient comes off the matrix-level adjoint and every entry is a number a finite difference
+    reproduces.
+    """
     eps = _tensor_cross_section(theta_deg=25.0)
-    neff, sensitivity = mode_sensitivity(eps, _settings())
+    settings = _settings()
+    neff = mode_neff(eps, settings)
+    assert float(jnp.real(neff)) > 2.0
+
+    rng = np.random.default_rng(4)
+    for entry in range(9):
+        direction = np.zeros(eps.shape)
+        direction[entry] = rng.normal(size=eps.shape[1:])
+        step = jnp.asarray(direction)
+
+        def value(scale, step=step):
+            return mode_neff_parts(eps + scale * step, settings)[0]
+
+        gradient = float(jax.grad(value)(0.0))
+        h = 1e-3
+        finite = (float(value(h)) - float(value(-h))) / (2 * h)
+        assert gradient == pytest.approx(finite, rel=2e-5, abs=1e-9), f"entry {entry}"
+
+
+def test_the_transverse_formulation_reports_zero_for_the_entries_it_drops(float64):
+    """Asked for the cheaper operator, the sensitivity must match *that* operator."""
+    eps = _tensor_cross_section(theta_deg=25.0)
+    settings = _settings(formulation="transverse")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        neff, sensitivity = mode_sensitivity(eps, settings)
     assert sensitivity.shape == eps.shape
     assert float(jnp.real(neff)) > 2.0
     # propagation is along the first axis, so the transverse pair is (y, z): the carried
     # off-diagonal entries are yz and zy, flat indices 5 and 7.
     assert float(jnp.max(jnp.abs(sensitivity[5]))) > 0.0
     assert float(jnp.max(jnp.abs(sensitivity[7]))) > 0.0
-    # the four entries that couple a transverse axis to propagation are dropped by the solver,
-    # so the solved n_eff does not depend on them and their sensitivity is exactly zero.
     for dropped in (1, 2, 3, 6):
         assert float(jnp.max(jnp.abs(sensitivity[dropped]))) == 0.0
 

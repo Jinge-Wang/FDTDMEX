@@ -4,6 +4,8 @@ Track J phase 2. Every number in the docstrings was measured by these tests on o
 ``jax_enable_x64`` on and ``complex128`` throughout.
 """
 
+import warnings
+
 import numpy as np
 import pytest
 import scipy.sparse.linalg as spl
@@ -260,28 +262,37 @@ class TestBulkUniaxial:
         "alpha_deg, expected_error",
         [(80.0, 1.6e-3), (60.0, 9.7e-3), (45.0, 1.2e-2), (20.0, 4.9e-3), (1.0, 1.4e-5)],
     )
-    def test_an_optic_axis_tilted_out_of_the_plane_is_dropped_at_a_known_cost(self, float64, alpha_deg, expected_error):
-        """The four longitudinal entries cannot enter; this is what dropping them costs."""
+    def test_an_optic_axis_tilted_out_of_the_plane_costs_this_much_to_drop(self, float64, alpha_deg, expected_error):
+        """What the *transverse* operator loses by not carrying the four longitudinal entries.
+
+        This is the cost the four-component formulation removes; the numbers are pinned here so the
+        comparison against it stays honest.
+        """
         alpha = np.deg2rad(alpha_deg)
         tensor = _uniaxial(self.n_o, self.n_e, (np.sin(alpha), 0.0, np.cos(alpha)))
         exact = 1.0 / np.sqrt(np.cos(alpha) ** 2 / self.n_o**2 + np.sin(alpha) ** 2 / self.n_e**2)
         got = self._bulk_indices(tensor)[1]
         assert abs(got - exact) == pytest.approx(expected_error, rel=0.05)
 
-    def test_the_dropped_entries_are_named_in_a_warning(self, float64):
+    def test_the_entries_are_only_dropped_when_the_caller_asks_for_it(self, float64):
+        """The warning is now a property of ``mode_formulation="transverse"``, not of the tensor."""
         alpha = np.deg2rad(45.0)
         bulk = _uniaxial(self.n_o, self.n_e, (np.sin(alpha), 0.0, np.cos(alpha)))
         tensor = np.broadcast_to(bulk[:, :, None, None], (3, 3, 8, 8)).copy()
         inv_eps = jnp.asarray(_inverse_tensor(tensor)[:, None, :, :])
+        kwargs = dict(
+            frequency=FREQ,
+            inv_permittivities=inv_eps,
+            inv_permeabilities=1.0,
+            num_modes=1,
+            resolution=50e-9,
+            dtype=jnp.float64,
+        )
         with pytest.warns(ModeLongitudinalOffdiagWarning, match="longitudinal off-diagonal entries yz"):
-            compute_modes(
-                frequency=FREQ,
-                inv_permittivities=inv_eps,
-                inv_permeabilities=1.0,
-                num_modes=1,
-                resolution=50e-9,
-                dtype=jnp.float64,
-            )
+            compute_modes(mode_formulation="transverse", **kwargs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ModeLongitudinalOffdiagWarning)
+            compute_modes(**kwargs)
 
 
 class TestAnisotropicSlab:
@@ -554,11 +565,12 @@ class TestTensorGradients:
 
     @pytest.mark.parametrize("entry", [0, 1, 2, 3, 4, 5, 6, 7, 8])
     def test_each_tensor_entry_separately(self, float64, entry):
-        """Entries 2/5/6/7 in this layout couple a transverse axis to propagation and are dropped.
+        """Every one of the nine entries, against its own central difference.
 
-        The propagation axis is the physical second one, so the entries the solver drops are
-        ``xy, yx, yz, zy`` = flat indices 1, 3, 5, 7; the rest are carried. A dropped entry must
-        give *zero* gradient, because the solved ``n_eff`` genuinely does not depend on it.
+        The propagation axis is the physical second one, so the entries that couple a transverse
+        axis to it are ``xy, yx, yz, zy`` = flat indices 1, 3, 5, 7. Those used to be dropped and
+        used to have an exactly zero gradient; the four-component formulation carries them, and
+        their gradient is now a number the finite difference reproduces.
         """
         eps = _lithium_niobate_cross_section()
         rng = np.random.default_rng(entry + 1)
@@ -572,22 +584,70 @@ class TestTensorGradients:
         gradient = float(jax.grad(neff)(0.0))
         h = 1e-3
         finite = (float(neff(h)) - float(neff(-h))) / (2 * h)
-        if entry in (1, 3, 5, 7):
-            assert gradient == 0.0
-            assert abs(finite) < 1e-9
-        else:
-            assert gradient == pytest.approx(finite, rel=1e-5)
+        assert gradient == pytest.approx(finite, rel=1e-5)
+
+    @pytest.mark.parametrize("entry", [1, 3, 5, 7])
+    def test_the_transverse_formulation_still_reports_zero_for_a_dropped_entry(self, float64, entry):
+        """Asked to drop them, the solver must also say their sensitivity is zero.
+
+        The gradient has to be the gradient of what was solved: the transverse operator genuinely
+        does not contain these entries, so reporting the continuum value would make ``jax.grad``
+        disagree with a finite difference taken on the same path.
+        """
+        eps = _lithium_niobate_cross_section()
+        settings = ModeSolveSettings.create(frequency=FREQ, resolution=90e-9, mode_index=0, formulation="transverse")
+        rng = np.random.default_rng(entry + 1)
+        direction = np.zeros(eps.shape)
+        direction[entry] = rng.normal(size=eps.shape[1:])
+        direction_jax = jnp.asarray(direction)
+
+        def neff(step):
+            return mode_neff_parts(eps + step * direction_jax, settings)[0]
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ModeLongitudinalOffdiagWarning)
+            gradient = float(jax.grad(neff)(0.0))
+            h = 1e-3
+            finite = (float(neff(h)) - float(neff(-h))) / (2 * h)
+        assert gradient == 0.0
+        assert abs(finite) < 1e-9
 
     def test_the_field_level_and_matrix_level_sensitivities_agree(self, float64):
         """Two independently written adjoints for the same quantity: the reciprocity integral over
-        the mode fields, and the contraction over the operator's nonzeros."""
+        the mode fields, and the contraction over the operator's nonzeros.
+
+        The reciprocity integral's partner field is the mode with its propagation component negated,
+        which is the backward mode only when the cross-section has a mirror plane — so the
+        comparison is run on the transverse formulation, which is the one that has it.
+        """
         eps = _lithium_niobate_cross_section(nx=16, ny=14)
-        settings = ModeSolveSettings.create(frequency=FREQ, resolution=90e-9, mode_index=0)
-        _, field_level = mode_sensitivity(eps, settings)
-        rng = np.random.default_rng(5)
-        direction = jnp.asarray(rng.normal(size=eps.shape))
-        matrix_level = float(jax.grad(lambda s: mode_neff_parts(eps + s * direction, settings)[0])(0.0))
+        settings = ModeSolveSettings.create(frequency=FREQ, resolution=90e-9, mode_index=0, formulation="transverse")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ModeLongitudinalOffdiagWarning)
+            _, field_level = mode_sensitivity(eps, settings)
+            rng = np.random.default_rng(5)
+            direction = jnp.asarray(rng.normal(size=eps.shape))
+            matrix_level = float(jax.grad(lambda s: mode_neff_parts(eps + s * direction, settings)[0])(0.0))
         assert float(jnp.sum(jnp.real(field_level) * direction)) == pytest.approx(matrix_level, rel=1e-6)
+
+    def test_the_field_level_sensitivity_is_refused_when_the_entries_are_carried(self, float64):
+        """It would be wrong rather than coarse, so it raises instead of returning a number.
+
+        The lithium-niobate fixture propagates along the physical second axis, so its ``eps_xz``
+        entry is *transverse* in the solver frame and it takes the transverse operator; adding a
+        ``yz`` entry is what makes it longitudinal and moves the solve onto the four-component
+        operator, where the reciprocity integral's partner field is no longer the backward mode.
+        """
+        settings = ModeSolveSettings.create(frequency=FREQ, resolution=90e-9, mode_index=0)
+        transverse_only = _lithium_niobate_cross_section(nx=16, ny=14)
+        mode_sensitivity(transverse_only, settings)  # no longitudinal entry: not refused
+
+        carried = np.array(transverse_only)
+        core = np.abs(carried[0]) > np.min(np.abs(carried[0])) + 1e-9
+        carried[5] = np.where(core, 2.0e-04, 0.0)  # eps_yz
+        carried[7] = carried[5]  # eps_zy
+        with pytest.raises(ValueError, match="mirror plane"):
+            mode_sensitivity(jnp.asarray(carried), settings)
 
     def test_the_stressed_silica_cross_section_differentiates(self, float64):
         stressed = TestStressedSilica()

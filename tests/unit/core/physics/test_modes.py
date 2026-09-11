@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from fdtdx.core.physics.mode_backend import ModeLongitudinalOffdiagWarning
 from fdtdx.core.physics.modes import (
     ModeTupleType,
     compute_mode,
@@ -672,7 +673,7 @@ class TestBackwardModePhaseConvention:
             return jnp.asarray(eps_full)
         return jnp.asarray(1.0 / eps)
 
-    def _compute_both_directions(self, inv_eps):
+    def _compute_both_directions(self, inv_eps, mode_formulation="auto"):
         results = {}
         for direction in ["+", "-"]:
             E, H, neff = compute_mode(
@@ -682,6 +683,7 @@ class TestBackwardModePhaseConvention:
                 resolution=self.resolution,
                 direction=direction,
                 mode_index=0,
+                mode_formulation=mode_formulation,
             )
             results[direction] = (np.asarray(E), np.asarray(H), complex(neff))
         return results
@@ -725,15 +727,41 @@ class TestBackwardModePhaseConvention:
         results = self._compute_both_directions(self._strip_waveguide_inv_eps(3))
         self._assert_backward_is_reciprocity_transform(results)
 
-    def test_backward_mode_symmetric_tensorial(self):
-        """Symmetric tensorial eps (9 components, reciprocal): tensorial solver path."""
-        try:
-            results = self._compute_both_directions(self._strip_waveguide_inv_eps(9))
-        except Exception as e:  # tidy3d raises inside a jax.pure_callback (JaxRuntimeError)
-            if "tensorial mode solver" in str(e):
-                pytest.skip("tensorial mode solver requires tidy3d-extras")
-            raise
+    def test_backward_mode_symmetric_tensorial_with_the_entries_dropped(self):
+        """Symmetric tensorial eps, transverse formulation: the mirror transform still holds.
+
+        Propagation is along the physical first axis, so this fixture's physical ``eps_xy = 0.3``
+        is a *longitudinal* entry in the solver frame. Asking for the transverse formulation drops
+        it, and the cross-section the solver then sees does have a mirror plane, which is what makes
+        the reciprocity transform the right relation.
+        """
+        with pytest.warns(ModeLongitudinalOffdiagWarning):
+            results = self._compute_both_directions(self._strip_waveguide_inv_eps(9), mode_formulation="transverse")
         self._assert_backward_is_reciprocity_transform(results)
+
+    def test_backward_mode_symmetric_tensorial_is_a_separate_solve(self):
+        """With the longitudinal entries carried, "-" is solved, not reflected.
+
+        Reciprocity still fixes ``n_eff``: a symmetric permittivity has ``beta_backward =
+        -beta_forward`` whatever its structure. What it does not fix is the field relation — the
+        medium has no mirror plane at the cross-section, so the backward mode is not the forward one
+        with its longitudinal E and transverse H negated, and the solver returns the mode it
+        actually solved for.
+        """
+        results = self._compute_both_directions(self._strip_waveguide_inv_eps(9))
+        Ep, _, neff_p = results["+"]
+        Em, Hm, neff_m = results["-"]
+        assert neff_m == pytest.approx(neff_p, rel=1e-6)
+
+        mirrored = Ep.copy()
+        mirrored[0] *= -1
+        scale = np.abs(Ep).max()
+        assert np.abs(Em - mirrored).max() > 1e-2 * scale
+
+        # the flux still points backwards, and the mode is still lossless
+        flux = 0.5 * np.real(np.cross(np.conj(Em), Hm, axisa=0, axisb=0, axisc=0)[0]).sum()
+        assert flux == pytest.approx(-1.0, abs=1e-3)
+        assert abs(neff_m.imag) < 1e-9
 
     def test_backward_mode_non_reciprocal_raises(self):
         """Asymmetric (non-reciprocal) eps tensor: '-' is not supported and must raise."""

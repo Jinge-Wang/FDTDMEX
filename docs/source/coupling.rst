@@ -435,15 +435,91 @@ solve.
     loss_index = jax.grad(lambda eps: mode_neff_parts(eps, settings)[1])(permittivity)
 
 Scope: one, three or nine components, complex entries allowed (a metal cell has a negative real
-part, which the material table cannot express but the array can). The native backend carries the two
-transverse off-diagonal entries of a permittivity tensor exactly, so the nine-component tier has a
-gradient for every entry, the reciprocity formula above generalising to the bilinear form
-``0.5 s_a E_a E_b w / flux``. The four entries that couple a transverse axis to the propagation axis
-cannot enter an eigenproblem linear in ``n_eff**2`` at all - the medium then has no mirror plane at
-the cross-section and its dispersion relation gains odd powers of the propagation constant - so the
-solver drops them with a ``ModeLongitudinalOffdiagWarning`` naming the entry and its magnitude, and
-their sensitivity is reported as exactly zero, which is what the solved ``n_eff`` actually depends
-on. The permeability is held constant.
+part, which the material table cannot express but the array can). The native backend carries the
+whole permittivity tensor; which operator it uses is the subject of the next section, and it is what
+decides where this gradient comes from. On the transverse operator the reciprocity formula above
+generalises to the bilinear form ``0.5 s_a E_a E_b w / flux`` and gives every entry of the transverse
+block, with the four longitudinal entries reported as exactly zero because that operator genuinely
+does not contain them. On the four-component operator the gradient instead comes off the JAX-native
+pipeline, where ``jax.grad`` contracts the *discrete* operator against a solved left eigenvector;
+that is exact for every one of the nine entries, and it is why ``mode_sensitivity`` - which is the
+field-level integral and nothing else - refuses a cross-section that carries them. The permeability
+is held constant.
+
+Two mode operators
+==================
+
+The mode solver assembles one of two operators, and ``mode_formulation`` (an argument of
+``compute_mode``, ``compute_modes`` and ``ModeSolveSettings``) selects between them:
+
+.. list-table::
+   :header-rows: 1
+
+   * - 
+     - transverse-E
+     - four-component
+   * - eigenvector
+     - ``[Ex; Ey]``
+     - ``[Ex; Ey; hx; hy]``
+   * - eigenvalue
+     - ``-(n_eff)**2``
+     - ``n_eff``, linear
+   * - size
+     - ``2N``
+     - ``4N``
+   * - ``eps_xy``, ``eps_yx``
+     - exact
+     - exact
+   * - ``eps_xz``, ``eps_zx``, ``eps_yz``, ``eps_zy``
+     - impossible
+     - exact
+
+An eigenvalue that is a function of ``n_eff**2`` alone can only describe a medium with a mirror
+symmetry about the cross-section plane. Without one the bulk dispersion relation gains odd powers of
+the propagation constant - for a uniaxial crystal whose optic axis is tilted in the propagation
+plane it reads ``eps_zz n^2 + 2 eps_xz n s + eps_xx s^2 = n_o^2 n_e^2`` - and the term linear in
+``n`` has nowhere to go. The four-component formulation has that room: eliminating ``E_z`` and
+``h_z`` from Maxwell's curl equations leaves an eigenproblem in the four transverse components whose
+eigenvalue is the effective index itself.
+
+``mode_formulation="auto"``, the default, takes the four-component operator exactly when the
+cross-section has a non-zero longitudinal off-diagonal entry, and the transverse one otherwise, on
+the code path it always took. Setting the four entries to zero makes the four-component operator
+block anti-diagonal and its square the transverse one entry for entry, so the two agree to
+round-off - measured at 4e-15 in ``n_eff`` and 9e-15 in the fields across the mode-solver test
+fixtures. ``"transverse"`` forces the cheaper operator on a cross-section that does carry them and
+reports the drop with a ``ModeLongitudinalOffdiagWarning`` naming each entry and its magnitude;
+``"full"`` forces the larger one.
+
+What the larger operator costs, on an Apple M4 Pro, one CPU, ``complex128``, four modes:
+
+.. list-table::
+   :header-rows: 1
+
+   * - cross-section
+     - transverse solve
+     - four-component solve
+   * - 40 x 30
+     - 0.054 s
+     - 0.183 s
+   * - 400 x 300
+     - 15.9 s
+     - 74.0 s
+
+So the transverse operator stays the right default for every cross-section without a longitudinal
+entry, which is most of them: a medium whose principal axes lie in the cross-section plane or along
+the propagation axis has none.
+
+Two more things change on the four-component path. ``direction="-"`` **solves** the backward
+spectrum rather than reflecting the forward one, because a medium without the mirror plane has
+forward and backward modes that are not mirror images; the effective indices still match, as
+reciprocity requires for a symmetric permittivity, but the fields are a different solution. And the
+two longitudinal entries of the right column of the tensor are sampled on the node together with
+``eps_zz``, inside the average that carries the product out to the transverse field locations.
+Sampling them at the transverse location instead is equally plausible term by term and breaks
+discrete reciprocity: it puts an imaginary part on the effective index of a *lossless* reciprocal
+cross-section that falls only as the first power of the cell size (7.6e-4 at 100 nm, 1.5e-4 at
+12.5 nm), where this order keeps it at 2e-16 on every grid.
 
 The returned mode **fields** are differentiable too. ``mode_solve`` routes through the JAX-native
 pipeline, where the tensor inversion, the axis rotation, the two-dimensional collapse, the field

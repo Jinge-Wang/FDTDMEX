@@ -38,9 +38,14 @@ import numpy as np
 from fdtdx.constants import c, eta0
 from fdtdx.core.jax.utils import is_jax_tracer
 from fdtdx.core.physics.metrics import normalize_by_poynting_flux
-from fdtdx.core.physics.mode_backend import TOL_TENSORIAL, ModeLongitudinalOffdiagWarning
+from fdtdx.core.physics.mode_backend import FORMULATIONS, TOL_TENSORIAL, ModeLongitudinalOffdiagWarning
+from fdtdx.core.physics.mode_backend.jax_full_tensor import solve_modes_full_tensor_jax
 from fdtdx.core.physics.mode_backend.jax_solve import solve_modes_diagonal_jax
-from fdtdx.core.physics.mode_backend.operator import build_derivative_matrices, primal_dual_steps
+from fdtdx.core.physics.mode_backend.operator import (
+    build_average_matrices,
+    build_derivative_matrices,
+    primal_dual_steps,
+)
 
 __all__ = ["compute_modes_jax"]
 
@@ -76,8 +81,15 @@ def _required(components: dict[str, jax.Array | None], key: str, what: str) -> j
 
 
 def _components(rotated: jax.Array, nx: int, ny: int, what: str) -> dict[str, jax.Array | None]:
-    """Flatten a rotated cross-section into the five components the operator consumes."""
+    """Flatten a rotated cross-section into the components the operator consumes.
+
+    The four longitudinal entries come back under their own keys when the cross-section has any of
+    them, and are absent otherwise, so the tier gate is a membership test rather than a tolerance.
+    A traced cross-section cannot be inspected, so on the differentiable path the tier follows the
+    *layout*: a nine-component array is assumed to carry them.
+    """
     ncomp = rotated.shape[0]
+    longitudinal: dict[str, jax.Array] = {}
     if ncomp == 1:
         diagonal = (rotated[0], rotated[0], rotated[0])
         off: tuple[jax.Array, jax.Array] | None = None
@@ -87,39 +99,33 @@ def _components(rotated: jax.Array, nx: int, ny: int, what: str) -> dict[str, ja
     elif ncomp == 9:
         diagonal = (rotated[0], rotated[4], rotated[8])
         off = (rotated[1], rotated[3])
+        present = True
         if not is_jax_tracer(rotated):
             concrete = np.asarray(rotated)
-            reported = {
-                name: float(np.max(np.abs(concrete[flat])))
-                for flat, name in _LONGITUDINAL.items()
-                if float(np.max(np.abs(concrete[flat]))) > TOL_TENSORIAL
-            }
-            if reported:
-                listing = ", ".join(f"{k} (largest |entry| {v:.4g})" for k, v in sorted(reported.items()))
-                warnings.warn(
-                    f"the {what} cross-section carries the longitudinal off-diagonal entries "
-                    f"{listing}, above TOL_TENSORIAL={TOL_TENSORIAL:g}; they are dropped. See "
-                    "fdtdx.core.physics.mode_backend for why an eigenproblem linear in n_eff**2 "
-                    "cannot represent them.",
-                    ModeLongitudinalOffdiagWarning,
-                    stacklevel=3,
-                )
+            present = any(bool(np.any(concrete[flat] != 0.0)) for flat in _LONGITUDINAL)
+        if present:
+            longitudinal = {name: rotated[flat] for flat, name in _LONGITUDINAL.items()}
     else:
         raise ValueError(f"{what} component axis must be 1, 3 or 9 long, got {ncomp}")
 
     def flat(component: jax.Array) -> jax.Array:
         return jnp.asarray(component, dtype=jnp.complex128).reshape(nx * ny)
 
-    return {
+    out: dict[str, jax.Array | None] = {
         "xx": flat(diagonal[0]),
         "yy": flat(diagonal[1]),
         "zz": flat(diagonal[2]),
         "xy": None if off is None else flat(off[0]),
         "yx": None if off is None else flat(off[1]),
     }
+    out.update({name: flat(value) for name, value in longitudinal.items()})
+    return out
 
 
-def _shift_invert_guess(components: dict[str, jax.Array | None]) -> jax.Array:
+def _shift_invert_guess(
+    components: dict[str, jax.Array | None],
+    permeability: dict[str, jax.Array | None] | None = None,
+) -> jax.Array:
     """Largest index the cross-section can support, from the transverse block and ``eps_zz``.
 
     Traced, not concrete: the shift reaches the eigen-solve as a runtime scalar, so this works
@@ -128,21 +134,41 @@ def _shift_invert_guess(components: dict[str, jax.Array | None]) -> jax.Array:
     diagonal entry - a rotated uniaxial tensor hides its extraordinary index in the off-diagonal.
 
     Args:
-        components (dict[str, jax.Array | None]): The five flattened permittivity components.
+        components (dict[str, jax.Array | None]): The flattened permittivity components.
+        permeability (dict[str, jax.Array | None] | None): The flattened permeability components;
+            ``None`` means unity. A magnetically anisotropic cross-section moves the bound by up to
+            ``max(mu_xx, mu_yy)``, and this solver supports one (only an off-diagonal permeability
+            is refused).
 
     Returns:
-        jax.Array: A real scalar just above the largest supportable index.
+        jax.Array: A real scalar just above the largest supportable index. The bound is the largest
+        eigenvalue of ``diag(mu_yy, mu_xx) S``, with ``S`` the Schur complement
+        ``eps_tt - eps_tz eps_zz^-1 eps_zt`` — what a plane wave along the mode axis sees.
     """
     xx = jnp.asarray(components["xx"])
     yy = jnp.asarray(components["yy"])
     zz = jnp.asarray(components["zz"])
-    largest = jnp.max(jnp.real(jnp.stack((xx, yy, zz))))
-    off_xy, off_yx = components["xy"], components["yx"]
-    if off_xy is not None and off_yx is not None:
-        half_trace = 0.5 * (xx + yy)
-        radicand = 0.25 * (xx - yy) ** 2 + jnp.asarray(off_xy) * jnp.asarray(off_yx)
-        transverse = jnp.max(jnp.real(half_trace + jnp.sqrt(radicand)))
-        largest = jnp.maximum(largest, transverse)
+    zero = jnp.zeros_like(xx)
+    xy = zero if components.get("xy") is None else jnp.asarray(components["xy"])
+    yx = zero if components.get("yx") is None else jnp.asarray(components["yx"])
+    if "xz" in components:
+        xz, yz = jnp.asarray(components["xz"]), jnp.asarray(components["yz"])
+        zx, zy = jnp.asarray(components["zx"]), jnp.asarray(components["zy"])
+        s11, s12 = xx - xz * zx / zz, xy - xz * zy / zz
+        s21, s22 = yx - yz * zx / zz, yy - yz * zy / zz
+    else:
+        s11, s12, s21, s22 = xx, xy, yx, yy
+    ones = jnp.ones_like(xx)
+    row_x = ones if permeability is None else jnp.asarray(permeability["yy"])
+    row_y = ones if permeability is None else jnp.asarray(permeability["xx"])
+    m11, m12 = row_x * s11, row_x * s12
+    m21, m22 = row_y * s21, row_y * s22
+    half_trace = 0.5 * (m11 + m22)
+    radicand = 0.25 * (m11 - m22) ** 2 + m12 * m21
+    largest = jnp.maximum(
+        jnp.max(jnp.real(half_trace + jnp.sqrt(radicand))),
+        jnp.max(jnp.real(jnp.maximum(jnp.real(row_x), jnp.real(row_y)) * zz)),
+    )
     return jnp.sqrt(largest) * (1.0 + 1e-6) + 1e-6
 
 
@@ -156,6 +182,7 @@ def compute_modes_jax(
     direction: Literal["+", "-"] = "+",
     target_neff: float | None = None,
     symmetry: tuple[int, int] = (0, 0),
+    formulation: Literal["auto", "transverse", "full"] = "auto",
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Solve a cross-section's modes with the gradient connected to the fields.
 
@@ -180,6 +207,12 @@ def compute_modes_jax(
             permittivity is traced.
         symmetry (tuple[int, int]): Per-transverse-axis min-edge wall, 0 = electric, 1 = magnetic.
             Magnetic walls are refused: the mode adjoint's left eigenvector is a PEC statement.
+        formulation (str): ``"auto"`` takes the four-component operator exactly when the
+            cross-section carries a longitudinal off-diagonal entry, ``"transverse"`` forces the
+            ``2N`` operator and drops those entries, ``"full"`` forces the ``4N`` one. A *traced*
+            nine-component cross-section cannot be inspected, so ``"auto"`` takes the full path
+            for it; pass ``"transverse"`` to keep the cheaper operator for a tensor that is known
+            to have no longitudinal entry.
 
     Returns:
         tuple[jax.Array, jax.Array, jax.Array]: ``(E, H, n_eff)``.
@@ -251,25 +284,60 @@ def compute_modes_jax(
 
     der_mats = build_derivative_matrices(coords_m[0], coords_m[1])
     cell_steps = (primal_dual_steps(coords_m[0]), primal_dual_steps(coords_m[1]))
-    guess = jnp.asarray(float(target_neff)) if target_neff is not None else _shift_invert_guess(eps)
+    guess = jnp.asarray(float(target_neff)) if target_neff is not None else _shift_invert_guess(eps, mu)
     k0 = 2.0 * np.pi * float(frequency) / c
 
-    field_e, field_h, neff, keff = solve_modes_diagonal_jax(
-        _required(eps, "xx", "permittivity"),
-        _required(eps, "yy", "permittivity"),
-        _required(eps, "zz", "permittivity"),
-        _required(mu, "xx", "permeability"),
-        _required(mu, "yy", "permeability"),
-        _required(mu, "zz", "permeability"),
-        der_mats,
-        cell_steps,
-        k0=k0,
-        num_modes=max(2 * num_modes + 10, num_modes),
-        neff_guess=guess,
-        direction=direction,
-        eps_xy=eps["xy"],
-        eps_yx=eps["yx"],
-    )
+    if formulation not in FORMULATIONS:
+        raise ValueError(f"formulation must be one of {FORMULATIONS}, got {formulation!r}")
+    full_tensor = formulation == "full" or (formulation == "auto" and "xz" in eps)
+    if not full_tensor and "xz" in eps:
+        reported = {
+            name: float(np.max(np.abs(np.asarray(eps[name]))))
+            for name in ("xz", "yz", "zx", "zy")
+            if not is_jax_tracer(eps[name]) and float(np.max(np.abs(np.asarray(eps[name])))) > TOL_TENSORIAL
+        }
+        if reported:
+            listing = ", ".join(f"{k} (largest |entry| {v:.4g})" for k, v in sorted(reported.items()))
+            warnings.warn(
+                f"the permittivity cross-section carries the longitudinal off-diagonal entries "
+                f"{listing}, above TOL_TENSORIAL={TOL_TENSORIAL:g}, and formulation='transverse' "
+                "was asked for; they are dropped. See fdtdx.core.physics.mode_backend for the two "
+                "formulations.",
+                ModeLongitudinalOffdiagWarning,
+                stacklevel=2,
+            )
+    num_solver_modes = max(2 * num_modes + 10, num_modes)
+    if full_tensor:
+        avg_mats = build_average_matrices(coords_m[0], coords_m[1])
+        field_e, field_h, neff, keff = solve_modes_full_tensor_jax(
+            {name: value for name, value in eps.items() if value is not None},
+            _required(mu, "xx", "permeability"),
+            _required(mu, "yy", "permeability"),
+            _required(mu, "zz", "permeability"),
+            der_mats,
+            avg_mats,
+            k0=k0,
+            num_modes=num_solver_modes,
+            neff_guess=guess,
+            direction=direction,
+        )
+    else:
+        field_e, field_h, neff, keff = solve_modes_diagonal_jax(
+            _required(eps, "xx", "permittivity"),
+            _required(eps, "yy", "permittivity"),
+            _required(eps, "zz", "permittivity"),
+            _required(mu, "xx", "permeability"),
+            _required(mu, "yy", "permeability"),
+            _required(mu, "zz", "permeability"),
+            der_mats,
+            cell_steps,
+            k0=k0,
+            num_modes=num_solver_modes,
+            neff_guess=guess,
+            direction=direction,
+            eps_xy=eps["xy"],
+            eps_yx=eps["yx"],
+        )
     n_complex = neff + 1j * keff
     if target_neff is not None:
         order = jnp.argsort(jnp.abs(jnp.real(n_complex) - float(target_neff)))

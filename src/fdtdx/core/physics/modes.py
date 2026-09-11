@@ -222,17 +222,20 @@ def _resolve_mode_backend(mode_backend: Literal["fdtdmex", "tidy3d"] | None) -> 
 def _dispatch_mode_solver(mode_backend: str, **kwargs) -> List[ModeTupleType]:
     """Call the selected mode backend, auto-routing fdtdmex's deferred cases to Tidy3D if present.
 
-    The fdtdmex backend raises :class:`NotImplementedError` for fully tensorial media and bends. When
-    that happens we transparently fall back to the Tidy3D solver if it is installed; otherwise the
-    original error is re-raised so the user gets an actionable message.
+    The fdtdmex backend raises :class:`NotImplementedError` for a tensorial permeability and for
+    bends. When that happens we transparently fall back to the Tidy3D solver if it is installed;
+    otherwise the original error is re-raised so the user gets an actionable message. The
+    ``formulation`` argument is fdtdmex's alone and is dropped on the Tidy3D route, which is fully
+    tensorial by construction.
     """
+    formulation = kwargs.pop("formulation", "auto")
     if mode_backend == "tidy3d":
         return tidy3d_mode_computation_wrapper(**kwargs)
 
     from fdtdx.core.physics.mode_backend import fdtdmex_mode_computation_wrapper
 
     try:
-        return fdtdmex_mode_computation_wrapper(**kwargs)
+        return fdtdmex_mode_computation_wrapper(formulation=formulation, **kwargs)
     except NotImplementedError:
         try:
             import tidy3d  # noqa: F401
@@ -298,6 +301,7 @@ def _mode_arrays(
     mode_backend: Literal["fdtdmex", "tidy3d"] | None,
     target_neff: float | None,
     drop_spurious: bool = False,
+    mode_formulation: Literal["auto", "transverse", "full"] = "auto",
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
     """Solve one cross-section and return the modes at the positions listed in ``selected``.
 
@@ -323,6 +327,8 @@ def _mode_arrays(
         mode_backend (Literal["fdtdmex", "tidy3d"] | None): Mode-solver backend.
         target_neff (float | None): Shift-invert target and, when given, the sort key.
         drop_spurious (bool): Remove non-physical modes from the sorted list before indexing.
+        mode_formulation (Literal["auto", "transverse", "full"]): Which native mode operator to
+            assemble; see :func:`compute_mode`.
 
     Returns:
         tuple[jax.Array, jax.Array, jax.Array]: ``(E, H, n_eff)`` with shapes ``(M, 3, nx, ny, nz)``,
@@ -412,6 +418,7 @@ def _mode_arrays(
             bend_axis=tidy3d_bend_axis,
             plane_center=plane_center,
             symmetry=symmetry,
+            formulation=mode_formulation,
         )
 
         # sort modes by polarization
@@ -637,6 +644,7 @@ def compute_mode(
     mode_backend: Literal["fdtdmex", "tidy3d"] | None = None,
     target_neff: float | None = None,
     drop_spurious: bool = False,
+    mode_formulation: Literal["auto", "transverse", "full"] = "auto",
 ) -> tuple[
     jax.Array,  # E
     jax.Array,  # H
@@ -692,6 +700,13 @@ def compute_mode(
             the sorted list before ``mode_index`` selects from it, reporting each one it drops.
             See :func:`filter_spurious_modes`. Off by default because dropping a mode renumbers
             the list every caller indexes into. Defaults to False.
+        mode_formulation (Literal["auto", "transverse", "full"], optional): Which mode operator the
+            native backend assembles. ``"auto"`` takes the four-component (``4N``) one exactly when
+            the cross-section carries a non-zero longitudinal off-diagonal permittivity entry
+            (``eps_xz`` / ``eps_zx`` / ``eps_yz`` / ``eps_zy``) and the transverse-E (``2N``) one
+            otherwise. ``"transverse"`` forces the cheaper operator and drops those entries with a
+            warning; ``"full"`` forces the larger one. Ignored by the Tidy3D backend. Defaults to
+            ``"auto"``.
 
     Returns:
         Tuple[jax.Array, jax.Array, jax.Array]:
@@ -714,6 +729,7 @@ def compute_mode(
         mode_backend=mode_backend,
         target_neff=target_neff,
         drop_spurious=drop_spurious,
+        mode_formulation=mode_formulation,
     )
     return mode_E[0], mode_H[0], eff_idx[0]
 
@@ -734,6 +750,7 @@ def compute_modes(
     mode_backend: Literal["fdtdmex", "tidy3d"] | None = None,
     target_neff: float | None = None,
     drop_spurious: bool = False,
+    mode_formulation: Literal["auto", "transverse", "full"] = "auto",
 ) -> tuple[
     jax.Array,  # E, shape (num_modes, 3, nx, ny, nz)
     jax.Array,  # H, same shape
@@ -768,6 +785,8 @@ def compute_modes(
             Defaults to None.
         drop_spurious (bool, optional): Remove non-physical modes before slicing the list; see
             :func:`compute_mode`. Defaults to False.
+        mode_formulation (Literal["auto", "transverse", "full"], optional): Which native mode
+            operator to assemble; see :func:`compute_mode`. Defaults to ``"auto"``.
 
     Returns:
         tuple[jax.Array, jax.Array, jax.Array]: ``(E, H, n_eff)`` with a leading axis of length
@@ -811,6 +830,7 @@ def compute_modes(
         mode_backend=mode_backend,
         target_neff=target_neff,
         drop_spurious=drop_spurious,
+        mode_formulation=mode_formulation,
     )
 
 

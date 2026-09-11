@@ -6,29 +6,35 @@ A drop-in replacement for the Tidy3D mode-solver call used in
 convention, pre-eta0 scaling) so the surrounding ``compute_mode`` post-processing — axis rotation,
 eta0-scaling, Poynting normalisation — is unchanged.
 
-Scope (stages 1-2): straight waveguide; uniform and rectilinear transverse grids; permittivity
-tensors carrying the two transverse off-diagonal entries ``eps_xy`` / ``eps_yx`` in addition to the
-diagonal; diagonal permeability. Bends are deferred, and so are the four entries that couple a
-transverse axis to the propagation axis (see below).
+Scope: straight waveguide; uniform and rectilinear transverse grids; the **whole** permittivity
+tensor, all nine entries; diagonal permeability. Bends are deferred.
 
-Which off-diagonal entries the solver can carry, and why
+The two formulations, and which one a cross-section gets
 --------------------------------------------------------
 
-The transverse-E formulation is an eigenproblem *linear in* ``n_eff**2``. That is possible only when
-the medium has a mirror symmetry about the cross-section plane, i.e. when
+The **transverse-E** formulation (:mod:`fdtdx.core.physics.mode_backend.solve`) has eigenvector
+``[Ex; Ey]`` and eigenvalue ``-(n_eff)**2``. An eigenvalue that is a function of ``n_eff**2`` alone
+can only describe a medium with a mirror symmetry about the cross-section plane, i.e. one with
 
 .. code-block:: text
 
-    eps_xz = eps_zx = eps_yz = eps_zy = 0.
+    eps_xz = eps_zx = eps_yz = eps_zy = 0,
 
-With those entries present the bulk dispersion relation picks up odd powers of the propagation
-constant (forward and backward modes stop being mirror images), so no operator whose eigenvalue is
-``-(n_eff)**2`` can represent them; an exact treatment needs the four-field ``[Ex, Ey, hx, hy]``
-formulation, whose eigenvalue is ``n_eff`` itself and whose operator is twice as large. The backend
-therefore **warns** (:class:`ModeLongitudinalOffdiagWarning`), naming the entry and its magnitude,
-and solves the cross-section with those four entries dropped. ``eps_xy`` and ``eps_yx`` are carried
-exactly. :data:`TOL_TENSORIAL` is the magnitude above which the warning fires; below it the entries
-are dropped silently.
+because otherwise the bulk dispersion relation gains odd powers of the propagation constant and
+forward and backward modes stop being mirror images. It carries ``eps_xy`` and ``eps_yx`` exactly.
+
+The **four-component** formulation (:mod:`fdtdx.core.physics.mode_backend.full_tensor`) has
+eigenvector ``[Ex; Ey; hx; hy]`` and eigenvalue ``n_eff`` itself, linear, so the four longitudinal
+entries enter exactly. Its operator is ``4N x 4N`` instead of ``2N x 2N``. With those four entries
+zero it is block anti-diagonal and its square is the transverse operator entry for entry
+(``mat_transverse = -A B``), so the two agree to round-off.
+
+A cross-section with any non-zero longitudinal entry takes the four-component path automatically;
+everything else takes the transverse one, on exactly the code path it took before. ``formulation``
+overrides the choice: ``"transverse"`` asks for the old behaviour deliberately and then drops the
+four entries with a :class:`ModeLongitudinalOffdiagWarning` naming each one and its magnitude,
+which is worth doing when the entries are known to be negligible and the ``4N`` operator is not
+worth its cost. :data:`TOL_TENSORIAL` is the magnitude above which that warning fires.
 """
 
 from __future__ import annotations
@@ -39,7 +45,8 @@ from typing import TYPE_CHECKING, List, Literal, NamedTuple, Sequence
 import numpy as np
 
 from fdtdx.constants import c
-from fdtdx.core.physics.mode_backend.operator import build_derivative_matrices
+from fdtdx.core.physics.mode_backend.full_tensor import solve_modes_full_tensor
+from fdtdx.core.physics.mode_backend.operator import build_average_matrices, build_derivative_matrices
 from fdtdx.core.physics.mode_backend.solve import solve_modes_diagonal
 
 if TYPE_CHECKING:
@@ -57,12 +64,17 @@ _ENTRY_NAMES = ("xx", "xy", "xz", "yx", "yy", "yz", "zx", "zy", "zz")
 #: Flat indices of the four entries that couple a transverse axis to the propagation axis.
 _LONGITUDINAL_OFFDIAG = (2, 5, 6, 7)  # xz, yz, zx, zy
 
+#: Allowed values of the ``formulation`` argument.
+FORMULATIONS = ("auto", "transverse", "full")
+
 
 class ModeLongitudinalOffdiagWarning(UserWarning):
-    """A cross-section carries ``eps_xz`` / ``eps_zx`` / ``eps_yz`` / ``eps_zy``, which are dropped.
+    """``eps_xz`` / ``eps_zx`` / ``eps_yz`` / ``eps_zy`` are present and are being dropped.
 
-    Those four entries cannot enter an eigenproblem that is linear in ``n_eff**2`` (see the module
-    docstring). The solve continues on the remaining five components, which are exact.
+    Since the four-component formulation landed this fires only when the caller asked for
+    ``formulation="transverse"`` on a cross-section that carries those entries. They cannot enter an
+    eigenproblem linear in ``n_eff**2`` (see the module docstring); the solve continues on the
+    remaining five components, which are exact.
     """
 
 
@@ -75,7 +87,10 @@ class TensorComponents(NamedTuple):
         zz: Flattened ``eps_zz``.
         xy: Flattened ``eps_xy``, or ``None`` when the medium has no transverse off-diagonal.
         yx: Flattened ``eps_yx``, or ``None``.
-        dropped: ``{entry name: largest magnitude}`` for the longitudinal entries that were dropped.
+        longitudinal: ``{entry name: flattened entry}`` for ``xz`` / ``yz`` / ``zx`` / ``zy``, empty
+            when all four are identically zero.
+        magnitudes: ``{entry name: largest magnitude}`` for the longitudinal entries above
+            :data:`TOL_TENSORIAL`; what the warning names when they are dropped.
     """
 
     xx: np.ndarray
@@ -83,7 +98,21 @@ class TensorComponents(NamedTuple):
     zz: np.ndarray
     xy: np.ndarray | None
     yx: np.ndarray | None
-    dropped: dict[str, float]
+    longitudinal: dict[str, np.ndarray]
+    magnitudes: dict[str, float]
+
+    def as_dict(self) -> dict[str, np.ndarray]:
+        """The nine components keyed by entry name, with absent ones left out.
+
+        Returns:
+            dict[str, np.ndarray]: What
+            :func:`fdtdx.core.physics.mode_backend.full_tensor.solve_modes_full_tensor` consumes.
+        """
+        out = {"xx": self.xx, "yy": self.yy, "zz": self.zz}
+        if self.xy is not None and self.yx is not None:
+            out["xy"], out["yx"] = self.xy, self.yx
+        out.update(self.longitudinal)
+        return out
 
 
 def _tensor_components(cross_section, nx: int, ny: int, what: str = "permittivity") -> TensorComponents:
@@ -95,23 +124,28 @@ def _tensor_components(cross_section, nx: int, ny: int, what: str = "permittivit
     JAX configuration ``jnp.asarray`` of a ``complex128`` cross-section silently returns
     ``complex64``, which would round the material before the operator is assembled.
 
+    Nothing is dropped and nothing is warned about here: the caller decides the formulation and
+    :func:`drop_longitudinal` is what reports a deliberate drop.
+
     Args:
         cross_section: Rotated cross-section, shape ``(1 | 3 | 9, Nx, Ny)``.
         nx (int): First transverse cell count.
         ny (int): Second transverse cell count.
-        what (str): Name of the material, used in the warning message.
+        what (str): Name of the material, unused here and kept for the caller's message.
 
     Returns:
-        TensorComponents: The flattened components, with ``xy`` / ``yx`` set to ``None`` when the
-        cross-section has no transverse off-diagonal entry at all (so the assembly takes the
-        diagonal path entry for entry rather than by cancellation).
+        TensorComponents: The flattened components. ``xy`` / ``yx`` are ``None`` and
+        ``longitudinal`` is empty when the cross-section has no such entry at all, so the assembly
+        takes the narrower path entry for entry rather than by cancellation.
 
     Raises:
         ValueError: If the component axis is not 1, 3 or 9 long.
     """
+    del what
     arr = np.asarray(cross_section).astype(np.complex128)
     ncomp = arr.shape[0]
-    dropped: dict[str, float] = {}
+    magnitudes: dict[str, float] = {}
+    longitudinal: dict[str, np.ndarray] = {}
     off_xy: np.ndarray | None = None
     off_yx: np.ndarray | None = None
     if ncomp == 1:
@@ -121,25 +155,17 @@ def _tensor_components(cross_section, nx: int, ny: int, what: str = "permittivit
     elif ncomp == 9:
         diagonal = (arr[0], arr[4], arr[8])
         if arr.size:
-            for flat in _LONGITUDINAL_OFFDIAG:
-                magnitude = float(np.max(np.abs(arr[flat])))
-                if magnitude > TOL_TENSORIAL:
-                    dropped[_ENTRY_NAMES[flat]] = magnitude
+            if any(np.any(arr[flat] != 0.0) for flat in _LONGITUDINAL_OFFDIAG):
+                for flat in _LONGITUDINAL_OFFDIAG:
+                    name = _ENTRY_NAMES[flat]
+                    longitudinal[name] = arr[flat]
+                    magnitude = float(np.max(np.abs(arr[flat])))
+                    if magnitude > TOL_TENSORIAL:
+                        magnitudes[name] = magnitude
             if np.any(arr[1] != 0.0) or np.any(arr[3] != 0.0):
                 off_xy, off_yx = arr[1], arr[3]
     else:
         raise ValueError(f"cross-section component axis must be 1, 3 or 9 long, got {ncomp}")
-    if dropped:
-        listing = ", ".join(f"{name} (largest |entry| {value:.4g})" for name, value in sorted(dropped.items()))
-        warnings.warn(
-            f"the {what} cross-section carries the longitudinal off-diagonal entries {listing}, above "
-            f"TOL_TENSORIAL={TOL_TENSORIAL:g}. They are dropped: an eigenproblem linear in n_eff**2 "
-            "cannot represent a medium without a mirror plane at the cross-section, and the exact "
-            "treatment needs the four-field formulation. The transverse entries xy / yx are carried "
-            "exactly, and every diagonal entry is unchanged.",
-            ModeLongitudinalOffdiagWarning,
-            stacklevel=3,
-        )
 
     def flat(component: np.ndarray) -> np.ndarray:
         return component.reshape(nx, ny).ravel()
@@ -150,8 +176,102 @@ def _tensor_components(cross_section, nx: int, ny: int, what: str = "permittivit
         zz=flat(diagonal[2]),
         xy=None if off_xy is None else flat(off_xy),
         yx=None if off_yx is None else flat(off_yx),
-        dropped=dropped,
+        longitudinal={name: flat(value) for name, value in longitudinal.items()},
+        magnitudes=magnitudes,
     )
+
+
+def use_full_tensor(components: TensorComponents, formulation: str) -> bool:
+    """Decide which formulation a cross-section gets.
+
+    Args:
+        components (TensorComponents): The split cross-section.
+        formulation (str): ``"auto"``, ``"transverse"`` or ``"full"``.
+
+    Returns:
+        bool: ``True`` for the four-component path.
+
+    Raises:
+        ValueError: On an unknown ``formulation``.
+    """
+    if formulation not in FORMULATIONS:
+        raise ValueError(f"formulation must be one of {FORMULATIONS}, got {formulation!r}")
+    if formulation == "full":
+        return True
+    if formulation == "transverse":
+        return False
+    return bool(components.longitudinal)
+
+
+def drop_longitudinal(components: TensorComponents, what: str = "permittivity") -> None:
+    """Report a deliberate drop of the longitudinal entries, naming each one and its magnitude.
+
+    Args:
+        components (TensorComponents): The split cross-section.
+        what (str): Name of the material, used in the message.
+    """
+    if not components.magnitudes:
+        return
+    listing = ", ".join(
+        f"{name} (largest |entry| {value:.4g})" for name, value in sorted(components.magnitudes.items())
+    )
+    warnings.warn(
+        f"the {what} cross-section carries the longitudinal off-diagonal entries {listing}, above "
+        f"TOL_TENSORIAL={TOL_TENSORIAL:g}, and formulation='transverse' was asked for. They are "
+        "dropped: an eigenproblem linear in n_eff**2 cannot represent a medium without a mirror "
+        "plane at the cross-section. Use formulation='auto' (the default) or 'full' for the "
+        "four-component operator, which carries them exactly.",
+        ModeLongitudinalOffdiagWarning,
+        stacklevel=3,
+    )
+
+
+def transverse_index_bound(
+    components: TensorComponents,
+    mu_xx: np.ndarray | None = None,
+    mu_yy: np.ndarray | None = None,
+) -> float:
+    """Largest ``n**2`` the cross-section can support, used to aim the shift-invert solve.
+
+    For propagation along the mode axis with no transverse variation, eliminating the longitudinal
+    components leaves ``n**2 E_t = diag(mu_yy, mu_xx) S E_t`` with ``S`` the Schur complement
+    ``eps_tt - eps_tz eps_zz^-1 eps_zt``. Both factors matter. A rotated uniaxial tensor hides its
+    extraordinary index inside ``S`` — in the transverse off-diagonal and in the longitudinal
+    entries — so reading the bound off the permittivity diagonal alone aims the shift below the mode
+    the caller wants; and a *magnetically* anisotropic cross-section, which this solver supports
+    (only an off-diagonal permeability is refused), moves it again, by a factor of up to
+    ``max(mu_xx, mu_yy)``.
+
+    Args:
+        components (TensorComponents): The split permittivity cross-section.
+        mu_xx (np.ndarray | None): Flattened ``mu_xx``; ``None`` means unity.
+        mu_yy (np.ndarray | None): Flattened ``mu_yy``; ``None`` means unity.
+
+    Returns:
+        float: The largest real ``n**2``, never below what ``eps_zz`` alone would give.
+    """
+    xx, yy, zz = components.xx, components.yy, components.zz
+    zero = np.zeros_like(xx)
+    xy = zero if components.xy is None else components.xy
+    yx = zero if components.yx is None else components.yx
+    longitudinal = components.longitudinal
+    if longitudinal:
+        xz, yz = longitudinal["xz"], longitudinal["yz"]
+        zx, zy = longitudinal["zx"], longitudinal["zy"]
+        s11 = xx - xz * zx / zz
+        s12 = xy - xz * zy / zz
+        s21 = yx - yz * zx / zz
+        s22 = yy - yz * zy / zz
+    else:
+        s11, s12, s21, s22 = xx, xy, yx, yy
+    row_x = np.ones_like(xx) if mu_yy is None else np.asarray(mu_yy)
+    row_y = np.ones_like(xx) if mu_xx is None else np.asarray(mu_xx)
+    m11, m12 = row_x * s11, row_x * s12
+    m21, m22 = row_y * s21, row_y * s22
+    half_trace = 0.5 * (m11 + m22)
+    radicand = 0.25 * (m11 - m22) ** 2 + m12 * m21
+    largest = float(np.max(np.real(half_trace + np.emath.sqrt(radicand))))
+    return max(largest, float(np.max(np.real(np.maximum(row_x, row_y) * zz))))
 
 
 def _diag_components(cross_section, nx: int, ny: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -200,12 +320,16 @@ def fdtdmex_mode_computation_wrapper(
     bend_axis: int | None = None,
     plane_center: tuple[float, float] | None = None,
     symmetry: tuple[int, int] = (0, 0),
+    formulation: Literal["auto", "transverse", "full"] = "auto",
 ) -> List[ModeTupleType]:
     """Compute waveguide modes with the native full-vectorial FD solver.
 
     Args mirror ``tidy3d_mode_computation_wrapper``: ``coords`` are the two transverse cell-edge
     arrays in micrometres; ``permittivity_cross_section`` / ``permeability_cross_section`` are the
     rotated cross-sections (1/3/9 components x Nx x Ny) in Tidy3D's transverse convention.
+    ``formulation`` selects the operator: ``"auto"`` takes the four-component one exactly when the
+    cross-section has a non-zero longitudinal off-diagonal entry, ``"transverse"`` forces the
+    ``2N`` operator and drops those entries with a warning, ``"full"`` forces the ``4N`` one.
 
     Returns:
         ``list[ModeTupleType]`` sorted by descending ``Re(n_eff)``, in the same convention as the
@@ -223,6 +347,9 @@ def fdtdmex_mode_computation_wrapper(
     perm = np.asarray(permittivity_cross_section)
     nx, ny = perm.shape[1], perm.shape[2]
     eps = _tensor_components(perm, nx, ny)
+    full_tensor = use_full_tensor(eps, formulation)
+    if not full_tensor:
+        drop_longitudinal(eps)
     eps_xx, eps_yy, eps_zz = eps.xx, eps.yy, eps.zz
 
     mu = np.asarray(permeability_cross_section) if permeability_cross_section is not None else None
@@ -245,16 +372,7 @@ def fdtdmex_mode_computation_wrapper(
     # aim exactly at it - the caller is asking for the modes nearest that index, which is the whole
     # point of the argument (a metal-clad or plasmonic guide has no useful "largest real index").
     if target_neff is None:
-        # With a transverse off-diagonal the bound is the largest eigenvalue of the 2x2 transverse
-        # block, not the largest diagonal entry: a rotated uniaxial tensor hides its extraordinary
-        # index in the off-diagonal, and aiming below it loses the mode the caller wants.
-        if eps.xy is not None and eps.yx is not None:
-            half_trace = 0.5 * (eps_xx + eps_yy)
-            radicand = 0.25 * (eps_xx - eps_yy) ** 2 + eps.xy * eps.yx
-            transverse_max = np.max(np.real(half_trace + np.emath.sqrt(radicand)))
-            n_max = float(np.sqrt(max(float(transverse_max), float(np.max(np.real(eps_zz))))))
-        else:
-            n_max = float(np.sqrt(np.max(np.real([eps_xx, eps_yy, eps_zz]))))
+        n_max = float(np.sqrt(transverse_index_bound(eps, mu_xx, mu_yy)))
         neff_guess = n_max * (1.0 + 1e-6) + 1e-6
     else:
         neff_guess = float(target_neff)
@@ -262,21 +380,36 @@ def fdtdmex_mode_computation_wrapper(
     dmin_pmc = (symmetry[0] == 1, symmetry[1] == 1)
     der_mats = build_derivative_matrices(coords_x_m, coords_y_m, dmin_pmc=dmin_pmc)
 
-    E, H, neff, keff = solve_modes_diagonal(
-        eps_xx,
-        eps_yy,
-        eps_zz,
-        mu_xx,
-        mu_yy,
-        mu_zz,
-        der_mats,
-        k0=k0,
-        num_modes=num_modes,
-        neff_guess=neff_guess,
-        direction=direction,
-        eps_xy=eps.xy,
-        eps_yx=eps.yx,
-    )
+    if full_tensor:
+        avg_mats = build_average_matrices(coords_x_m, coords_y_m, dmin_pmc=dmin_pmc)
+        E, H, neff, keff = solve_modes_full_tensor(
+            eps.as_dict(),
+            mu_xx,
+            mu_yy,
+            mu_zz,
+            der_mats,
+            avg_mats,
+            k0=k0,
+            num_modes=num_modes,
+            neff_guess=neff_guess,
+            direction=direction,
+        )
+    else:
+        E, H, neff, keff = solve_modes_diagonal(
+            eps_xx,
+            eps_yy,
+            eps_zz,
+            mu_xx,
+            mu_yy,
+            mu_zz,
+            der_mats,
+            k0=k0,
+            num_modes=num_modes,
+            neff_guess=neff_guess,
+            direction=direction,
+            eps_xy=eps.xy,
+            eps_yx=eps.yx,
+        )
 
     n_solved = E.shape[2]
     modes: list[ModeTupleType] = []

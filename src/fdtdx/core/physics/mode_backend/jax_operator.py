@@ -201,11 +201,16 @@ class _Block(NamedTuple):
 def _sandwich_block(
     a: sp.spmatrix,
     b: sp.spmatrix,
-    sign: float,
+    sign: complex,
     row_offset: int,
     col_offset: int,
 ) -> _Block:
-    """Build one ``sign * A diag(d) B`` block, shifted into the ``2N x 2N`` layout."""
+    """Build one ``sign * A diag(d) B`` block, shifted into the block layout.
+
+    ``sign`` may be complex: the four-component operator of
+    :mod:`fdtdx.core.physics.mode_backend.jax_full_tensor` carries factors of ``i`` on the terms
+    that pass through the longitudinal constitutive relation.
+    """
     rows, cols, coef, kidx = _sandwich_terms(a, b)
     return _Block(rows + row_offset, cols + col_offset, sign * coef, kidx)
 
@@ -213,6 +218,7 @@ def _sandwich_block(
 def _stack_blocks(
     blocks: list[tuple[_Block, jax.Array, jax.Array | None, jax.Array | None]],
     shape: tuple[int, int],
+    num_cells: int | None = None,
 ) -> SparseCOO:
     """Concatenate blocks into one coordinate list, applying row and column scalings.
 
@@ -222,6 +228,9 @@ def _stack_blocks(
             applied by the block's row / column index (each of length ``N``, i.e. within a block,
             so the offsets are removed before indexing).
         shape: Shape of the assembled matrix.
+        num_cells: ``N``, the block size the row and column offsets are removed modulo. Defaults to
+            ``shape[0] // 2``, which is the transverse operator's two-block layout; the
+            four-component operator passes it explicitly.
 
     Returns:
         SparseCOO: The concatenated coordinate list.
@@ -229,7 +238,7 @@ def _stack_blocks(
     rows_all: list[np.ndarray] = []
     cols_all: list[np.ndarray] = []
     data_all: list[jax.Array] = []
-    n = shape[0] // 2
+    n = shape[0] // 2 if num_cells is None else num_cells
     for block, diag, row_scale, col_scale in blocks:
         values = jnp.asarray(block.coef, dtype=jnp.complex128) * diag[block.kidx]
         if row_scale is not None:

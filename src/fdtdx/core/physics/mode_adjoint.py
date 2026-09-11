@@ -54,6 +54,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from fdtdx.core.jax.utils import is_jax_tracer
 from fdtdx.core.physics.modes import compute_mode, compute_modes
 
 __all__ = [
@@ -61,6 +62,7 @@ __all__ = [
     "ModeSolution",
     "ModeSolveSettings",
     "ModeTracker",
+    "carries_longitudinal_entries",
     "mode_neff",
     "mode_neff_parts",
     "mode_overlap",
@@ -92,6 +94,11 @@ class ModeSolveSettings:
         mode_backend: ``"fdtdmex"`` or ``"tidy3d"``; ``None`` uses the package default.
         double_precision: Ask the solver for complex128 fields and index. Needs
             ``jax_enable_x64``; a finite-difference check is not meaningful without it.
+        formulation: Which native mode operator to assemble — ``"auto"``, ``"transverse"`` or
+            ``"full"``; see :func:`fdtdx.core.physics.modes.compute_mode`. On a nine-component
+            cross-section anything but ``"transverse"`` means the four longitudinal entries are
+            carried, and the index gradient then comes off the matrix-level adjoint rather than the
+            field-level reciprocity integral (see :func:`_sensitivity_from_fields`).
     """
 
     frequency: float
@@ -104,6 +111,7 @@ class ModeSolveSettings:
     symmetry: tuple[int, int] = (0, 0)
     mode_backend: Literal["fdtdmex", "tidy3d"] | None = None
     double_precision: bool = True
+    formulation: Literal["auto", "transverse", "full"] = "auto"
 
     @staticmethod
     def create(
@@ -118,6 +126,7 @@ class ModeSolveSettings:
         symmetry: tuple[int, int] = (0, 0),
         mode_backend: Literal["fdtdmex", "tidy3d"] | None = None,
         double_precision: bool | None = None,
+        formulation: Literal["auto", "transverse", "full"] = "auto",
     ) -> "ModeSolveSettings":
         """Build settings, converting coordinate arrays to hashable tuples.
 
@@ -132,6 +141,8 @@ class ModeSolveSettings:
             symmetry (tuple[int, int]): Mirror condition at the min edge of each transverse axis.
             mode_backend (Literal["fdtdmex", "tidy3d"] | None): Mode-solver backend.
             double_precision (bool | None): Force complex128; ``None`` follows ``jax_enable_x64``.
+            formulation (Literal["auto", "transverse", "full"]): Which native mode operator to
+                assemble.
 
         Returns:
             ModeSolveSettings: The frozen, hashable settings object.
@@ -160,6 +171,7 @@ class ModeSolveSettings:
             symmetry=(int(symmetry[0]), int(symmetry[1])),
             mode_backend=mode_backend,
             double_precision=bool(double_precision),
+            formulation=formulation,
         )
 
     def with_mode_index(self, mode_index: int) -> "ModeSolveSettings":
@@ -182,6 +194,7 @@ class ModeSolveSettings:
             symmetry=self.symmetry,
             mode_backend=self.mode_backend,
             double_precision=self.double_precision,
+            formulation=self.formulation,
         )
 
 
@@ -314,6 +327,7 @@ def _solve(eps_re: jax.Array, eps_im: jax.Array, settings: ModeSolveSettings) ->
         transverse_coords=coords,
         symmetry=settings.symmetry,
         mode_backend=settings.mode_backend,
+        mode_formulation=settings.formulation,
     )
     return jnp.real(neff), jnp.imag(neff), field_E, field_H
 
@@ -357,6 +371,7 @@ def _solve_candidates(
         transverse_coords=coords,
         symmetry=settings.symmetry,
         mode_backend=settings.mode_backend,
+        mode_formulation=settings.formulation,
         drop_spurious=drop_spurious,
     )
     return jax.lax.stop_gradient(field_E)
@@ -371,8 +386,8 @@ def _sensitivity_from_fields(
 ) -> jax.Array:
     """First-order ``d n_eff / d eps`` per cell and component, shaped like the permittivity.
 
-    On the 9-component tier the same reciprocity integral gives every entry of the tensor, because
-    the first-order shift of a holomorphic eigenvalue is the bilinear form
+    On the 9-component tier the same reciprocity integral gives every entry of the *transverse*
+    block, because the first-order shift of a holomorphic eigenvalue is the bilinear form
 
     .. math::
 
@@ -380,9 +395,14 @@ def _sensitivity_from_fields(
         \\frac{\\int \\tilde{\\mathbf{E}} \\cdot \\delta\\varepsilon \\cdot \\mathbf{E}\\, w\\,dA}
              {\\int (\\mathbf{E}_t \\times \\mathbf{H}_t)\\cdot \\hat{e}_p \\, dA}
 
-    with the partner field ``E~`` the backward mode's, i.e. ``E`` with its propagation component
-    negated. So ``d n_eff / d eps_ab = 0.5 s_a E_a E_b w / flux``, unconjugated, and the diagonal
-    entries ``a = b`` are the formula the 1- and 3-component tiers already used.
+    with the partner field ``E~`` the backward mode's. Writing that as ``E`` with its propagation
+    component negated — which is what makes ``d n_eff / d eps_ab = 0.5 s_a E_a E_b w / flux``,
+    unconjugated — assumes the medium has a mirror plane at the cross-section. It therefore holds
+    for the transverse block and for the transverse formulation, which is where this function is
+    used; the four-component tier takes the exact matrix-level adjoint instead (see
+    :func:`mode_neff_parts`), because with a longitudinal entry present the backward mode is a
+    genuinely different field and the reciprocity integral written this way gets the ``zx`` and
+    ``zy`` entries wrong by a sign.
 
     Args:
         field_E (jax.Array): Mode electric field, shape ``(3, nx, ny, nz)``.
@@ -408,10 +428,11 @@ def _sensitivity_from_fields(
         # d n_eff / d eps_ab, row-major, with the sign on the *row* index (the partner field).
         rows = sign_array * field_E
         outer = rows[:, None] * field_E[None, :]
-        # The four entries that couple a transverse axis to the propagation axis are dropped by the
-        # solver (they cannot enter an eigenproblem linear in n_eff^2), so the solved n_eff does not
-        # depend on them and their sensitivity is zero *for this solver*. The continuum first-order
-        # value is not zero; the difference is what ModeLongitudinalOffdiagWarning is reporting.
+        # The partner field used here is the mode with its propagation component negated, which is
+        # the backward mode only when the medium has a mirror plane at the cross-section, i.e. when
+        # the four longitudinal entries vanish. The transverse formulation drops them, so the solved
+        # n_eff genuinely does not depend on them and their sensitivity is zero *for this solver*;
+        # the continuum value is not zero, which is what the formulation choice is about.
         is_prop = np.arange(3) == prop_axis
         carried = jnp.asarray(~(is_prop[:, None] ^ is_prop[None, :]), dtype=field_E.real.dtype)
         outer = outer * carried[:, :, None, None, None]
@@ -481,6 +502,60 @@ def _split(permittivity: Any) -> tuple[jax.Array, jax.Array]:
     return eps, jnp.zeros_like(eps)
 
 
+def carries_longitudinal_entries(permittivity: Any, settings: ModeSolveSettings) -> bool:
+    """Whether the solve these settings ask for carries ``eps_xz`` / ``eps_zx`` / ``eps_yz`` / ``eps_zy``.
+
+    It is a property of the *layout* and the formulation, not of the values, and that is deliberate:
+    under ``formulation="auto"`` a nine-component cross-section whose longitudinal entries happen to
+    be exactly zero still has a non-zero derivative with respect to them, because perturbing one
+    moves the solve onto the operator that carries it. Reporting zero there would match the operator
+    that ran and disagree with a finite difference through the same front end. It also matches what
+    ``jax.grad`` does: the permittivity is a tracer inside the backward and cannot be inspected, so
+    the differentiable front end assumes the entries are carried as well.
+
+    The cost is that ``mode_sensitivity`` and the callback path are out of reach for a nine-component
+    cross-section under ``"auto"``, including one whose tensor is only transversely off-diagonal.
+    ``formulation="transverse"`` asks for the old behaviour explicitly and gets it.
+
+    Args:
+        permittivity (Any): The permittivity array.
+        settings (ModeSolveSettings): The solve settings.
+
+    Returns:
+        bool: ``True`` when the four longitudinal entries are carried.
+    """
+    ncomp = int(jnp.asarray(permittivity).shape[0])
+    return ncomp == 9 and settings.formulation != "transverse"
+
+
+def _solve_used_the_full_operator(permittivity: Any, settings: ModeSolveSettings) -> bool:
+    """Whether the solve that *ran* assembled the four-component operator.
+
+    The value-aware question, as opposed to :func:`carries_longitudinal_entries`'s layout-aware one.
+    They differ on a nine-component cross-section whose four longitudinal entries are all exactly
+    zero: the solve took the transverse operator (so a report about *that* solve is well defined),
+    while the derivative with respect to those entries is not the transverse operator's, because
+    perturbing one moves the solve. Reporting functions want this predicate; chain-rule components
+    want the other one.
+
+    Args:
+        permittivity (Any): The permittivity array.
+        settings (ModeSolveSettings): The solve settings.
+
+    Returns:
+        bool: ``True`` when the four-component operator was assembled.
+    """
+    array = jnp.asarray(permittivity)
+    if int(array.shape[0]) != 9 or settings.formulation == "transverse":
+        return False
+    if settings.formulation == "full" or is_jax_tracer(array):
+        return True
+    prop_axis = _propagation_axis(array.shape)
+    tensor = np.asarray(array).reshape(3, 3, *array.shape[1:])
+    is_prop = np.arange(3) == prop_axis
+    return bool(np.any(tensor[is_prop[:, None] ^ is_prop[None, :]] != 0.0))
+
+
 def mode_neff_parts(permittivity: Any, settings: ModeSolveSettings) -> tuple[jax.Array, jax.Array]:
     """Effective index of one mode as a differentiable ``(Re, Im)`` pair.
 
@@ -488,17 +563,41 @@ def mode_neff_parts(permittivity: Any, settings: ModeSolveSettings) -> tuple[jax
     convention getting in the way. The permittivity may be real or complex; when it is complex the
     gradient with respect to its real and imaginary parts comes off the same backward.
 
+    Where the backward comes from depends on the tier. For one, three or nine components *without*
+    the longitudinal entries it is the field-level reciprocity integral evaluated on the field the
+    forward already returned, so it costs no extra solve. With the longitudinal entries carried,
+    that integral's partner field is no longer the mode with its propagation component negated, so
+    the index instead comes off the JAX-native pipeline, where ``jax.grad`` contracts the *discrete*
+    operator against a solved left eigenvector and is exact for every entry by construction. That
+    path runs the same eigen-solve; what it costs is the second Arnoldi run for the left
+    eigenvector.
+
     Args:
-        permittivity (Any): Diagonal relative permittivity, shape ``(1 or 3, nx, ny, nz)`` with the
+        permittivity (Any): Relative permittivity, shape ``(1, 3 or 9, nx, ny, nz)`` with the
             propagation axis of length one. Complex entries are allowed (a lossy or metallic cell
             has ``Re eps < 0``, which the material table cannot express but the array can).
         settings (ModeSolveSettings): Frequency, grid, mode index and backend.
 
     Returns:
         tuple[jax.Array, jax.Array]: ``(Re n_eff, Im n_eff)``.
+
+    Raises:
+        ValueError: If the longitudinal entries are carried and the settings put the exact path out
+            of reach, since the reciprocity integral would then be wrong rather than merely coarse.
     """
     eps_re, eps_im = _split(permittivity)
     _propagation_axis(eps_re.shape)
+    if carries_longitudinal_entries(permittivity, settings):
+        obstacle = _differentiable_path_obstacle(settings)
+        if obstacle is not None:
+            raise ValueError(
+                "a nine-component cross-section carrying the longitudinal permittivity entries "
+                f"needs the exact matrix-level adjoint, and it is out of reach here: {obstacle}. "
+                "Use formulation='transverse' to drop those entries deliberately (their "
+                "sensitivity is then reported as zero, which is what that solve depends on)."
+            )
+        solution = _mode_solve_differentiable(eps_re, eps_im, settings)
+        return jnp.real(solution.neff), jnp.imag(solution.neff)
     return _neff_parts(eps_re, eps_im, settings)
 
 
@@ -598,6 +697,7 @@ def _mode_solve_differentiable(
         transverse_coords=coords,
         direction=settings.direction,
         symmetry=settings.symmetry,
+        formulation=settings.formulation,
     )
     index = settings.mode_index
     return ModeSolution(neff=neff[index], E=field_E[index], H=field_H[index])
@@ -617,9 +717,26 @@ def mode_sensitivity(permittivity: Any, settings: ModeSolveSettings) -> tuple[ja
     Returns:
         tuple[jax.Array, jax.Array]: ``(complex n_eff, complex sensitivity)``; the sensitivity has
         the same shape as ``permittivity``.
+
+    Raises:
+        ValueError: When the solve assembled the four-component operator, where the reciprocity
+            integral's partner field is not the backward mode. A nine-component cross-section whose
+            four longitudinal entries are all exactly zero is *not* refused: it takes the transverse
+            operator, for which the integral is exact. That is a looser test than the one
+            :func:`mode_neff_parts` uses, deliberately — this function reports on the solve that
+            ran, while that one is a link in a chain rule and has to describe the solve that would
+            run after a perturbation.
     """
     eps_re, eps_im = _split(permittivity)
     prop_axis = _propagation_axis(eps_re.shape)
+    if _solve_used_the_full_operator(permittivity, settings):
+        raise ValueError(
+            "mode_sensitivity is the field-level reciprocity integral, whose partner field is the "
+            "mode with its propagation component negated. That is the backward mode only when the "
+            "cross-section has a mirror plane, and a nine-component tensor carrying eps_xz / "
+            "eps_zx / eps_yz / eps_zy does not. Use jax.grad(mode_neff), which contracts the "
+            "discrete operator against a solved left eigenvector, or formulation='transverse'."
+        )
     re, im, field_E, field_H = _solve(eps_re, eps_im, settings)
     grad = _sensitivity_from_fields(field_E, field_H, settings, eps_re.shape[0], prop_axis)
     return re + 1j * im, grad

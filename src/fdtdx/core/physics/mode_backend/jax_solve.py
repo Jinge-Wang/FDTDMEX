@@ -157,6 +157,15 @@ class EigenSolveSpec:
         solve_left: Solve for the left eigenvectors on ``A^T`` instead of using the closed form.
             Required for a tensorial cross-section on a non-uniform grid and for a non-reciprocal
             one; see the module docstring for the measured residuals.
+        eigenvalue_kind: What the eigenvalue means, which is the only thing about the operator this
+            module has to know. ``"neg_n2"`` is the transverse-E convention ``-(n_eff)^2``;
+            ``"neff"`` is the four-component convention, the effective index itself, whose
+            backward modes sit at negative real part. It decides the sort order and nothing else —
+            the left-eigenvector solve, the degeneracy handling and the bordered field adjoint are
+            all convention-free.
+        backward: Sort for the backward (negative ``Re n_eff``) half of the spectrum. Only
+            meaningful with ``eigenvalue_kind="neff"``, where the two halves are genuinely
+            different modes.
     """
 
     mat_rows: np.ndarray
@@ -169,6 +178,23 @@ class EigenSolveSpec:
     sigma: complex
     degeneracy_rtol: float = DEFAULT_DEGENERACY_RTOL
     solve_left: bool = False
+    eigenvalue_kind: str = "neg_n2"
+    backward: bool = False
+
+    def sort_order(self, vals: np.ndarray) -> np.ndarray:
+        """Indices that sort the eigenvalues by descending physical ``Re(n_eff)``.
+
+        Args:
+            vals (np.ndarray): The eigenvalues as the solver returned them.
+
+        Returns:
+            np.ndarray: The permutation.
+        """
+        if self.eigenvalue_kind == "neff":
+            key = -np.real(vals) if self.backward else np.real(vals)
+        else:
+            key = np.real(np.emath.sqrt(-np.asarray(vals) + 0j))
+        return np.argsort(key)[::-1]
 
 
 def degenerate_groups(eigenvalues: np.ndarray, rtol: float = DEFAULT_DEGENERACY_RTOL) -> list[list[int]]:
@@ -267,9 +293,14 @@ def orthonormalize_degenerate_blocks(
     return out
 
 
+def _operator_size(spec: EigenSolveSpec) -> int:
+    """Side length of the operator: ``2N`` for the transverse tier, ``4N`` for the full tensor."""
+    return (4 if spec.eigenvalue_kind == "neff" else 2) * spec.num_cells
+
+
 def _sparse_operator(spec: EigenSolveSpec, data: np.ndarray) -> sp.csr_matrix:
     """Materialise the coordinate-list operator, summing duplicate entries."""
-    size = 2 * spec.num_cells
+    size = _operator_size(spec)
     return sp.coo_matrix(
         (np.asarray(data, dtype=np.complex128), (spec.mat_rows, spec.mat_cols)),
         shape=(size, size),
@@ -306,7 +337,7 @@ def _arpack_eigs(spec: EigenSolveSpec, want_left: bool, data: np.ndarray, sigma:
         ``(eigenvalues, eigenvectors)``, or ``(eigenvalues, eigenvectors, left)`` when
         ``want_left``; sorted by descending ``Re(n_eff)`` with degenerate blocks orthonormalised.
     """
-    size = 2 * spec.num_cells
+    size = _operator_size(spec)
     mat = _sparse_operator(spec, data)
     rng = np.random.default_rng(0)
     vec_init = rng.random(size) + 1j * rng.random(size)
@@ -315,7 +346,7 @@ def _arpack_eigs(spec: EigenSolveSpec, want_left: bool, data: np.ndarray, sigma:
     lu = spl.splu((mat - sp.diags(np.full(size, shift, dtype=np.complex128), format="csr")).tocsc())
     op_inv = _LuSolveOperator(lu, size)
     vals, vecs = spl.eigs(mat, k=num_modes, sigma=shift, v0=vec_init, OPinv=op_inv)
-    order = np.argsort(np.real(np.emath.sqrt(-vals + 0j)))[::-1]
+    order = spec.sort_order(vals)
     vals = np.ascontiguousarray(vals[order])
     vecs = orthonormalize_degenerate_blocks(vecs[:, order], vals, spec.degeneracy_rtol)
     if not want_left:
@@ -338,7 +369,7 @@ def _arpack_eigs(spec: EigenSolveSpec, want_left: bool, data: np.ndarray, sigma:
 
 def _callback_eigs(spec: EigenSolveSpec, mat_data: jax.Array, sigma: jax.Array, want_left: bool):
     """``_arpack_eigs`` behind ``jax.pure_callback``, with the right declared shapes."""
-    size = 2 * spec.num_cells
+    size = _operator_size(spec)
     num_modes = min(spec.num_modes, size - 2)
     shapes: tuple[jax.ShapeDtypeStruct, ...] = (
         jax.ShapeDtypeStruct((num_modes,), jnp.complex128),
@@ -391,7 +422,7 @@ def _field_adjoint(
         return out
     groups = degenerate_groups(np.asarray(vals), spec.degeneracy_rtol)
     block_of = {index: group for group in groups for index in group}
-    size = 2 * spec.num_cells
+    size = _operator_size(spec)
     mat_t = _sparse_operator(spec, mat_data).T.tocsr()
     for m in active:
         if len(block_of[m]) > 1:
