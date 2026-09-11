@@ -123,6 +123,39 @@ def _box_metric_bounds(
     return (out[0], out[1], out[2])
 
 
+def _alert_mode_planes_in_pml(objects: ObjectContainer, inv_permittivities: jax.Array) -> None:
+    """Warn (diagonal media) or raise (tensorial media) for every mode plane inside the PML.
+
+    Args:
+        objects (ObjectContainer): The placed objects, for the PML boxes and the mode planes.
+        inv_permittivities (jax.Array): The loaded inverse permittivity, ``(1 | 3 | 9, nx, ny, nz)``,
+            used only to decide whether a mode plane's cross-section is fully tensorial.
+
+    Raises:
+        ValueError: If a mode plane with a tensorial cross-section overlaps a PML.
+    """
+    from fdtdx.core.physics.mode_pml import check_mode_plane_pml_overlap, cross_section_is_tensorial
+    from fdtdx.objects.detectors.mode import ModeOverlapDetector
+    from fdtdx.objects.sources.mode import ModePlaneSource
+
+    pml_boxes = [
+        (f"{'max' if pml.direction == '+' else 'min'}_{'xyz'[pml.axis]}", pml.grid_slice_tuple)
+        for pml in objects.pml_objects
+    ]
+    if not pml_boxes:
+        return
+    for obj in objects.objects:
+        if not isinstance(obj, (ModePlaneSource, ModeOverlapDetector)):
+            continue
+        cross_section = inv_permittivities[:, *obj.grid_slice]
+        check_mode_plane_pml_overlap(
+            grid_slice_tuple=obj.grid_slice_tuple,
+            pml_boxes=pml_boxes,
+            tensorial=cross_section_is_tensorial(jax.lax.stop_gradient(cross_section)),
+            object_name=obj.name,
+        )
+
+
 def place_objects(
     object_list: Sequence[SimulationObject],
     config: SimulationConfig,
@@ -333,6 +366,13 @@ def place_objects(
     key, subkey = jax.random.split(key)
     params = _init_params(objects=objects_container, key=subkey)
     arrays, config, info = _init_arrays(objects=objects_container, config=config)
+
+    # Step 10b: the mode solver has no PML. Every mode plane that reaches into the absorbing layer
+    # is solved on a cross-section the FDTD run does not have; alert on it now, while the placed
+    # PML boxes and the material tier are both known. Diagonal media get a warning (the loader
+    # extends them into the PML region, so the solve still means something), tensorial media an
+    # error (they do not).
+    _alert_mode_planes_in_pml(objects_container, arrays.inv_permittivities)
 
     # Placement report: requested vs realised extent per object per axis. Useful in both sampling
     # modes; it is the evidence that motivates the yee path (a 500 nm bus placed as 480 nm).
@@ -973,6 +1013,23 @@ def _init_arrays(
             offdiag_placement=offdiag_placement,
         )
         info["yee_sampling_difference"] = scene_arrays.sampling_difference
+        # The material map a post-blend perturbation needs (fdtdx.coupling): which material each
+        # E point sampled and the geometry of every blended pixel. Host-side NumPy, never traced.
+        info["yee_material_map"] = {
+            "front_E": scene_arrays.front_E,
+            "material_names": scene_arrays.material_names,
+            "material_table": scene_arrays.material_table,
+            "smoothing_record": scene_arrays.smoothing_record,
+            "num_perm_components": num_perm_components,
+            "offdiag_placement": offdiag_placement if node_offdiag else None,
+            # The scale factor between a physical conductivity in S/m and what is stored in
+            # electric_conductivity, so a perturbation (fdtdx.coupling.perturb) can write that
+            # array with the loader's own scaling instead of guessing it.
+            "conductivity_spacing": conductivity_spacing,
+            "num_electric_cond_components": (
+                num_electric_cond_components if electric_conductivity is not None else None
+            ),
+        }
         full_index = (slice(None), slice(None), slice(None), slice(None))
         inv_permittivities = sharding_preserving_set(
             inv_permittivities, full_index, jnp.asarray(scene_arrays.inv_permittivities, dtype=config.dtype)
