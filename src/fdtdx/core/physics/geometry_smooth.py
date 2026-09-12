@@ -214,6 +214,82 @@ class SmoothingStats:
 # ---------------------------------------------------------------------------
 
 
+@dataclass
+class SmoothingPass:
+    """The geometry of every pixel one smoothing pass wrote, in the order it wrote them.
+
+    A blend is a function of four things only: the unit normal of the interface, the fill fraction
+    of the front material, and the two materials' property values. The first two are geometry and
+    do not change when a material property is perturbed afterwards (a temperature field, say), so
+    keeping them lets a later pass re-blend exactly those pixels with new property values instead
+    of re-running the probe, fill and normal machinery -- or, worse, applying a bulk perturbation to
+    an already-blended entry and losing the interface treatment. Only pixels the loader actually
+    wrote are listed (``usable`` in :func:`_smooth_component_lattice`); pixels that kept their point
+    sample (three-material, degenerate fill, metal, ...) are absent and carry the front material's
+    bulk value, which is what a bulk perturbation should overwrite.
+
+    Attributes:
+        field (str): ``"E"``, ``"H"`` or ``"V"`` (the cell-vertex lattice).
+        component (int): Component index; 0 on the vertex lattice.
+        write_mode (str): ``"row"``, ``"offdiag"`` or ``"tensor6"`` (see :func:`_write_component_entries`).
+        full_tensor (bool): Whether the target array carries 9 components (``"row"`` mode only).
+        cells (np.ndarray): ``(K, 3)`` integer indices of the written pixels.
+        fill (np.ndarray): ``(K,)`` fraction of the pixel occupied by the front material.
+        normal (np.ndarray): ``(K, 3)`` unit interface normals.
+        material_hi (np.ndarray): ``(K,)`` global material index representing the front material's
+            value class (the first material carrying that property value; see
+            :func:`_material_value_classes`).
+        material_lo (np.ndarray): ``(K,)`` the same for the material behind the interface.
+        isotropic_pair (np.ndarray): ``(K,)`` whether both sides were isotropic, i.e. whether the
+            scalar Kottke formulas produced the entry (a tensor pair went through :func:`kottke_tensor`).
+    """
+
+    field: str
+    component: int
+    write_mode: str
+    full_tensor: bool
+    cells: np.ndarray
+    fill: np.ndarray
+    normal: np.ndarray
+    material_hi: np.ndarray
+    material_lo: np.ndarray
+    isotropic_pair: np.ndarray
+
+    @property
+    def num_pixels(self) -> int:
+        """How many pixels this pass wrote."""
+        return int(self.cells.shape[0])
+
+
+@dataclass
+class SmoothingRecord:
+    """Every pass of one loader run, plus the value-class map the passes classified materials with.
+
+    Attributes:
+        passes (list[SmoothingPass]): One entry per ``(field, component)`` lattice that wrote at
+            least one pixel, in loader order.
+        classes (dict[str, np.ndarray]): Per property kind (``"permittivity"``, ``"permeability"``),
+            the ``int32`` value-class map over the global material list.
+    """
+
+    passes: list[SmoothingPass] = field(default_factory=list)
+    classes: dict[str, np.ndarray] = field(default_factory=dict)
+
+    def lattice(self, field_name: str, component: int) -> SmoothingPass | None:
+        """The pass that wrote lattice ``(field_name, component)``, or ``None`` if none did."""
+        for entry in self.passes:
+            if entry.field == field_name and entry.component == component:
+                return entry
+        return None
+
+    def as_dict(self) -> dict[str, Any]:
+        """Counts only, for a run's JSON report."""
+        return {
+            "num_passes": len(self.passes),
+            "num_pixels_per_pass": {f"{p.field}{p.component}": p.num_pixels for p in self.passes},
+        }
+
+
 def invariant_axes(grid: RectilinearGrid) -> tuple[int, ...]:
     """Axes the simulation is invariant along, i.e. resolved by a single cell.
 
@@ -943,6 +1019,7 @@ def _smooth_component_lattice(
     write_mode: str = "row",
     lossy: np.ndarray | None = None,
     bulk_tensor: np.ndarray | None = None,
+    record: SmoothingRecord | None = None,
 ) -> None:
     """Smooth one component's lattice in place: probe, classify, blend, write.
 
@@ -975,6 +1052,9 @@ def _smooth_component_lattice(
         bulk_tensor (np.ndarray | None): Per global material flag "the stored tensor has a non-zero
             off-diagonal entry of its own". Required on the vertex lattice, where such a vertex
             keeps a zero off-diagonal entry.
+        record (SmoothingRecord | None): When given, the geometry of every written pixel (fill,
+            normal, material pair) is appended as one :class:`SmoothingPass`, so a later property
+            perturbation can re-blend exactly those pixels.
     """
     tensor_mode = write_mode == "tensor6"
     vertex_mode = write_mode in ("offdiag", "tensor6")
@@ -1237,6 +1317,21 @@ def _smooth_component_lattice(
         write_mode,
     )
     stats.num_smoothed += int(np.count_nonzero(usable))
+    if record is not None:
+        record.passes.append(
+            SmoothingPass(
+                field=field,
+                component=component,
+                write_mode=write_mode,
+                full_tensor=full_tensor,
+                cells=np.stack(written, axis=-1).astype(np.int64),
+                fill=fill_used.copy(),
+                normal=normal_used.copy(),
+                material_hi=owner_class[usable].astype(np.int32),
+                material_lo=other_class[usable].astype(np.int32),
+                isotropic_pair=isotropic_pair.copy(),
+            )
+        )
 
 
 def smooth_property_on_yee_pixels(
@@ -1251,6 +1346,7 @@ def smooth_property_on_yee_pixels(
     supersample: int,
     full_tensor: bool,
     periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+    record: SmoothingRecord | None = None,
 ) -> tuple[np.ndarray, SmoothingStats]:
     """Overwrite the point-sampled inverse property at every two-material Yee pixel with its blend.
 
@@ -1273,6 +1369,8 @@ def smooth_property_on_yee_pixels(
             array's own tier: a 9-component array is always written as rows, because entry ``(c, c)``
             of a row-major 3x3 sits at index ``4*c``, not at ``c``.
         periodic_axes (tuple): Axes carrying periodic images, invariant axes already excluded.
+        record (SmoothingRecord | None): Collects the geometry of every written pixel (see
+            :class:`SmoothingPass`) and the value-class map used, for a later re-blend.
 
     Returns:
         tuple: ``(inverse_property, stats)``.
@@ -1290,6 +1388,8 @@ def smooth_property_on_yee_pixels(
     classes = _material_value_classes(scene, property_kind)
     scalar, isotropic, tensors, asymmetric = _property_tensors(scene, property_kind)
     periods = grid_periods(grid)
+    if record is not None:
+        record.classes[property_kind] = classes.copy()
 
     for component in range(3):
         _smooth_component_lattice(
@@ -1311,6 +1411,7 @@ def smooth_property_on_yee_pixels(
             full_tensor=full_tensor,
             supersample=supersample,
             stats=stats,
+            record=record,
         )
 
     return inverse_property, stats
@@ -1321,6 +1422,7 @@ def smooth_offdiagonal_on_vertex_lattice(
     grid: RectilinearGrid,
     supersample: int,
     periodic_axes: tuple[bool, bool, bool] = (False, False, False),
+    record: SmoothingRecord | None = None,
 ) -> tuple[np.ndarray, SmoothingStats]:
     """The three off-diagonal Kottke entries of the inverse permittivity, on the cell vertices.
 
@@ -1342,6 +1444,8 @@ def smooth_offdiagonal_on_vertex_lattice(
         grid (RectilinearGrid): The resolved simulation grid.
         supersample (int): Samples per axis where no analytic overlap or normal is available.
         periodic_axes (tuple): Axes carrying periodic images, invariant axes already excluded.
+        record (SmoothingRecord | None): Collects the geometry of every written vertex, as the
+            component pass does for its pixels.
 
     Returns:
         tuple: ``(inv_permittivity_offdiag, stats)`` with the array of shape ``(3, Nx, Ny, Nz)``
@@ -1362,6 +1466,8 @@ def smooth_offdiagonal_on_vertex_lattice(
 
     target = np.zeros((3, *front_material.shape), dtype=np.float64)
     stats = SmoothingStats()
+    if record is not None:
+        record.classes.setdefault("permittivity", classes.copy())
     _smooth_component_lattice(
         scene=scene,
         grid=grid,
@@ -1384,6 +1490,7 @@ def smooth_offdiagonal_on_vertex_lattice(
         write_mode="offdiag",
         lossy=lossy,
         bulk_tensor=bulk_tensor,
+        record=record,
     )
     return target, stats
 
