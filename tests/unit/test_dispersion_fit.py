@@ -231,6 +231,22 @@ class TestReadRefractiveIndexYaml:
         expected = math.sqrt(2.986556 + 0.01828907 * 0.5**-2 - 0.01445419 * 0.5**2)
         assert n[0] == pytest.approx(expected, rel=1e-12)
 
+    def test_formula_4(self, tmp_path):
+        # DeVore TiO2 (ordinary): n^2 = 5.913 + 0.2441 / (lam^2 - 0.0803)
+        path = self._write(
+            tmp_path,
+            """\
+            DATA:
+              - type: formula 4
+                wavelength_range: 0.43 1.53
+                coefficients: 5.913 0.2441 0 0.0803 1 0 0 0 1
+            """,
+        )
+        _lam, n, _k = read_refractiveindex_yaml(path, wavelengths_m=np.array([0.5893e-6]))
+        expected = math.sqrt(5.913 + 0.2441 / (0.5893**2 - 0.0803))
+        assert n[0] == pytest.approx(expected, rel=1e-12)
+        assert n[0] == pytest.approx(2.613, abs=2e-3)  # rutile ordinary ray at the sodium D line
+
     def test_unsupported_formula_raises(self, tmp_path):
         path = self._write(
             tmp_path,

@@ -60,6 +60,7 @@ from fdtdx.interfaces.modules import DtypeConversion
 from fdtdx.interfaces.recorder import Recorder, RecordingState
 from fdtdx.interfaces.time_filter import LinearReconstructEveryK
 from fdtdx.materials import Material
+from fdtdx.materials_library import MATERIALS, MaterialRecord, get_material, list_materials
 from fdtdx.objects.boundaries.bloch import BlochBoundary
 from fdtdx.objects.boundaries.initialization import BoundaryConfig, boundary_objects_from_config
 from fdtdx.objects.boundaries.pec import PerfectElectricConductor
@@ -177,6 +178,7 @@ ParameterContainer = ParameterContainer
 SimulationState = SimulationState
 
 __all__ = [
+    "MATERIALS",
     "ArrayContainer",
     "BaseModeOverlapDetector",
     "BinaryMedianFilterModule",
@@ -224,6 +226,7 @@ __all__ = [
     "Logger",
     "LorentzPole",
     "Material",
+    "MaterialRecord",
     "ModeExpansionResult",
     "ModeOverlapDetector",
     "ModePlaneSource",
@@ -313,7 +316,9 @@ __all__ = [
     "gaussian_mode_function",
     "gds_layer_stack",
     "gds_layer_stack_from_component",
+    "get_material",
     "import_from_json",
+    "list_materials",
     "metric_efficiency",
     "normalize_by_energy",
     "normalize_by_poynting_flux",

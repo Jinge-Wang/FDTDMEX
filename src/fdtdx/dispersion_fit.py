@@ -34,7 +34,7 @@ Reading the database
 --------------------
 :func:`read_refractiveindex_yaml` parses the CC0 refractiveindex.info YAML
 record types this module needs — ``tabulated nk`` / ``n`` / ``k`` and the
-dispersion formulas 1 (Sellmeier), 2 (Sellmeier-2) and 3 (polynomial).
+dispersion formulas 1 (Sellmeier), 2 (Sellmeier-2), 3 (polynomial) and 4.
 """
 
 from __future__ import annotations
@@ -553,10 +553,24 @@ def _formula_n(kind: int, coeffs: np.ndarray, lam_um: np.ndarray) -> np.ndarray:
         for i in range(0, len(rest) - 1, 2):
             n_sq = n_sq + rest[i] * lam_um ** rest[i + 1]
         return np.sqrt(n_sq)
+    if kind == 4:
+        # n^2 = c0 + c1 lam^c2 / (lam^2 - c3^c4) + c5 lam^c6 / (lam^2 - c7^c8)
+        #          + c9 lam^c10 + c11 lam^c12 + ...
+        # (the "refractiveindex.info" formula: up to two resonance terms of four
+        # coefficients each, then plain power terms in pairs)
+        n_sq = np.full_like(lam_um, c0)
+        head = rest[:8]
+        for i in range(0, len(head) - 3, 4):
+            a, b, c_res, d = head[i], head[i + 1], head[i + 2], head[i + 3]
+            n_sq = n_sq + a * lam_um**b / (lam_um**2 - c_res**d)
+        tail = rest[8:]
+        for i in range(0, len(tail) - 1, 2):
+            n_sq = n_sq + tail[i] * lam_um ** tail[i + 1]
+        return np.sqrt(n_sq)
     raise ValueError(
         f"refractiveindex.info dispersion formula {kind} is not supported; "
-        "this reader handles formulas 1 (Sellmeier), 2 (Sellmeier-2) and 3 (polynomial), "
-        "plus the tabulated record types."
+        "this reader handles formulas 1 (Sellmeier), 2 (Sellmeier-2), 3 (polynomial) and "
+        "4 (refractiveindex.info), plus the tabulated record types."
     )
 
 
@@ -584,8 +598,9 @@ def read_refractiveindex_yaml(
     Handles the record types this package needs: ``tabulated nk``,
     ``tabulated n``, ``tabulated k`` and the dispersion formulas 1 (Sellmeier,
     ``C`` given as the resonance wavelength in um), 2 (Sellmeier-2, ``C`` in
-    um^2) and 3 (polynomial). A record may mix one ``n`` source with a
-    ``tabulated k``; the two are put on a common grid.
+    um^2), 3 (polynomial) and 4 (the refractiveindex.info form). A record may
+    mix one ``n`` source with a ``tabulated k``; the two are put on a common
+    grid.
 
     Args:
         path: Path to the ``.yml`` record inside a database clone.
@@ -649,7 +664,8 @@ def read_refractiveindex_yaml(
     # --- n ------------------------------------------------------------------
     if n_table is not None:
         src = n_table[np.argsort(n_table[:, 0])]
-        if wavelengths_m is not None and (lam_um.min() < src[0, 0] or lam_um.max() > src[-1, 0]):
+        slack = 1.0 + 1e-9
+        if wavelengths_m is not None and (lam_um.min() < src[0, 0] / slack or lam_um.max() > src[-1, 0] * slack):
             raise ValueError(
                 f"Requested wavelengths {lam_um.min():.4g}-{lam_um.max():.4g} um fall outside the tabulated "
                 f"range {src[0, 0]:.4g}-{src[-1, 0]:.4g} um of {path.name}."
@@ -657,7 +673,13 @@ def read_refractiveindex_yaml(
         n_vals = np.interp(lam_um, src[:, 0], src[:, 1])
     else:
         assert formula is not None
-        if formula_range is not None and (lam_um.min() < formula_range[0] - 1e-12 or lam_um.max() > formula_range[1]):
+        # relative slack: a generated log grid lands on the endpoints only to
+        # within rounding, and a caller asking for exactly the printed range
+        # should not be refused
+        slack = 1.0 + 1e-9
+        if formula_range is not None and (
+            lam_um.min() < formula_range[0] / slack or lam_um.max() > formula_range[1] * slack
+        ):
             raise ValueError(
                 f"Requested wavelengths {lam_um.min():.4g}-{lam_um.max():.4g} um fall outside the validity "
                 f"range {formula_range[0]:.4g}-{formula_range[1]:.4g} um of {path.name}."
