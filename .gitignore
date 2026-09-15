@@ -129,3 +129,13 @@ results/
 web/node_modules/
 web/dist/
 web/.vite/
+
+# Two paths inside the ignored scripts/ and data/ trees are part of the repo:
+# the material-library builder and the library it writes (issues #37/#38).
+# Un-ignore the directory, re-ignore its contents, then allow the one file.
+!/scripts/
+/scripts/*
+!/scripts/build_material_library.py
+!/src/fdtdx/data/
+/src/fdtdx/data/*
+!/src/fdtdx/data/materials_library.json

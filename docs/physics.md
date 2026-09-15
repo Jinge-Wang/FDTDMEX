@@ -48,7 +48,7 @@ Because Ex/Ey/Ez live at different Yee locations, off-diagonal terms (e.g. ε⁻
 
 - inverse permittivity/permeability stored; sizing `1/3/9` components, global (any full-anisotropic object → all arrays 9-component).
 - conductivity scaled by resolution at setup (don't pre-scale).
-- dispersion: ε(ω) = ε∞ + χ(ω) via ADE poles (Lorentz/Drude); ε in `permittivity` is ε∞ when dispersive. See [materials-anisotropy.md](materials-anisotropy.md).
+- dispersion: ε(ω) = ε∞ + χ(ω) via ADE poles (Lorentz/Drude/Sellmeier/Debye); ε in `permittivity` is ε∞ when dispersive. See [materials-anisotropy.md](materials-anisotropy.md) and [materials-library.md](materials-library.md).
 
 ## Boundaries
 

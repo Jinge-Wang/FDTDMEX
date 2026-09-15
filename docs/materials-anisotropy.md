@@ -19,9 +19,13 @@ Full-anisotropic E/H updates do a per-cell 3x3 solve with off-diagonal coupling,
 
 ## Dispersion (ADE)
 
-Linear dispersion via auxiliary differential equations: ε(ω) = ε∞ + Σ χ_p(ω), each pole a 2nd-order recurrence in an auxiliary polarization field updated alongside E.
+Linear dispersion via auxiliary differential equations: ε(ω) = ε∞ + Σ χ_p(ω), each pole a two-step recurrence `P[n+1] = c1 P[n] + c2 P[n-1] + c3 E[n]` in an auxiliary polarization field updated alongside E.
 - **Lorentz**: `χ = Δε·ω₀² / (ω₀² − ω² − iγω)`.
-- **Drude**: `χ = −ω_p² / (ω² + iγω)` (ω₀ = 0). Coefficients computed once at setup (host). **On MLX:** `P_curr`/`P_prev` threaded through the E-side of the loop, the per-pole recurrence both in the MLX-op `_update_E` and folded into the Metal E-kernel (`mlx/kernels.py` `_ade_lines`) so dispersive media also hit the bandwidth floor. Drude + Lorentz only (no Debye — absent upstream, so no parity oracle).
+- **Drude**: `χ = −ω_p² / (ω² + iγω)` (ω₀ = 0).
+- **Sellmeier**: one data-sheet term `B λ²/(λ² − C)`, i.e. a lossless Lorentz pole (`ω₀ = 2πc/√C`, `Δε = B`, `γ = 0`).
+- **Debye**: `χ = Δε / (1 − iωτ)` — first order, so it overrides the recurrence hook with the exact exponential update `c1 = exp(−dt/τ)`, `c2 = 0`, `c3 = Δε(1 − exp(−dt/τ))`. Unconditionally stable; see [materials-library.md](materials-library.md) for the half-step sampling caveat.
+
+Coefficients computed once at setup (host). **On MLX:** `P_curr`/`P_prev` threaded through the E-side of the loop, the per-pole recurrence both in the MLX-op `_update_E` and folded into the Metal E-kernel (`mlx/kernels.py` `_ade_lines`) so dispersive media also hit the bandwidth floor. The fold is generic in `(c1, c2, c3)`, so Debye rides the same path (there is no upstream parity oracle for it — upstream has Drude + Lorentz only).
 
 **Known FDTDX restriction (iso/diagonal dispersion only):** full-anisotropic **+** dispersive simultaneously is not supported upstream (`NotImplementedError`), so the MLX port is iso/diagonal only and there is no fdtdx oracle for the anisotropic case. Lithium niobate (anisotropic + dispersive + χ²) is the motivating case for lifting it — a documented low-priority future item with the MEEP state-of-the-art reference (per-pole 3x3 σ tensor with Yee-averaged off-diagonal coupling) in [roadmap.md](../dev-docs/roadmap.md#genuinely-new-physics-needs-meep-reference-or-new-derivation).
 

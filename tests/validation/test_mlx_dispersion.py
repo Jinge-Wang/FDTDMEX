@@ -38,11 +38,18 @@ _DOMAIN = 24 * _RES
 _TIME = 12e-15
 _RTOL = 1e-3
 _KTOL = 1e-4
+_WAVELENGTH = 1e-6
+_OMEGA = 2.0 * np.pi * fdtdx.constants.c / _WAVELENGTH  # ~1.884e15 rad/s
 
 # Stable poles at this dt (gamma*dt << 2). Lorentz: a mid-IR/visible resonance with modest strength;
 # Drude: a free-carrier (metal-like) pole. Parameters mirror tests/unit/test_dispersion.py.
 _LORENTZ = fdtdx.LorentzPole(resonance_frequency=1e15, damping=1e13, delta_epsilon=2.0)
 _DRUDE = fdtdx.DrudePole(plasma_frequency=1e16, damping=1e14)
+# Debye is first order: c2 = 0 and c1 = exp(-dt/tau), so it is unconditionally stable (no
+# omega_0*dt < 2 bound). tau = 1/omega puts the relaxation knee at the source frequency, where
+# Im(chi) is maximal and the pole is most distinguishable from a constant dielectric; it is also
+# ~5.6 time steps here, so the relaxation is resolved by the grid.
+_DEBYE = fdtdx.DebyePole(delta_epsilon=2.0, relaxation_time=1.0 / _OMEGA)
 
 
 def _rel(a, b):
@@ -60,7 +67,7 @@ def _build(material):
     constraints.extend(clist)
     objects.extend(bdict.values())
     src = fdtdx.PointDipoleSource(
-        partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=1e-6), polarization=0
+        partial_grid_shape=(1, 1, 1), wave_character=fdtdx.WaveCharacter(wavelength=_WAVELENGTH), polarization=0
     )
     constraints.append(src.place_at_center(vol, axes=(0, 1, 2)))
     objects.append(src)
@@ -141,6 +148,13 @@ _LOSSLESS_CASES = {
     "drude_iso": _disp((_DRUDE,)),
     "two_pole_iso": _disp((_LORENTZ, _DRUDE)),
     "lorentz_diag": _disp((_LORENTZ,), permittivity=(1.5, 2.0, 2.5)),
+    # First-order (Debye) poles ride the same generic (c1, c2, c3) recurrence, so they must clear
+    # the same bar. "debye_lorentz_iso" is the case that matters most for the Metal fold: a
+    # first-order pole (c2 = 0) sharing the coefficient stack with a second-order one, which is
+    # where a per-pole-order assumption in the kernel would show up.
+    "debye_iso": _disp((_DEBYE,)),
+    "debye_diag": _disp((_DEBYE,), permittivity=(1.5, 2.0, 2.5)),
+    "debye_lorentz_iso": _disp((_DEBYE, _LORENTZ)),
 }
 
 
@@ -170,6 +184,12 @@ def test_dispersion_matches_jax(name):
 def test_lossy_dispersion_matches_jax():
     """Conductivity + dispersion together: kernel-ineligible (sigma) → MLX-op ADE cores vs JAX."""
     mat = _disp((_LORENTZ,), electric_conductivity=0.05)
+    _assert_parity(*_run_both(mat))
+
+
+def test_lossy_debye_dispersion_matches_jax():
+    """Same, with a first-order pole: exercises the MLX-op ADE core rather than the kernel fold."""
+    mat = _disp((_DEBYE,), electric_conductivity=0.05)
     _assert_parity(*_run_both(mat))
 
 

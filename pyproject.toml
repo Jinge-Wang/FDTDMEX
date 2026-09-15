@@ -23,6 +23,9 @@ dependencies = [
     "rich>=15.0.0",
     "typing-extensions>=4.16.0",
     "gdstk>=1.0.1",
+    # YAML reader for refractiveindex.info records (fdtdx.dispersion_fit); tiny,
+    # and already pulled in transitively by several of the dev/optional extras.
+    "pyyaml>=6.0",
     # MLX (Metal) forward backend — Apple Silicon only. The dispatch layer guards
     # every use with mlx_available(), so non-Darwin/non-arm64 installs simply run JAX.
     "mlx>=0.32.2; platform_system=='Darwin' and platform_machine=='arm64'",

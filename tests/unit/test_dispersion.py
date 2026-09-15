@@ -1,13 +1,18 @@
-"""Unit tests for the dispersion module (Lorentz / Drude / ADE coefficients)."""
+"""Unit tests for the dispersion module (Lorentz / Drude / Sellmeier / Debye ADE coefficients)."""
+
+import math
 
 import numpy as np
 import pytest
 
+from fdtdx import constants
 from fdtdx.dispersion import (
+    DebyePole,
     DispersionModel,
     DrudePole,
     LorentzPole,
     Pole,
+    SellmeierPole,
     compute_eps_spectrum_from_coefficients,
     compute_pole_coefficients,
     compute_pole_coefficients_per_axis,
@@ -18,6 +23,7 @@ from fdtdx.materials import (
     Material,
     compute_allowed_dispersive_coefficients,
     compute_max_dispersive_poles,
+    compute_ordered_names,
 )
 
 
@@ -723,3 +729,238 @@ class TestAllowedCoefficientsCoupling:
             compute_allowed_dispersive_coefficients(
                 mats, dt=1e-17, max_num_poles=1, num_components=3, coupling_components=1
             )
+
+
+class TestSellmeierPole:
+    """Sellmeier terms are lossless Lorentz poles in data-sheet units."""
+
+    # Fused silica, Malitson 1965 (refractiveindex.info main/SiO2/nk/Malitson.yml,
+    # CC0): n^2 - 1 = sum_j B_j lambda^2 / (lambda^2 - C_j), lambda in um.
+    _B = (0.6961663, 0.4079426, 0.8974794)
+    _SQRT_C_UM = (0.0684043, 0.1162414, 9.896161)
+
+    def _silica(self):
+        return DispersionModel(
+            poles=tuple(
+                SellmeierPole.from_micrometres(B=b, C_um2=s**2) for b, s in zip(self._B, self._SQRT_C_UM, strict=True)
+            )
+        )
+
+    def test_triplet_matches_lorentz(self):
+        p = SellmeierPole.from_micrometres(B=1.5, C_um2=0.04)
+        lam0 = 0.2e-6  # sqrt(0.04 um^2)
+        assert p.gamma == 0.0
+        assert p.omega_0 == pytest.approx(2.0 * math.pi * constants.c / lam0, rel=1e-12)
+        assert p.coupling_sq == pytest.approx(1.5 * p.omega_0**2, rel=1e-12)
+        equivalent = LorentzPole(resonance_frequency=p.omega_0, damping=0.0, delta_epsilon=1.5)
+        for omega in (0.5e15, 2e15):
+            assert p.susceptibility_axes(omega)[0] == pytest.approx(equivalent.susceptibility_axes(omega)[0], rel=1e-12)
+
+    def test_units_metres_squared(self):
+        direct = SellmeierPole(B=0.5, C=4e-14)  # 0.04 um^2 in m^2
+        um = SellmeierPole.from_micrometres(B=0.5, C_um2=0.04)
+        assert direct.omega_0 == pytest.approx(um.omega_0, rel=1e-12)
+
+    def test_fused_silica_index_at_1550nm(self):
+        model = self._silica()
+        omega = 2.0 * math.pi * constants.c / 1.55e-6
+        eps = model.permittivity(omega, eps_inf=1.0)
+        assert eps.imag == pytest.approx(0.0, abs=1e-15)
+        assert math.sqrt(eps.real) == pytest.approx(1.444, abs=1e-3)
+
+    def test_fused_silica_index_at_sodium_d_line(self):
+        model = self._silica()
+        omega = 2.0 * math.pi * constants.c / 0.58756e-6
+        assert math.sqrt(model.permittivity(omega, eps_inf=1.0).real) == pytest.approx(1.45846, abs=1e-4)
+
+    def test_sellmeier_matches_the_data_sheet_formula(self):
+        model = self._silica()
+        for lam_um in (0.4, 0.8, 1.55, 2.5):
+            lam = lam_um * 1e-6
+            expected = 1.0 + sum(
+                b * lam_um**2 / (lam_um**2 - s**2) for b, s in zip(self._B, self._SQRT_C_UM, strict=True)
+            )
+            omega = 2.0 * math.pi * constants.c / lam
+            assert model.permittivity(omega, eps_inf=1.0).real == pytest.approx(expected, rel=1e-12)
+
+    def test_non_positive_C_raises(self):
+        with pytest.raises(ValueError, match="C must be > 0"):
+            _ = SellmeierPole(B=1.0, C=0.0).omega_0_axes
+
+    def test_recurrence_is_the_lossless_lorentz_one(self):
+        dt = 4e-18
+        p = SellmeierPole.from_micrometres(B=1.2, C_um2=0.01)
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=dt)
+        assert c1[0] == pytest.approx(2.0 - p.omega_0**2 * dt**2, rel=1e-12)
+        assert c2[0] == pytest.approx(-1.0, rel=1e-12)  # gamma = 0
+        assert c3[0] == pytest.approx(p.coupling_sq * dt**2, rel=1e-12)
+
+
+class TestDebyePole:
+    def test_analytic_susceptibility(self):
+        de, tau = 2.5, 8.0e-12
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau)
+        assert p.tau == tau
+        m = DispersionModel(poles=(p,))
+        assert m.susceptibility(0.0) == pytest.approx(de)
+        for omega in (1e10, 1.0 / tau, 1e12):
+            expected = de / (1.0 - 1j * omega * tau)
+            assert m.susceptibility(omega) == pytest.approx(expected, rel=1e-12)
+            # exp(-i omega t) convention: a passive medium absorbs, Im(chi) > 0
+            assert m.susceptibility(omega).imag > 0.0
+
+    def test_no_second_order_parameters(self):
+        p = DebyePole(delta_epsilon=1.0, relaxation_time=1e-15)
+        for name in ("omega_0_axes", "gamma_axes", "coupling_sq_axes"):
+            with pytest.raises(NotImplementedError, match=name):
+                _ = getattr(p, name)
+
+    def test_exponential_recurrence_coefficients(self):
+        de, tau, dt = 3.0, 5e-16, 4e-17
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau)
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=dt)
+        decay = math.exp(-dt / tau)
+        assert c1[0] == pytest.approx(decay, rel=1e-14)
+        assert c2[0] == 0.0
+        assert c3[0] == pytest.approx(de * (1.0 - decay), rel=1e-14)
+
+    def test_recurrence_is_unconditionally_stable(self):
+        # No omega_0 * dt < 2 bound applies: the roots are {exp(-dt/tau), 0}.
+        p = DebyePole(delta_epsilon=1.0, relaxation_time=1e-18)
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=1e-15)  # dt / tau = 1000
+        assert 0.0 <= c1[0] < 1.0
+        assert c2[0] == 0.0
+        assert np.isfinite(c3[0])
+
+    def test_non_positive_relaxation_time_raises(self):
+        p = DebyePole(delta_epsilon=1.0, relaxation_time=0.0)
+        with pytest.raises(ValueError, match="relaxation_time"):
+            compute_pole_coefficients((p,), dt=1e-17)
+
+    def test_eps_spectrum_matches_analytic_permittivity(self):
+        # The coefficient-only inversion must recover (delta_epsilon, tau) from
+        # (c1, c2, c3) exactly, so the reconstructed spectrum equals the
+        # analytic Debye permittivity.
+        de, tau, dt = 2.0, 5.3e-16, 4.7664e-17
+        eps_inf = 2.25
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau)
+        m = DispersionModel(poles=(p,))
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=dt)
+        c1a, c2a, c3a = (x[:, None, None] for x in (c1, c2, c3))
+        inv_eps = np.full((1, 1), 1.0 / eps_inf)
+        omegas = np.array([0.0, 1e14, 1.0 / tau, 1.884e15, 1e16])
+        eps = compute_eps_spectrum_from_coefficients(c1a, c2a, c3a, inv_eps, omegas, dt)
+        for i, omega in enumerate(omegas):
+            assert eps[i] == pytest.approx(eps_inf + m.susceptibility(float(omega)), rel=1e-10)
+
+    def test_eps_spectrum_mixes_debye_and_lorentz_poles(self):
+        dt = 4e-17
+        eps_inf = 2.0
+        poles = (
+            DebyePole(delta_epsilon=2.0, relaxation_time=6e-16),
+            LorentzPole(resonance_frequency=4e15, damping=1e13, delta_epsilon=1.5),
+        )
+        m = DispersionModel(poles=poles)
+        c1, c2, c3 = compute_pole_coefficients(poles, dt=dt)
+        c1a, c2a, c3a = (x[:, None, None] for x in (c1, c2, c3))
+        inv_eps = np.full((1, 1), 1.0 / eps_inf)
+        omegas = np.array([5e14, 1.884e15])
+        eps = compute_eps_spectrum_from_coefficients(c1a, c2a, c3a, inv_eps, omegas, dt)
+        for i, omega in enumerate(omegas):
+            assert eps[i] == pytest.approx(eps_inf + m.susceptibility(float(omega)), rel=1e-6)
+
+    def test_susceptibility_from_coefficients_matches_analytic(self):
+        # The mode solver / source-impedance path (jax) uses the same inversion.
+        de, tau, dt = 1.5, 4e-16, 3e-17
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau)
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=dt)
+        c1a, c2a, c3a = (x[:, None] for x in (c1, c2, c3))
+        omega = 1.884e15
+        chi = susceptibility_from_coefficients(c1a, c2a, c3a, omega=omega, dt=dt)
+        assert complex(chi[0]) == pytest.approx(DispersionModel(poles=(p,)).susceptibility(omega), rel=1e-5)
+
+    def test_per_axis_debye(self):
+        dt = 4e-17
+        p = DebyePole(delta_epsilon=(2.0, 1.0, 0.0), relaxation_time=(5e-16, 1e-15, 1e-15))
+        assert not p.is_isotropic
+        c1, c2, c3 = compute_pole_coefficients_per_axis((p,), dt=dt)
+        for ax, (de, tau) in enumerate(((2.0, 5e-16), (1.0, 1e-15), (0.0, 1e-15))):
+            assert c1[0, ax] == pytest.approx(math.exp(-dt / tau), rel=1e-14)
+            assert c3[0, ax] == pytest.approx(de * (1.0 - math.exp(-dt / tau)), rel=1e-14)
+        assert np.all(c2 == 0.0)
+        m = DispersionModel(poles=(p,))
+        chi = m.susceptibility_axes(1e15)
+        assert chi[2] == 0.0
+
+    def test_oriented_debye_tensor_path(self):
+        # The tensor path is generic in (c1, c2, c3), so an oriented Debye pole
+        # is supported: c3 becomes the outer product c3 * u u^T.
+        dt = 4e-17
+        de, tau = 2.0, 6e-16
+        u = (1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0)
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau, orientation=u)
+        c1, c2, c3 = compute_pole_coefficients_tensor((p,), dt)
+        expected = de * (1.0 - math.exp(-dt / tau)) * np.outer(u, u)
+        assert np.allclose(c3[0].reshape(3, 3), expected)
+        assert np.allclose(c1[0], math.exp(-dt / tau))
+        assert np.all(c2 == 0.0)
+        chi = DispersionModel(poles=(p,)).susceptibility_tensor(1e15)
+        assert np.allclose(chi, (de / (1.0 - 1j * 1e15 * tau)) * np.outer(u, u))
+
+    def test_oriented_debye_negative_strength_rejected(self):
+        p = DebyePole(delta_epsilon=-1.0, relaxation_time=1e-15, orientation=(1.0, 0.0, 0.0))
+        with pytest.raises(ValueError, match="passivity"):
+            compute_pole_coefficients_tensor((p,), 4e-17)
+
+    def test_rotated_per_axis_debye(self):
+        m = DispersionModel(poles=(DebyePole(delta_epsilon=(2.0, 1.0, 0.0), relaxation_time=(5e-16, 1e-15, 1e-15)),))
+        r_mat = np.array(
+            [
+                [math.cos(0.3), -math.sin(0.3), 0.0],
+                [math.sin(0.3), math.cos(0.3), 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        mr = m.rotated((0.0, 0.0, 0.3))
+        # the inert z axis (delta_epsilon = 0) is dropped
+        assert len(mr.poles) == 2 and mr.has_off_diagonal_coupling
+        for omega in (5e14, 2e15):
+            assert np.allclose(mr.susceptibility_tensor(omega), r_mat @ m.susceptibility_tensor(omega) @ r_mat.T)
+
+    def test_half_step_sampling_error_is_documented_size(self):
+        # The engine drives the recurrence with E[n] while the exact
+        # exponential update wants E at the step midpoint, so the realized
+        # (discrete) susceptibility leads the analytic one by omega*dt/2.
+        # This pins that first-order error; see
+        # DebyePole.recurrence_coefficients_axes.
+        de, tau, dt = 2.0, 5.3e-16, 4.7664e-17
+        omega = 1.884e15
+        p = DebyePole(delta_epsilon=de, relaxation_time=tau)
+        c1, c2, c3 = compute_pole_coefficients((p,), dt=dt)
+        z = np.exp(-1j * omega * dt)
+        chi_discrete = c3[0] / (z - c1[0] - c2[0] / z)
+        chi_analytic = DispersionModel(poles=(p,)).susceptibility(omega)
+        ratio = chi_discrete / chi_analytic
+        assert ratio == pytest.approx(1.0 + 0.5j * omega * dt, rel=0.02)
+        assert abs(ratio - 1.0) == pytest.approx(0.5 * omega * dt, rel=0.02)
+
+
+class TestMaterialWithNewPoleTypes:
+    def test_allowed_coefficients_for_debye_material(self):
+        dt = 4e-17
+        de, tau = 2.0, 6e-16
+        mats = {
+            "air": Material(permittivity=1.0),
+            "water_like": Material(
+                permittivity=1.77,
+                dispersion=DispersionModel(poles=(DebyePole(delta_epsilon=de, relaxation_time=tau),)),
+            ),
+        }
+        assert compute_max_dispersive_poles(mats) == 1
+        c1, c2, c3 = compute_allowed_dispersive_coefficients(
+            mats, dt=dt, max_num_poles=1, num_components=1, coupling_components=1
+        )
+        idx = compute_ordered_names(mats).index("water_like")
+        assert c1[idx, 0, 0] == pytest.approx(math.exp(-dt / tau), rel=1e-14)
+        assert c2[idx, 0, 0] == 0.0
+        assert c3[idx, 0, 0] == pytest.approx(de * (1.0 - math.exp(-dt / tau)), rel=1e-14)

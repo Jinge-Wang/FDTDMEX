@@ -38,16 +38,19 @@ from fdtdx.core.switch import OnOffSwitch
 from fdtdx.core.wavelength import WaveCharacter
 from fdtdx.core.window import GaussianWindow, TemporalWindow, TukeyWindow
 from fdtdx.dispersion import (
+    DebyePole,
     DispersionModel,
     DrudePole,
     LorentzPole,
     Pole,
+    SellmeierPole,
     compute_eps_spectrum_from_coefficients,
     compute_impedance_corrected_temporal_profile,
     compute_pole_coefficients,
     compute_pole_coefficients_per_axis,
     compute_pole_coefficients_tensor,
 )
+from fdtdx.dispersion_fit import FitResult, check_stability, fit_dispersion, read_refractiveindex_yaml
 from fdtdx.fdtd.backward import full_backward
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer, SimulationState
 from fdtdx.fdtd.initialization import apply_params, place_objects, resolve_object_constraints
@@ -57,6 +60,7 @@ from fdtdx.interfaces.modules import DtypeConversion
 from fdtdx.interfaces.recorder import Recorder, RecordingState
 from fdtdx.interfaces.time_filter import LinearReconstructEveryK
 from fdtdx.materials import Material
+from fdtdx.materials_library import MATERIALS, MaterialRecord, get_material, list_materials
 from fdtdx.objects.boundaries.bloch import BlochBoundary
 from fdtdx.objects.boundaries.initialization import BoundaryConfig, boundary_objects_from_config
 from fdtdx.objects.boundaries.pec import PerfectElectricConductor
@@ -174,6 +178,7 @@ ParameterContainer = ParameterContainer
 SimulationState = SimulationState
 
 __all__ = [
+    "MATERIALS",
     "ArrayContainer",
     "BaseModeOverlapDetector",
     "BinaryMedianFilterModule",
@@ -188,6 +193,7 @@ __all__ = [
     "CustomModeOverlapDetector",
     "CustomTimeSignalProfile",
     "Cylinder",
+    "DebyePole",
     "Detector",
     "DetectorState",
     "Device",
@@ -203,6 +209,7 @@ __all__ = [
     "FieldProjectionCartesianDetector",
     "FieldProjectionKSpaceDetector",
     "FieldState",
+    "FitResult",
     "GDSLayerObject",
     "GDSLayerSpec",
     "GDSPortSpec",
@@ -219,6 +226,7 @@ __all__ = [
     "Logger",
     "LorentzPole",
     "Material",
+    "MaterialRecord",
     "ModeExpansionResult",
     "ModeOverlapDetector",
     "ModePlaneSource",
@@ -248,6 +256,7 @@ __all__ = [
     "RemoveFloatingMaterial",
     "SMatrixResult",
     "Scene",
+    "SellmeierPole",
     "SimulationConfig",
     "SimulationObject",
     "SimulationState",
@@ -277,6 +286,7 @@ __all__ = [
     "boundary_objects_from_config",
     "calculate_sparam",
     "calculate_sparams",
+    "check_stability",
     "circular_brush",
     "compute_energy",
     "compute_eps_spectrum_from_coefficients",
@@ -299,13 +309,16 @@ __all__ = [
     "extruded_polygon_from_gds",
     "extruded_polygon_from_gds_path",
     "field",
+    "fit_dispersion",
     "frozen_field",
     "frozen_private_field",
     "full_backward",
     "gaussian_mode_function",
     "gds_layer_stack",
     "gds_layer_stack_from_component",
+    "get_material",
     "import_from_json",
+    "list_materials",
     "metric_efficiency",
     "normalize_by_energy",
     "normalize_by_poynting_flux",
@@ -320,6 +333,7 @@ __all__ = [
     "plot_setup_from_side",
     "plot_smatrix",
     "private_field",
+    "read_refractiveindex_yaml",
     "resolve_object_constraints",
     "run_fdtd",
     "setup_sparams_simulation",

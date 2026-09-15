@@ -1,0 +1,549 @@
+{
+  "schema": 1,
+  "generated_by": "scripts/build_material_library.py",
+  "source": "refractiveindex.info database (CC0 1.0). Fits produced by fdtdx.dispersion_fit.",
+  "materials": {
+    "Ag": {
+      "name": "Ag",
+      "aliases": [
+        "silver"
+      ],
+      "source_page": "main/Ag/nk/Johnson.yml",
+      "source_reference": "P. B. Johnson and R. W. Christy. Optical constants of the noble metals. Phys. Rev. B 6, 4370-4379 (1972)",
+      "wavelength_range_m": [
+        4.133e-07,
+        1.393e-06
+      ],
+      "eps_inf": 3.927907991123141,
+      "poles": [
+        {
+          "kind": "drude",
+          "plasma_frequency": 1.3956262768747512e+16,
+          "damping": 29399886631642.95
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 2933341389646661.5,
+          "damping": 608115619950466.2,
+          "delta_epsilon": 0.04549084722474016
+        }
+      ],
+      "rms": 0.3409894641672906,
+      "notes": "Johnson & Christy silver."
+    },
+    "Al": {
+      "name": "Al",
+      "aliases": [
+        "aluminium",
+        "aluminum"
+      ],
+      "source_page": "main/Al/nk/Rakic-LD.yml",
+      "source_reference": "A. D. Raki\u0107, A. B. Djuri\u0161ic, J. M. Elazar, M. L. Majewski. Optical properties of metallic films for vertical-cavity optoelectronic devices. Appl. Opt. 37, 5271-5283 (1998) [Calculation script (Python)]",
+      "wavelength_range_m": [
+        4.0143e-07,
+        1.993e-06
+      ],
+      "eps_inf": 1.0000000000000002,
+      "poles": [
+        {
+          "kind": "drude",
+          "plasma_frequency": 1.954468592817416e+16,
+          "damping": 193588785215823.22
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 2349631448738822.0,
+          "damping": 450823461799833.5,
+          "delta_epsilon": 4.3346543861921765
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 2720934386416874.0,
+          "damping": 2177638542357040.2,
+          "delta_epsilon": 12.816272512732015
+        }
+      ],
+      "rms": 0.6632920212696048,
+      "notes": "Rakic Lorentz-Drude aluminium, refitted from the tabulated n/k on that page."
+    },
+    "Al2O3": {
+      "name": "Al2O3",
+      "aliases": [
+        "sapphire",
+        "alumina",
+        "sapphire_o"
+      ],
+      "source_page": "main/Al2O3/nk/Malitson-o.yml",
+      "source_reference": "1) I. H. Malitson and M. J. Dodge. Refractive index and birefringence of synthetic sapphire. J. Opt. Soc. Am. 62, 1405 (1972) 2) M. J. Dodge. \"Refractive index\" in Handbook of Laser Science and Technology, Volume IV, Optical Materials: Part 2, CRC Press, Boca Raton, 1986, p. 30 * Ref. 1 is a talk abstract in a conference program; Ref. 2 provides a dispersion formula",
+      "wavelength_range_m": [
+        4.040752650413031e-07,
+        1.993235315638688e-06
+      ],
+      "eps_inf": 1.4730814562606473,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 5.509660954492031,
+          "C": 3.3505231876022794e-10
+        },
+        {
+          "kind": "sellmeier",
+          "B": 1.6088352247088489,
+          "C": 1.0445733750811153e-14
+        }
+      ],
+      "rms": 7.053035334737366e-07,
+      "notes": "Sapphire, ordinary ray. The extraordinary ray differs by ~0.008 in n."
+    },
+    "Au": {
+      "name": "Au",
+      "aliases": [
+        "gold"
+      ],
+      "source_page": "main/Au/nk/Johnson.yml",
+      "source_reference": "P. B. Johnson and R. W. Christy. Optical constants of the noble metals. Phys. Rev. B 6, 4370-4379 (1972)",
+      "wavelength_range_m": [
+        6e-07,
+        1.5999999999999997e-06
+      ],
+      "eps_inf": 7.727053801121401,
+      "poles": [
+        {
+          "kind": "drude",
+          "plasma_frequency": 1.2513512409287666e+16,
+          "damping": 131154700991891.16
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 713460011573595.2,
+          "damping": 31.670338198703547,
+          "delta_epsilon": 34.325609099288144
+        }
+      ],
+      "rms": 0.2419319973994569,
+      "notes": "Johnson & Christy gold, NIR only. The interband transitions below ~0.6 um are not modelled."
+    },
+    "Cu": {
+      "name": "Cu",
+      "aliases": [
+        "copper"
+      ],
+      "source_page": "main/Cu/nk/Johnson.yml",
+      "source_reference": "P. B. Johnson and R. W. Christy. Optical constants of the noble metals. Phys. Rev. B 6, 4370-4379 (1972)",
+      "wavelength_range_m": [
+        6e-07,
+        1.5999999999999997e-06
+      ],
+      "eps_inf": 6.240106177453411,
+      "poles": [
+        {
+          "kind": "drude",
+          "plasma_frequency": 1.3382543292011122e+16,
+          "damping": 157898408410885.75
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 3339010299597782.5,
+          "damping": 265947308434458.25,
+          "delta_epsilon": 0.5109542983605768
+        }
+      ],
+      "rms": 0.4968884748750306,
+      "notes": "Johnson & Christy copper, NIR only (interband absorption below ~0.6 um is not modelled)."
+    },
+    "GaAs": {
+      "name": "GaAs",
+      "aliases": [
+        "gallium arsenide"
+      ],
+      "source_page": "main/GaAs/nk/Skauli.yml",
+      "source_reference": "T. Skauli, P. S. Kuo, K. L. Vodopyanov, T. J. Pinguet, O. Levi, L. A. Eyres, J. S. Harris, M. M. Fejer, B. Gerard, L. Becouarn, E. Lallier. Improved dispersion relations for GaAs and applications to nonlinear optics. J. Appl. Phys., 94, 6447-6455 (2003)",
+      "wavelength_range_m": [
+        1.0178267764196146e-06,
+        5.896603069921657e-06
+      ],
+      "eps_inf": 5.372513999998147,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 5.466742000001776,
+          "C": 1.9636481728242227e-13
+        },
+        {
+          "kind": "sellmeier",
+          "B": 1.9575219999903597,
+          "C": 1.3628353555535709e-09
+        },
+        {
+          "kind": "sellmeier",
+          "B": 0.024299600000072454,
+          "C": 7.650044008118658e-13
+        }
+      ],
+      "rms": 2.2620644556319765e-15,
+      "notes": "GaAs at 22 C in its transparency window."
+    },
+    "Ge": {
+      "name": "Ge",
+      "aliases": [
+        "germanium"
+      ],
+      "source_page": "main/Ge/nk/Burnett.yml",
+      "source_reference": "J. H. Burnett, S. G. Kaplan, E. Stover, A. Phenis. Refractive index measurements of Ge. Proc. SPIE 9974, 99740X (2016)",
+      "wavelength_range_m": [
+        2e-06,
+        1.3999999999999998e-05
+      ],
+      "eps_inf": 10.835488597798935,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 5.169172911854198,
+          "C": 5.781009292262153e-13
+        },
+        {
+          "kind": "sellmeier",
+          "B": 12.493499405561272,
+          "C": 4.899999999991293e-07
+        }
+      ],
+      "rms": 0.00032042759104172476,
+      "notes": "Germanium in its mid-IR transparency window; opaque below ~1.9 um."
+    },
+    "H2O": {
+      "name": "H2O",
+      "aliases": [
+        "water"
+      ],
+      "source_page": "main/H2O/nk/Hale.yml",
+      "source_reference": "G. M. Hale and M. R. Querry. Optical constants of water in the 200-nm to 200-\u00b5m wavelength region. Appl. Opt. 12, 555-563 (1973) See also Segelstein 1981 for more recent data from the same group.",
+      "wavelength_range_m": [
+        4e-07,
+        1.6e-06
+      ],
+      "eps_inf": 1.5163245852795493,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 0.08928794506256793,
+          "C": 9.250326842982416e-12
+        },
+        {
+          "kind": "sellmeier",
+          "B": 0.25067099093841677,
+          "C": 1.618918110676143e-14
+        }
+      ],
+      "rms": 0.0006981462823476686,
+      "notes": "Liquid water at 25 C in the visible / near-IR, where it is effectively transparent (k < 1e-4). Use H2O_farIR for the absorbing far-IR response."
+    },
+    "H2O_farIR": {
+      "name": "H2O_farIR",
+      "aliases": [
+        "water_farIR",
+        "water_thz"
+      ],
+      "source_page": "main/H2O/nk/Hale.yml",
+      "source_reference": "G. M. Hale and M. R. Querry. Optical constants of water in the 200-nm to 200-\u00b5m wavelength region. Appl. Opt. 12, 555-563 (1973) See also Segelstein 1981 for more recent data from the same group.",
+      "wavelength_range_m": [
+        1.55e-05,
+        0.00019999999999999998
+      ],
+      "eps_inf": 1.0008206757854456,
+      "poles": [
+        {
+          "kind": "debye",
+          "delta_epsilon": 5.621900862501607,
+          "relaxation_time": 3.178397189642772e-13
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 114269637208613.16,
+          "damping": 95860398118892.38,
+          "delta_epsilon": 0.8068132898790824
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 31044232028144.05,
+          "damping": 34604964119341.95,
+          "delta_epsilon": 1.293538097765244
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 399057856810231.6,
+          "damping": 1.0000000012474221e-10,
+          "delta_epsilon": 0.6747895495306667
+        }
+      ],
+      "rms": 0.05287762853072097,
+      "notes": "Liquid water at 25 C from the far-IR into the sub-THz; the library's Debye example. The Debye pole carries the relaxation background that the librational Lorentz bands sit on. Its fitted relaxation time is an effective far-IR one, not the ~8 ps microwave relaxation, which lies outside this band."
+    },
+    "InP": {
+      "name": "InP",
+      "aliases": [
+        "indium phosphide"
+      ],
+      "source_page": "main/InP/nk/Pettit.yml",
+      "source_reference": "1) G. D. Pettit and W. J. Turner. Refractive index of InP. J. Appl. Phys. 36, 2081 (1965) 2) A. N. Pikhtin and A. D. Yas\u2019kov. Disperson of the refractive index of semiconductors with diamond and zinc-blende structures, Sov. Phys. Semicond. 12, 622-626 (1978) (as cited in Handbook of Optics, 2nd edition, Vol. 2. McGraw-Hill 1994) 3) Handbook of Optics, 2nd edition, Vol. 2. McGraw-Hill 1994 * Ref. 3",
+      "wavelength_range_m": [
+        1.0080806512037059e-06,
+        3.946787798213115e-06
+      ],
+      "eps_inf": 7.254999999999949,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 2.3160000000000447,
+          "C": 3.9225168999999597e-13
+        },
+        {
+          "kind": "sellmeier",
+          "B": 2.764999999942935,
+          "C": 1.0847142249780615e-09
+        }
+      ],
+      "rms": 1.7378752322437188e-15,
+      "notes": "InP above the band edge (transparent); the record is a lossless Sellmeier formula."
+    },
+    "LiNbO3_e": {
+      "name": "LiNbO3_e",
+      "aliases": [
+        "LN_e"
+      ],
+      "source_page": "main/LiNbO3/nk/Zelmon-e.yml",
+      "source_reference": "D. E. Zelmon, D. L. Small, D. Jundt. Infrared corrected Sellmeier coefficients for congruently grown lithium niobate and 5 mol.% magnesium oxide-doped lithium niobate. J. Opt. Soc. Am. B 14, 3319-3322 (1997)",
+      "wavelength_range_m": [
+        5.051903364508816e-07,
+        3.958903913425222e-06
+      ],
+      "eps_inf": 1.4852602676975648,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 2.798306959043102,
+          "C": 2.7896236334086177e-14
+        },
+        {
+          "kind": "sellmeier",
+          "B": 8.975406976374257,
+          "C": 4.1700739328354136e-10
+        },
+        {
+          "kind": "sellmeier",
+          "B": 0.2949515815394344,
+          "C": 7.709629146415893e-14
+        }
+      ],
+      "rms": 1.3217371579796417e-06,
+      "notes": "Congruent LiNbO3, extraordinary ray (n_e)."
+    },
+    "LiNbO3_o": {
+      "name": "LiNbO3_o",
+      "aliases": [
+        "lithium niobate",
+        "LiNbO3",
+        "LN_o"
+      ],
+      "source_page": "main/LiNbO3/nk/Zelmon-o.yml",
+      "source_reference": "D. E. Zelmon, D. L. Small, D. Jundt. Infrared corrected Sellmeier coefficients for congruently grown lithium niobate and 5 mol.% magnesium oxide-doped lithium niobate. J. Opt. Soc. Am. B 14, 3319-3322 (1997)",
+      "wavelength_range_m": [
+        5.051903364508816e-07,
+        3.958903913425222e-06
+      ],
+      "eps_inf": 1.6636627253807956,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 0.607553010639404,
+          "C": 6.818917157110041e-14
+        },
+        {
+          "kind": "sellmeier",
+          "B": 12.640320110987513,
+          "C": 4.755427323122771e-10
+        },
+        {
+          "kind": "sellmeier",
+          "B": 2.6312024640939464,
+          "C": 2.978630636697355e-14
+        }
+      ],
+      "rms": 1.2491286106667613e-06,
+      "notes": "Congruent LiNbO3, ordinary ray (n_o). Pair with LiNbO3_e for the uniaxial tensor."
+    },
+    "PMMA": {
+      "name": "PMMA",
+      "aliases": [
+        "poly(methyl methacrylate)",
+        "acrylic",
+        "resist"
+      ],
+      "source_page": "organic/(C5H8O2)n - poly(methyl methacrylate)/nk/Sultanova.yml",
+      "source_reference": "N. Sultanova, S. Kasarova, I. Nikolov. Dispersion properties of optical polymers. Acta Physica Polonica A 116, 585-587 (2009) (fit of the experimental data with the Sellmeier dispersion formula: Mikhail Polyanskiy)",
+      "wavelength_range_m": [
+        4.400382926608428e-07,
+        1.0442582103966292e-06
+      ],
+      "eps_inf": 1.0002540733412113,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 1.1816461382426844,
+          "C": 1.131527768099047e-14
+        }
+      ],
+      "rms": 4.6633275112509e-08,
+      "notes": "PMMA at 20 C, Sellmeier fit of the Sultanova data."
+    },
+    "Si": {
+      "name": "Si",
+      "aliases": [
+        "silicon",
+        "c-Si"
+      ],
+      "source_page": "main/Si/nk/Salzberg.yml",
+      "source_reference": "1) C. D. Salzberg and J. J. Villa. Infrared refractive indexes of silicon, germanium and modified selenium glass. J. Opt. Soc. Am., 47, 244-246 (1957) 2) B. Tatian. Fitting refractive-index data with the Sellmeier dispersion formula. Appl. Opt. 23, 4477-4485 (1984) * Ref. 2 provides a dispersion formula based on data from Ref. 1",
+      "wavelength_range_m": [
+        1.36e-06,
+        1.6999999999999998e-06
+      ],
+      "eps_inf": 7.521742882326953,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 4.193479316502728,
+          "C": 2.058682128562198e-13
+        },
+        {
+          "kind": "sellmeier",
+          "B": 32.81073937165909,
+          "C": 5.766409826219486e-09
+        }
+      ],
+      "rms": 6.975240538358089e-06,
+      "notes": "Crystalline silicon at 26 C, telecom band. Transparent here; absorption is not modelled."
+    },
+    "Si3N4": {
+      "name": "Si3N4",
+      "aliases": [
+        "silicon nitride",
+        "nitride"
+      ],
+      "source_page": "main/Si3N4/nk/Luke.yml",
+      "source_reference": "K. Luke, Y. Okawachi, M. R. E. Lamont, A. L. Gaeta, M. Lipson. Broadband mid-infrared frequency comb generation in a Si3N4 microresonator. Opt. Lett. 40, 4823-4826 (2015)",
+      "wavelength_range_m": [
+        4.044312940670692e-07,
+        1.9940824362151217e-06
+      ],
+      "eps_inf": 1.0000000000000002,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 3.0248904193982065,
+          "C": 1.831758731535018e-14
+        },
+        {
+          "kind": "sellmeier",
+          "B": 260.5949396181276,
+          "C": 9.940911906053984e-09
+        }
+      ],
+      "rms": 1.9357566884848575e-06,
+      "notes": "Stoichiometric LPCVD silicon nitride."
+    },
+    "SiO2": {
+      "name": "SiO2",
+      "aliases": [
+        "silica",
+        "fused silica",
+        "glass",
+        "oxide"
+      ],
+      "source_page": "main/SiO2/nk/Malitson.yml",
+      "source_reference": "1) I. H. Malitson. Interspecimen comparison of the refractive index of fused silica. J. Opt. Soc. Am. 55, 1205-1208 (1965) 2) C. Z. Tan. Determination of refractive index of silica glass for infrared wavelengths by IR spectroscopy. J. Non-Cryst. Solids 223, 158-163 (1998) * Sellmeier formula is reported in Ref. 1 for the 0.21\u20133.71 \u03bcm wavelength range. Ref. 2 verifies the validity of the formula up",
+      "wavelength_range_m": [
+        4.100911936872144e-07,
+        1.973796027084792e-06
+      ],
+      "eps_inf": 1.2644983717054847,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 0.8396194442881584,
+          "C": 1.0436917898021883e-14
+        },
+        {
+          "kind": "sellmeier",
+          "B": 0.9041077195623143,
+          "C": 9.861098199640927e-11
+        }
+      ],
+      "rms": 2.991373955653385e-07,
+      "notes": "Fused silica at 20 C."
+    },
+    "Si_visible": {
+      "name": "Si_visible",
+      "aliases": [
+        "silicon_visible"
+      ],
+      "source_page": "main/Si/nk/Green-2008.yml",
+      "source_reference": "M. A. Green. Self-consistent optical parameters of intrinsic silicon at 300K including temperature coefficients. Sol. Energ. Mat. Sol. Cells 92, 1305\u20131310 (2008)",
+      "wavelength_range_m": [
+        5e-07,
+        1.1e-06
+      ],
+      "eps_inf": 1.03632402893602,
+      "poles": [
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 34250647226086.39,
+          "damping": 14644468578.28822,
+          "delta_epsilon": 546.3733223448153
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 1.2128651333321144e+16,
+          "damping": 2074806798.0049915,
+          "delta_epsilon": 4.082099918114263
+        },
+        {
+          "kind": "lorentz",
+          "resonance_frequency": 5464534283718208.0,
+          "damping": 84774132763920.34,
+          "delta_epsilon": 6.803592552376413
+        }
+      ],
+      "rms": 0.04217962836769974,
+      "notes": "Crystalline silicon at 300 K including band-to-band absorption; visible to near-IR."
+    },
+    "TiO2": {
+      "name": "TiO2",
+      "aliases": [
+        "titania",
+        "rutile",
+        "TiO2_o"
+      ],
+      "source_page": "main/TiO2/nk/Devore-o.yml",
+      "source_reference": "J. R. Devore. Refractive indices of rutile and sphalerite. J. Opt. Soc. Am. 41, 416-419 (1951)",
+      "wavelength_range_m": [
+        4.5355408704537813e-07,
+        1.497708101921812e-06
+      ],
+      "eps_inf": 2.873149439596529,
+      "poles": [
+        {
+          "kind": "sellmeier",
+          "B": 2.9921444031990707,
+          "C": 8.030000885128479e-14
+        },
+        {
+          "kind": "sellmeier",
+          "B": 0.0477061572043739,
+          "C": 8.0299444837319e-14
+        }
+      ],
+      "rms": 9.064227067558837e-15,
+      "notes": "Rutile TiO2, ordinary ray."
+    }
+  }
+}
