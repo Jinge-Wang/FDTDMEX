@@ -38,10 +38,12 @@ from fdtdx.core.switch import OnOffSwitch
 from fdtdx.core.wavelength import WaveCharacter
 from fdtdx.core.window import GaussianWindow, TemporalWindow, TukeyWindow
 from fdtdx.dispersion import (
+    DebyePole,
     DispersionModel,
     DrudePole,
     LorentzPole,
     Pole,
+    SellmeierPole,
     compute_eps_spectrum_from_coefficients,
     compute_impedance_corrected_temporal_profile,
     compute_pole_coefficients,
@@ -188,6 +190,7 @@ __all__ = [
     "CustomModeOverlapDetector",
     "CustomTimeSignalProfile",
     "Cylinder",
+    "DebyePole",
     "Detector",
     "DetectorState",
     "Device",
@@ -248,6 +251,7 @@ __all__ = [
     "RemoveFloatingMaterial",
     "SMatrixResult",
     "Scene",
+    "SellmeierPole",
     "SimulationConfig",
     "SimulationObject",
     "SimulationState",

@@ -12,6 +12,7 @@ Layout mirrors ``test_fresnel.py`` — 3x3 periodic transverse, PMLs in z,
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import fdtdx
 from fdtdx.constants import c as c0
@@ -370,4 +371,124 @@ def test_drude_metal_is_highly_reflective():
     assert abs(T_measured - T_analytic) < _TOLERANCE, (
         f"Drude T_measured={T_measured:.4f}, T_analytic={T_analytic:.4f}, "
         f"|diff|={abs(T_measured - T_analytic):.3f} > {_TOLERANCE}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Debye tests
+# ---------------------------------------------------------------------------
+
+# Relaxation time placed at omega*tau = 1 — the knee of the Debye response,
+# where Im(chi) is maximal and the model is most distinguishable from a
+# constant dielectric. tau = 1/omega is ~11 time steps, so the relaxation is
+# resolved by the grid.
+_DEBYE_DELTA_EPS = 4.0
+_DEBYE_TAU = 1.0 / _OMEGA
+_DEBYE_EPS_INF = 2.25
+
+# Two detectors inside the medium, used to measure the decay rate over a fixed
+# span. Both sit at the same sub-cell offset, so the 500 nm separation carries
+# no half-cell ambiguity (an absolute depth would).
+_DEBYE_DECAY_Z0 = _INTERFACE_Z + 5
+_DEBYE_DECAY_Z1 = _INTERFACE_Z + 25
+_DEBYE_DECAY_SPAN = (_DEBYE_DECAY_Z1 - _DEBYE_DECAY_Z0) * _RESOLUTION
+# The reflection detector sits *behind* the source: for a one-way TFSF plane
+# source that half-space is the scattered-field region, so it carries the
+# reflected wave alone. A detector between source and interface would read the
+# total field (incident minus reflected) instead.
+_DEBYE_SOURCE_Z = 40
+_REFLECT_Z = 25
+
+
+def _debye_model():
+    return fdtdx.DispersionModel(poles=(fdtdx.DebyePole(delta_epsilon=_DEBYE_DELTA_EPS, relaxation_time=_DEBYE_TAU),))
+
+
+def _fresnel_reflection_semi_infinite(eps_complex: complex) -> float:
+    """Power reflection at normal incidence from vacuum into ``eps_complex``."""
+    n2 = np.sqrt(eps_complex)
+    return float(np.abs((1.0 - n2) / (1.0 + n2)) ** 2)
+
+
+def test_debye_permittivity_sanity():
+    """Unit-level sanity on the Debye model so simulation failures are easier
+    to attribute: at omega*tau = 1 the susceptibility is
+    delta_epsilon * (1 + i) / 2 in the exp(-i omega t) convention."""
+    model = _debye_model()
+    chi = model.susceptibility(_OMEGA)
+    assert chi.real == pytest.approx(_DEBYE_DELTA_EPS / 2.0, rel=1e-12)
+    assert chi.imag == pytest.approx(_DEBYE_DELTA_EPS / 2.0, rel=1e-12)
+    assert chi.imag > 0  # causal absorption sign
+    eps = _DEBYE_EPS_INF + chi
+    assert eps == pytest.approx(4.25 + 2.0j, rel=1e-12)
+
+
+def test_debye_reflection_matches_fresnel():
+    """A Debye half-space reflects as predicted by Fresnel.
+
+    Reflection, not deep transmission, is the quantity compared against the
+    analytic complex index: it is a surface quantity, so it carries none of
+    the absorption-depth ambiguity of a detector placed inside a medium whose
+    absorption length is a few cells. The TFSF plane source radiates only in
+    +z, so a flux detector between the source and the interface sees the
+    reflected wave alone.
+    """
+    model = _debye_model()
+    eps_omega = _DEBYE_EPS_INF + complex(model.susceptibility(_OMEGA))
+    R_analytic = _fresnel_reflection_semi_infinite(eps_omega)
+    assert R_analytic > 0.1, f"Test premise weak: Debye R_analytic={R_analytic:.3f} too small"
+
+    # Reference run: vacuum everywhere; forward flux = incident power.
+    obj0, con0, cfg0, vol0 = _build_embedded_source(_DEBYE_SOURCE_Z)
+    _add_flux_det("flux_t", _DET_T_Z, vol0, obj0, con0)
+    S0 = _mean_flux(_run(obj0, con0, cfg0), "flux_t")
+
+    obj1, con1, cfg1, vol1 = _build_embedded_source(_DEBYE_SOURCE_Z)
+    material = fdtdx.Material(permittivity=_DEBYE_EPS_INF, dispersion=model)
+    _add_half_space(material, vol1, obj1, con1)
+    _add_flux_det("flux_r", _REFLECT_Z, vol1, obj1, con1)
+    S_R = _mean_flux(_run(obj1, con1, cfg1), "flux_r")
+
+    assert S0 > 0, f"Reference flux zero: {S0}"
+    R_measured = abs(S_R) / S0
+    rel_err = abs(R_measured - R_analytic) / R_analytic
+    assert rel_err < _TOLERANCE, (
+        f"Debye R_measured={R_measured:.4f}, R_analytic={R_analytic:.4f} "
+        f"(eps={eps_omega}), rel_err={rel_err:.3f} > {_TOLERANCE}"
+    )
+
+
+def test_debye_absorption_rate_matches_analytic_index():
+    """The wave decays inside the Debye medium at the analytic rate.
+
+    Two flux detectors a fixed 500 nm apart inside the half-space give
+    ``Im(n)`` from ``S(z1)/S(z0) = exp(-2 k0 Im(n) dz)`` without any
+    absolute-depth ambiguity. This also pins the sign of the susceptibility:
+    an anti-causal sign would make the field grow instead of decay.
+
+    Tolerance is looser than the Fresnel tests because the ADE recurrence
+    samples ``E`` half a step early (see
+    ``DebyePole.recurrence_coefficients_axes``), which biases the realized
+    ``Im(n)`` up by ``~omega*dt/2`` — about 5 % at this resolution.
+    """
+    model = _debye_model()
+    eps_omega = _DEBYE_EPS_INF + complex(model.susceptibility(_OMEGA))
+    n_analytic = np.sqrt(eps_omega)
+    k0 = _OMEGA / c0
+
+    obj, con, cfg, vol = _build_embedded_source(_DEBYE_SOURCE_Z)
+    material = fdtdx.Material(permittivity=_DEBYE_EPS_INF, dispersion=model)
+    _add_half_space(material, vol, obj, con)
+    _add_flux_det("flux_a", _DEBYE_DECAY_Z0, vol, obj, con)
+    _add_flux_det("flux_b", _DEBYE_DECAY_Z1, vol, obj, con)
+    arrays = _run(obj, con, cfg)
+    S_a = _mean_flux(arrays, "flux_a")
+    S_b = _mean_flux(arrays, "flux_b")
+
+    assert S_a > 0 and S_b > 0, f"Fluxes inside the medium must be positive, got {S_a}, {S_b}"
+    assert S_b < S_a, f"Field must decay in an absorbing medium, got {S_a} -> {S_b}"
+    im_n_measured = -np.log(S_b / S_a) / (2.0 * k0 * _DEBYE_DECAY_SPAN)
+    rel_err = abs(im_n_measured - n_analytic.imag) / n_analytic.imag
+    assert rel_err < 0.10, (
+        f"Debye Im(n) measured={im_n_measured:.4f}, analytic={n_analytic.imag:.4f}, rel_err={rel_err:.3f} > 0.10"
     )
