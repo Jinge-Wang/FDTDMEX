@@ -9,7 +9,8 @@ Forward-first, Metal-native FDTD electromagnetics on Apple Silicon (MLX).
 ## Engine & physics
 - [Physics & conventions](physics.md) — Yee grid, update equations, field normalization, stability.
 - [Non-uniform grids](nonuniform-grid.md) — spacing-weighted curl, interpolation, and anisotropic averaging.
-- [Materials & anisotropy](materials-anisotropy.md) — full-tensor heterogeneous ε/µ and Drude–Lorentz dispersion.
+- [Materials & anisotropy](materials-anisotropy.md) — full-tensor heterogeneous ε/µ and ADE dispersion.
+- [Dispersion models, fitter & material library](materials-library.md) — Lorentz/Drude/Sellmeier/Debye poles, fitting measured n/k, and the built-in materials.
 - [Subpixel smoothing](subpixel-smoothing.md) — Kottke/Farjadpour effective-tensor averaging.
 - [Mode solver](mode-solver.md) — native full-vectorial finite-difference mode solver and overlap.
 
