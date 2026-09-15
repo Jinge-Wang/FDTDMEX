@@ -75,11 +75,36 @@ def _resolve_grid_from_volume(
     If ``config.grid`` is already a ``RectilinearGrid`` this is a no-op.
     The volume's ``partial_grid_shape`` takes priority; ``partial_real_shape``
     is converted using the policy's per-axis spacing as a fallback.
+
+    A policy that exposes ``resolve_extent`` (``GradedGrid``) is resolved from the volume's
+    ``partial_real_shape`` in metres instead: once the cell widths vary, the number of cells is an
+    output of the mesh generator, so a cell count cannot be the input. The resolved grid spans the
+    requested extent exactly, which is what lets the ordinary constraint solve derive the volume's
+    cell count from it in the usual way.
     """
     if isinstance(config.grid, RectilinearGrid):
         return config
     object_map = {obj.name: obj for obj in objects}
     volume_obj = object_map[_resolve_volume_name(object_map)]
+    resolve_extent = getattr(config.grid, "resolve_extent", None)
+    if resolve_extent is not None:
+        lengths: list[float] = []
+        for axis in range(3):
+            length = volume_obj.partial_real_shape[axis]
+            if length is None:
+                raise ValueError(
+                    f"{type(config.grid).__name__} is resolved from the simulation volume's physical "
+                    f"extent, but SimulationVolume axis {axis} has no partial_real_shape. A cell "
+                    f"count does not determine the extent on a graded mesh: give the volume a "
+                    f"partial_real_shape in metres."
+                )
+            lengths.append(float(length))
+        real_shape: tuple[float, float, float] = (lengths[0], lengths[1], lengths[2])
+        resolved = config.grid.resolve_extent(real_shape)
+        summary = getattr(config.grid, "summary", None)
+        if summary is not None:
+            logger.info(f"Grid policy resolved for the simulation volume:\n{config.grid.summary(real_shape)}")
+        return config.aset("grid", resolved)
     pre_shape_list: list[int] = []
     for axis in range(3):
         n = volume_obj.partial_grid_shape[axis]
