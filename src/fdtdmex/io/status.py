@@ -13,9 +13,13 @@ The schema is ag-fdtd's (we write it verbatim)::
 
     {"run_id", "name", "solver": "fdtdmex",
      "status": "queued|running|completed|failed",
-     "step", "total", "heartbeat": <epoch>,
+     "step", "total", "steps_run", "heartbeat": <epoch>,
      "started_at": <epoch>, "finished_at": <epoch|null>,
      "pid": <int>, "error": <str|null>}
+
+``steps_run`` is an fdtdmex addition on top of ag-fdtd's schema: the number of steps the engine
+actually executed, which is below ``total`` when a stopping condition ended the run early. It is
+``null`` until the run finishes.
 
 ``status.json`` is written **atomically** (temp file in the same dir + ``os.replace``), so a watcher
 never reads a half-written file. The ``mock`` backend drives the same ticks (see
@@ -37,6 +41,19 @@ from loguru import logger
 from .run import sim_run
 
 Status = Literal["queued", "running", "completed", "failed"]
+
+
+def _read_steps_run(results_path: Path) -> int | None:
+    """Read the results file's ``steps_run`` attribute (``None`` if absent or unreadable)."""
+    try:
+        import h5py
+
+        with h5py.File(results_path, "r") as f:
+            if "steps_run" in f.attrs:
+                return int(f.attrs["steps_run"])
+    except Exception:  # pragma: no cover - telemetry must never fail a completed run
+        return None
+    return None
 
 
 class StatusWriter:
@@ -69,6 +86,7 @@ class StatusWriter:
             "heartbeat": now,
             "started_at": now,
             "finished_at": None,
+            "steps_run": None,
             "pid": os.getpid(),
             "error": None,
         }
@@ -90,10 +108,22 @@ class StatusWriter:
                     json.dumps({"step": int(step), "total": int(total), "heartbeat": self._state["heartbeat"]}) + "\n"
                 )
 
-    def complete(self) -> None:
-        """Terminal success: ``"completed"``, ``step = total``, ``finished_at`` set."""
+    def complete(self, steps_run: int | None = None) -> None:
+        """Terminal success: ``"completed"``, ``step = total``, ``finished_at`` and ``steps_run`` set.
+
+        ``steps_run`` (default: ``total``) is the number of steps the engine actually ran; a
+        stopping condition can end a run below ``total``. ``step`` still reports ``total`` so a
+        watcher's progress bar finishes.
+        """
         now = time.time()
-        self._state.update(status="completed", step=self._state["total"], heartbeat=now, finished_at=now)
+        total = self._state["total"]
+        self._state.update(
+            status="completed",
+            step=total,
+            steps_run=int(total if steps_run is None else steps_run),
+            heartbeat=now,
+            finished_at=now,
+        )
         self._write()
 
     def fail(self, err: BaseException | str) -> None:
@@ -151,7 +181,7 @@ def run_simulation(
 
     try:
         sim_run(config_or_hdf5, results_path, backend=backend, progress=_on_progress)
-        writer.complete()
+        writer.complete(steps_run=_read_steps_run(results_path))
     except Exception as exc:
         writer.fail(exc)
         logger.error(f"run_simulation: run {run_id!r} failed → {exc}")

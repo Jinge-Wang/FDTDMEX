@@ -86,6 +86,7 @@ def mock_run(
     with h5py.File(results_path, "w") as f:
         f.attrs["schema_version"] = SCHEMA_VERSION
         f.attrs["num_steps"] = num_steps
+        f.attrs["steps_run"] = num_steps
         f.attrs["backend"] = "mock"
         ds = f.create_group("detector_states")
         for d in spec:
