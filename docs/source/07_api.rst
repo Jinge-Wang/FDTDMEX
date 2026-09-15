@@ -68,6 +68,7 @@ API
     fdtdx.GaussianPulseProfile
     fdtdx.GaussianSmoothing2D
     fdtdx.GaussianWindow
+    fdtdx.GradedGrid
     fdtdx.GradientConfig
     fdtdx.GridCoordinateConstraint
     fdtdx.HorizontalSymmetry2D
@@ -117,6 +118,7 @@ API
     fdtdx.Recorder
     fdtdx.RecordingState
     fdtdx.RectilinearGrid
+    fdtdx.RefinementRegion
     fdtdx.RemoveFloatingMaterial
     fdtdx.resolve_object_constraints
     fdtdx.run_fdtd
