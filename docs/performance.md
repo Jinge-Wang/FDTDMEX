@@ -79,6 +79,23 @@ Region-interpolation + gating are exact (parity-tested against the JAX oracle wi
 
 That A/B was measured before the Gaussian-plane-source fix (upstream fdtdx #418), so its absolute physics numbers are the pre-fix ones; the wall-time comparison is unaffected because both sides ran the same source. Re-running the same script on 2026-09-04 with the fix gives **381 s** (unchanged wall) at the same resonance dip, **1307.1 nm**, with the extinction depth now **0.12** instead of 0.302.
 
+## Stopping conditions (check cadence)
+
+fdtdx's `StoppingCondition` is evaluated inside the JAX `while_loop` — once per step, on traced arrays, at no extra cost. The MLX loop is an eager Python `for` loop, so reading a condition means pulling a scalar back to the host and waiting for the GPU. Doing that every step would serialise the loop.
+
+So the condition is reduced to a plain-data **stop plan** (threshold, min/max steps, cadence) before the loop and evaluated only at the loop's existing `mx.eval` boundaries: `check_every` is snapped to a multiple of `eval_every`, and the energy reduction is built once and wrapped in `mx.compile` so its element-wise chain fuses into a single pass over E and H. A check is then one pass plus one scalar sync, on a step that already synchronised.
+
+Cost of the check (M4 Pro, 96³ isotropic box, Metal kernel on, 200 steps, median of five runs; `EnergyThresholdCondition` with a threshold that is never met, so every check runs in full):
+
+| check cadence | steps/s | vs no condition |
+|---|--:|--:|
+| no condition | 2619 | — |
+| every 8 steps (default) | 2242 | −14 % |
+| every 16 steps | 2406 | −8 % |
+| every 32 steps | 2504 | −4 % |
+
+`FDTDMEX_STOP_CHECK_EVERY` sets the cadence. The trade is precision for throughput: a check every *k* steps means the run can overshoot the step the JAX engine would have stopped on by up to *k*−1 steps. Everything else matches the JAX contract — the returned time step is the number of steps actually executed, and detector buffers keep their full `time_steps_total` shape with the rows for steps that never ran left at their `reset()` zeros. `TimeStepCondition` needs no checks at all and costs nothing.
+
 ## Apple-Silicon ceilings
 
 The equal-traffic Metal:CPU ratio is factor (a) above — multiply by up to ~4x (factor b) for the full custom-kernel ceiling. The *ratio* over CPU is ~constant because Apple scales CPU and GPU bandwidth together, except where bandwidth outruns the CPU ceiling (M4 Max, Ultra); a bigger chip's decisive wins are **absolute throughput** (∝ BW) and **capacity** (RAM → domains a discrete GPU can't hold). Max-N is a rough isotropic estimate (~50 B/cell double-buffered, 70% working set); all numbers are model estimates anchored to one M4 Pro measurement.

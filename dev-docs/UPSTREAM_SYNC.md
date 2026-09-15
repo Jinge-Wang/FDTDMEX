@@ -86,6 +86,7 @@ what `src/fdtdx/mlx/` assumes:
 | source `_E/_H` precompute, detector `init_state` shapes | `mlx/source_freeze.py`, `mlx/detector_freeze.py` | shape mismatch (loud) or wrong injection/recording (silent) |
 | placement / coordinate origin (#363) | examples, `Scene`, HDF5 contract | objects silently move — **not** caught by parity tests |
 | forward feature set | `backend/dispatch.py:kernel_eligible` | a new upstream forward feature runs on MLX unsupported → wrong result instead of JAX fallback |
+| `StoppingCondition` semantics (`setup()` defaults, what `__call__` compares) | `mlx/stop.py` | the stop plan mirrors stale semantics → MLX stops on a different step. The gate matches on the *exact* type, so a **new** upstream condition subclass falls back to JAX on its own; a changed `__call__` on one of the three supported ones does not, and needs the plan updated. |
 
 ## Automation (optional, cheap)
 

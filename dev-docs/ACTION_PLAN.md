@@ -65,6 +65,7 @@ FDTDMEX is an additive fork; staying current with [ymahlau/fdtdx](https://github
 | file | role |
 |---|---|
 | [`mlx/loop.py`](../src/fdtdx/mlx/loop.py) | time-loop driver; builds E/H cores (kernel or MLX-op), host-gated source injection |
+| [`mlx/stop.py`](../src/fdtdx/mlx/stop.py) | stopping conditions → a plain stop plan checked at the loop's eval cadence (`FDTDMEX_STOP_CHECK_EVERY`) |
 | [`mlx/kernels.py`](../src/fdtdx/mlx/kernels.py) | custom Metal E/H bulk kernels (per-cell `cb`, in-kernel CPML fold, non-uniform metric, ADE dispersion) + block hybrid for full-tensor inclusions |
 | [`mlx/curl.py`](../src/fdtdx/mlx/curl.py) · [`update.py`](../src/fdtdx/mlx/update.py) · [`pml.py`](../src/fdtdx/mlx/pml.py) | pad-free Yee curl + slab-CPML; E/H update; CPML coeff precompute |
 | [`mlx/bridge.py`](../src/fdtdx/mlx/bridge.py) · [`state.py`](../src/fdtdx/mlx/state.py) · [`serialize.py`](../src/fdtdx/mlx/serialize.py) | ArrayContainer ↔ MLXState (the resolved-arrays seam) + numpy↔mx serialization for HDF5 |
