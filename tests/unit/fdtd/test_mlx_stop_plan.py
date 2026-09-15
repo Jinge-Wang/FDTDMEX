@@ -1,8 +1,8 @@
 # tests/unit/fdtd/test_mlx_stop_plan.py
 """Stop-plan derivation + the MLX feature gate for stopping conditions (refs #39).
 
-Pure host-side logic: ``fdtdx.mlx.stop`` imports ``mlx.core`` only inside ``should_stop``, so
-these run on any platform (no Metal device needed).
+Pure host-side logic: ``fdtdx.mlx.stop`` imports ``mlx.core`` only inside ``make_stop_check``,
+so these run on any platform (no Metal device needed).
 """
 
 from types import SimpleNamespace

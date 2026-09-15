@@ -201,7 +201,7 @@ def run_forward_mlx(
             progress(n + 1, num_steps)
 
         # Stop check on the eval boundary: the fields are already evaluated here, so this costs one
-        # reduction plus the single scalar sync inside ``should_stop``.
+        # reduction plus the single scalar sync inside the check.
         if stop_check is not None and (n + 1) % check_every == 0 and stop_check(n + 1):
             steps_run = n + 1
             break
