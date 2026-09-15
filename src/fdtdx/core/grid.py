@@ -1,3 +1,7 @@
+import math
+from itertools import pairwise
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -278,6 +282,581 @@ class QuasiUniformGrid(TreeClass):
         shape = tuple(slice_tuple[a][1] - slice_tuple[a][0] for a in range(3))
         area_shape = tuple(shape[a] for a in transverse)
         return jnp.ones(area_shape) * spacings[transverse[0]] * spacings[transverse[1]]
+
+
+#: Hard cap on the number of cells a single graded axis may generate, so a mistyped spacing raises
+#: instead of allocating an unusable mesh.
+MAX_CELLS_PER_AXIS = 10_000_000
+
+
+def _as_axis_tuple(value, name: str) -> tuple[float, float, float]:
+    """Return a per-axis triple of positive, finite floats from a scalar or a length-3 sequence."""
+    if isinstance(value, (int, float)):
+        values = (float(value), float(value), float(value))
+    else:
+        try:
+            sequence = tuple(value)
+        except TypeError:
+            raise ValueError(f"{name} must be a number or a length-3 sequence, got {value!r}.") from None
+        if len(sequence) != 3:
+            raise ValueError(f"{name} must be a number or a length-3 sequence, got {value!r}.")
+        values = (float(sequence[0]), float(sequence[1]), float(sequence[2]))
+    for axis, v in enumerate(values):
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError(f"{name} must be positive and finite on every axis, got {value!r} (axis {axis}).")
+    return values
+
+
+def _format_length(value: float) -> str:
+    """Format a length in the largest unit that keeps the number readable."""
+    for scale, unit in ((1e-9, "nm"), (1e-6, "um"), (1e-3, "mm")):
+        if abs(value) < 1000.0 * scale:
+            return f"{value / scale:.4g} {unit}"
+    return f"{value:.4g} m"
+
+
+def _ceil_with_tolerance(value: float, rel_tol: float = 1e-9) -> int:
+    """Ceiling that ignores float noise, so ``20.0000000001`` stays 20 cells."""
+    return math.ceil(value - rel_tol * max(1.0, abs(value)))
+
+
+def _axis_segments(
+    lower: float,
+    upper: float,
+    intervals: list[tuple[float, float, float]],
+    background: float,
+) -> list[tuple[float, float, float]]:
+    """Split ``[lower, upper]`` at every interval boundary and label each piece with its target width.
+
+    Overlapping intervals are resolved by taking the finest target on the overlap.  Neighbouring
+    pieces that end up with the same target are merged, so a boundary only survives where the
+    requested cell width actually changes.
+    """
+    tol = 1e-12 * (upper - lower)
+    points = [lower, upper]
+    for lo, hi, _target in intervals:
+        points.extend((lo, hi))
+    ordered: list[float] = []
+    for point in sorted(min(max(p, lower), upper) for p in points):
+        if not ordered or point - ordered[-1] > tol:
+            ordered.append(point)
+    ordered[0] = lower
+    ordered[-1] = upper
+    segments: list[tuple[float, float, float]] = []
+    for x0, x1 in pairwise(ordered):
+        mid = 0.5 * (x0 + x1)
+        target = background
+        for lo, hi, interval_target in intervals:
+            if lo - tol <= mid <= hi + tol:
+                target = min(target, interval_target)
+        if segments and abs(segments[-1][2] - target) <= 1e-12 * background:
+            segments[-1] = (segments[-1][0], x1, segments[-1][2])
+        else:
+            segments.append((x0, x1, target))
+    return segments
+
+
+def _lower_envelope(
+    lower: float,
+    upper: float,
+    lines: list[tuple[float, float]],
+) -> list[tuple[float, float, float, float]]:
+    """Return ``(x0, x1, alpha, beta)`` pieces on which ``alpha + beta * x`` is the smallest line."""
+    breakpoints = {lower, upper}
+    for i in range(len(lines)):
+        for j in range(i + 1, len(lines)):
+            alpha_i, beta_i = lines[i]
+            alpha_j, beta_j = lines[j]
+            if beta_i == beta_j:
+                continue
+            crossing = (alpha_j - alpha_i) / (beta_i - beta_j)
+            if lower < crossing < upper:
+                breakpoints.add(crossing)
+    ordered = sorted(breakpoints)
+    pieces: list[tuple[float, float, float, float]] = []
+    for x0, x1 in pairwise(ordered):
+        if x1 <= x0:
+            continue
+        mid = 0.5 * (x0 + x1)
+        alpha, beta = min(lines, key=lambda line: line[0] + line[1] * mid)
+        pieces.append((x0, x1, alpha, beta))
+    return pieces
+
+
+def _piece_cell_measure(piece: tuple[float, float, float, float]) -> float:
+    """Return the cell count ``integral dx / s(x)`` carried by one linear piece of the width field."""
+    x0, x1, alpha, beta = piece
+    if beta == 0.0:
+        return (x1 - x0) / alpha
+    return math.log((alpha + beta * x1) / (alpha + beta * x0)) / beta
+
+
+def _piece_invert(piece: tuple[float, float, float, float], measure: float) -> float:
+    """Return the coordinate reached after ``measure`` cells from the start of one linear piece."""
+    x0, _x1, alpha, beta = piece
+    if beta == 0.0:
+        return x0 + alpha * measure
+    return ((alpha + beta * x0) * math.exp(beta * measure) - alpha) / beta
+
+
+def _enforce_ratio_bound(
+    segment_widths: list[np.ndarray],
+    segment_lengths: list[float],
+    segment_targets: list[float],
+    max_ratio: float,
+    max_iterations: int = 100,
+) -> list[np.ndarray]:
+    """Grow the cells that are too small for their neighbours, keeping every segment length exact.
+
+    The width field is continuous across a segment boundary, but each segment holds a whole number
+    of cells, so a segment that needs, say, 1.35 field cells is filled with two cells narrower than
+    the field.  That shortfall can leave the cell at the boundary too small next to its neighbour in
+    the adjacent segment.  The repair enlarges only the cells that are too small — never the ones
+    already at their target — and then rescales each segment back to its exact length, which can
+    only shrink cells.  Widths therefore never rise above a region's target or above the background,
+    and the boundary mismatch falls by the rescale factor on every pass, so a few passes suffice.
+
+    Both sweeps are the cumulative maximum of the log widths tilted by ``k * ln(max_ratio)``, which
+    is the vectorized form of ``w[k] = max(w[k], w[k-1] / max_ratio)`` and its mirror image.  A cell
+    is never widened past its own segment's target, so a layout that would need that is left with
+    its ratio violation for the caller to report rather than silently under-resolving a region.
+    """
+    widths = [np.asarray(w, dtype=np.float64) for w in segment_widths]
+    caps = np.concatenate([np.full(w.shape[0], target, dtype=np.float64) for w, target in zip(widths, segment_targets)])
+    log_ratio = math.log(max_ratio)
+    for _ in range(max_iterations):
+        flat = np.concatenate(widths)
+        if flat.size < 2:
+            break
+        ratios = np.maximum(flat[1:] / flat[:-1], flat[:-1] / flat[1:])
+        if float(ratios.max()) <= max_ratio * (1.0 + 1e-12):
+            break
+        forward = np.arange(flat.size, dtype=np.float64)
+        backward = forward[::-1]
+        log_widths = np.log(flat)
+        log_widths = np.maximum.accumulate(log_widths + forward * log_ratio) - forward * log_ratio
+        log_widths = np.maximum.accumulate((log_widths + backward * log_ratio)[::-1])[::-1] - backward * log_ratio
+        flat = np.minimum(np.exp(log_widths), caps)
+        offset = 0
+        for index, segment in enumerate(widths):
+            size = segment.shape[0]
+            updated = flat[offset : offset + size]
+            offset += size
+            widths[index] = updated * (segment_lengths[index] / float(updated.sum()))
+    return widths
+
+
+def _graded_axis_edges(
+    lower: float,
+    upper: float,
+    background: float,
+    intervals: list[tuple[float, float, float]],
+    max_ratio: float,
+    axis: int,
+) -> np.ndarray:
+    """Build the cell edges of one axis from a background width and a list of refinement intervals.
+
+    The generator works on a continuous *cell width field* ``s(x)``:
+
+    * inside a refinement interval, ``s`` is the interval's realized width — the target width
+      reduced just enough that a whole number of cells fills the interval exactly;
+    * outside, ``s`` grows away from every interval at the rate ``ln(max_ratio)`` per metre of
+      distance and is capped at the background width.
+
+    The field is the pointwise minimum of those contributions, so it is the widest field that
+    honours every target and whose induced cell sequence grows by at most ``max_ratio`` between
+    neighbours (a width field with Lipschitz constant ``ln(max_ratio)`` induces a neighbour ratio of
+    at most ``max_ratio``; this is the continuous form of geometric grading).
+
+    The axis is then cut at every breakpoint where the requested width changes, and each segment is
+    filled with cells of equal *cell measure* ``integral dx / s``, so segment boundaries — and
+    therefore interval boundaries — always land on a cell edge and the total extent is exact.  A
+    segment holds a whole number of cells, so its measure has to be rounded, and the leftover length
+    is absorbed by every cell of that segment through one common factor rather than by a single last
+    cell.  The rounding rule is: take the nearest whole number of cells, and round up instead when
+    that would make a cell wider than the segment's own target.  Rounding to nearest keeps the
+    common factor near one on both sides of a boundary, which is what keeps the ratio bound intact
+    across it; rounding up is the fallback that never lets a cell exceed its target.
+
+    Where a rounding still leaves a cell too small next to the neighbouring segment,
+    :func:`_enforce_ratio_bound` widens it again at the expense of the rest of its own segment, never
+    past that segment's target.  A layout that cannot meet the ratio bound at all — a stretch
+    shorter than one cell between a region and the domain edge, or between two regions — is reported
+    by the caller rather than silently coarsened.
+    """
+    segments = _axis_segments(lower, upper, intervals, background)
+    sources: list[tuple[float, float, float]] = []
+    for seg_lower, seg_upper, target in segments:
+        if target < background * (1.0 - 1e-12):
+            cells = max(1, _ceil_with_tolerance((seg_upper - seg_lower) / target))
+            sources.append((seg_lower, seg_upper, (seg_upper - seg_lower) / cells))
+        else:
+            sources.append((seg_lower, seg_upper, background))
+
+    growth = math.log(max_ratio)
+    segment_widths: list[np.ndarray] = []
+    for index, (seg_lower, seg_upper, width) in enumerate(sources):
+        lines: list[tuple[float, float]] = [(width, 0.0)]
+        left_alpha: float | None = None
+        right_alpha: float | None = None
+        for other_index, (other_lower, other_upper, other_width) in enumerate(sources):
+            if other_index == index:
+                continue
+            if other_upper <= seg_lower:
+                alpha = other_width - growth * other_upper
+                left_alpha = alpha if left_alpha is None else min(left_alpha, alpha)
+            else:
+                alpha = other_width + growth * other_lower
+                right_alpha = alpha if right_alpha is None else min(right_alpha, alpha)
+        if left_alpha is not None:
+            lines.append((left_alpha, growth))
+        if right_alpha is not None:
+            lines.append((right_alpha, -growth))
+
+        pieces = _lower_envelope(seg_lower, seg_upper, lines)
+        measures = [_piece_cell_measure(piece) for piece in pieces]
+        total_measure = sum(measures)
+        target = segments[index][2]
+        cells = max(1, math.floor(total_measure + 0.5))
+        if cells > MAX_CELLS_PER_AXIS:
+            raise ValueError(
+                f"Graded grid axis {axis} would need {cells:,} cells between "
+                f"{_format_length(seg_lower)} and {_format_length(seg_upper)}, which exceeds the "
+                f"limit of {MAX_CELLS_PER_AXIS:,}. Coarsen the refinement spacing or shrink the region."
+            )
+        widths = _fill_segment(pieces, measures, total_measure, cells, seg_lower, seg_upper)
+        if float(widths.max()) > target * (1.0 + 1e-12):
+            rounded_up = max(cells, _ceil_with_tolerance(total_measure))
+            if rounded_up != cells:
+                widths = _fill_segment(pieces, measures, total_measure, rounded_up, seg_lower, seg_upper)
+        segment_widths.append(widths)
+
+    segment_widths = _enforce_ratio_bound(
+        segment_widths,
+        [source[1] - source[0] for source in sources],
+        [segment[2] for segment in segments],
+        max_ratio,
+    )
+
+    edges: list[float] = [lower]
+    for (_seg_lower, seg_upper, _width), widths in zip(sources, segment_widths):
+        running = edges[-1]
+        for cell_width in widths[:-1]:
+            running += float(cell_width)
+            edges.append(running)
+        edges.append(seg_upper)
+    return np.asarray(edges, dtype=np.float64)
+
+
+def _fill_segment(
+    pieces: list[tuple[float, float, float, float]],
+    measures: list[float],
+    total_measure: float,
+    cells: int,
+    seg_lower: float,
+    seg_upper: float,
+) -> np.ndarray:
+    """Return the widths of ``cells`` cells filling one segment with equal cell measure."""
+    step = total_measure / cells
+    piece_index = 0
+    consumed = 0.0
+    coordinates: list[float] = [seg_lower]
+    for cell in range(1, cells):
+        target_measure = cell * step
+        while piece_index < len(pieces) - 1 and consumed + measures[piece_index] < target_measure:
+            consumed += measures[piece_index]
+            piece_index += 1
+        coordinate = _piece_invert(pieces[piece_index], target_measure - consumed)
+        coordinates.append(min(max(coordinate, seg_lower), seg_upper))
+    coordinates.append(seg_upper)
+    return np.diff(np.asarray(coordinates, dtype=np.float64))
+
+
+@autoinit
+class RefinementRegion(TreeClass):
+    """A physical-coordinate box that asks for a cell width inside it.
+
+    The box is given in metres in the same absolute frame as the rest of placement: the domain is
+    centred on the grid policy's ``center``, so ``0`` is the centre of the simulation volume unless
+    that centre was moved.  Each axis is either an ``(lower, upper)`` pair or ``None`` for "the whole
+    axis".
+
+    The refinement of a rectilinear mesh is a per-axis statement: a region refines the x axis over
+    its own x interval regardless of its y and z extent, so a compact box produces refined *slabs*
+    along all three axes, not only refined cells inside the box.  This is a property of rectilinear
+    grids, not of this implementation.
+
+    Example::
+
+        # 12.5 nm cells in a 200 nm slab around z = 0, on every x and y
+        RefinementRegion(spacing=12.5e-9, z=(-100e-9, 100e-9))
+    """
+
+    #: Target cell width in metres inside the region: a scalar, or one width per axis.
+    spacing: float | tuple[float, float, float] = frozen_field()
+    #: ``(lower, upper)`` x bounds in metres, or ``None`` for the whole x axis.
+    x: tuple[float, float] | None = frozen_field(default=None)
+    #: ``(lower, upper)`` y bounds in metres, or ``None`` for the whole y axis.
+    y: tuple[float, float] | None = frozen_field(default=None)
+    #: ``(lower, upper)`` z bounds in metres, or ``None`` for the whole z axis.
+    z: tuple[float, float] | None = frozen_field(default=None)
+
+    def __post_init__(self):
+        _as_axis_tuple(self.spacing, "RefinementRegion.spacing")
+        for name, bounds in (("x", self.x), ("y", self.y), ("z", self.z)):
+            if bounds is None:
+                continue
+            try:
+                sequence = tuple(bounds)
+            except TypeError:
+                raise ValueError(
+                    f"RefinementRegion.{name} must be an (lower, upper) pair in metres or None, got {bounds!r}."
+                ) from None
+            if len(sequence) != 2:
+                raise ValueError(
+                    f"RefinementRegion.{name} must be an (lower, upper) pair in metres or None, got {bounds!r}."
+                )
+            lo, hi = float(sequence[0]), float(sequence[1])
+            if not (math.isfinite(lo) and math.isfinite(hi)):
+                raise ValueError(f"RefinementRegion.{name} bounds must be finite, got {bounds!r}.")
+            if hi <= lo:
+                raise ValueError(f"RefinementRegion.{name} bounds must be increasing (lower < upper), got {bounds!r}.")
+
+    def axis_spacing(self, axis: int) -> float:
+        """Target cell width in metres along one axis."""
+        return _as_axis_tuple(self.spacing, "RefinementRegion.spacing")[axis]
+
+    def axis_bounds(self, axis: int) -> tuple[float, float] | None:
+        """Physical ``(lower, upper)`` bounds along one axis, or ``None`` for the whole axis."""
+        bounds = (self.x, self.y, self.z)[axis]
+        if bounds is None:
+            return None
+        return (float(bounds[0]), float(bounds[1]))
+
+
+@autoinit
+class GradedGrid(TreeClass):
+    """Unresolved policy for a graded rectilinear grid with mesh override regions.
+
+    Like ``UniformGrid`` and ``QuasiUniformGrid`` this is user intent, not the solver mesh.  It
+    records a background cell width, a list of :class:`RefinementRegion` boxes in physical
+    coordinates, and how fast the mesh may coarsen between them.  Placement turns it into a concrete
+    ``RectilinearGrid`` before anything else runs.
+
+    Unlike the two uniform policies, the *physical extent* is the primary quantity: a cell count does
+    not determine the extent once the widths vary.  The policy is therefore resolved through
+    :meth:`resolve_extent`, which ``fdtdx.place_objects`` calls with the simulation volume's
+    ``partial_real_shape``; :meth:`resolve` raises to keep the ambiguity visible.
+
+    The resolved grid honours four properties on every axis:
+
+    1. every cell inside a region is at most that region's target width,
+    2. neighbouring cell widths differ by at most ``max_ratio``,
+    3. every boundary where the requested width changes lands exactly on a cell edge,
+    4. the edges span the requested extent exactly.
+
+    With no regions the policy reproduces ``UniformGrid`` (or a per-axis uniform grid when
+    ``spacing`` is a triple) cell for cell.
+
+    Example::
+
+        grid = GradedGrid(
+            spacing=50e-9,
+            regions=(RefinementRegion(spacing=12.5e-9, z=(-100e-9, 100e-9)),),
+            max_ratio=1.4,
+        )
+        resolved = grid.resolve_extent((1e-6, 1e-6, 4e-6))
+    """
+
+    #: Background cell width in metres away from every region: a scalar, or one width per axis.
+    spacing: float | tuple[float, float, float] = frozen_field()
+    #: Mesh override regions, finest target wins where two regions overlap.
+    regions: tuple[RefinementRegion, ...] = frozen_field(default=())
+    #: Largest allowed ratio between neighbouring cell widths. Must be greater than one.
+    max_ratio: float = frozen_field(default=1.4)
+    #: Physical coordinate of the domain center in metres. Defaults to (0, 0, 0).
+    center: tuple[float, float, float] = frozen_field(default=(0.0, 0.0, 0.0))
+
+    def __post_init__(self):
+        _as_axis_tuple(self.spacing, "GradedGrid.spacing")
+        if not math.isfinite(self.max_ratio) or self.max_ratio <= 1.0:
+            raise ValueError(f"GradedGrid.max_ratio must be greater than one, got {self.max_ratio}.")
+        for region in self.regions:
+            if not isinstance(region, RefinementRegion):
+                raise ValueError(f"GradedGrid.regions must contain RefinementRegion instances, got {region!r}.")
+
+    # ------------------------------------------------------------------
+    # Resolution
+    # ------------------------------------------------------------------
+
+    def resolve_extent(self, real_shape: tuple[float, float, float]) -> "RectilinearGrid":
+        """Return a concrete ``RectilinearGrid`` spanning ``real_shape`` metres.
+
+        Args:
+            real_shape: Physical side lengths ``(Lx, Ly, Lz)`` in metres.
+
+        Returns:
+            A ``RectilinearGrid`` centered on :attr:`center` whose edges span exactly ``real_shape``.
+
+        Raises:
+            ValueError: If the requested regions cannot be graded within :attr:`max_ratio` — a region
+                narrower than about two of its own cells, or two regions a single cell apart, leave
+                no room for the transition.  Widen the gap, make the region an integer number of its
+                own cells wide, or allow a larger ``max_ratio``.
+        """
+        lengths = _as_axis_tuple(real_shape, "GradedGrid extent")
+        edge_arrays = []
+        for axis in range(3):
+            background = self.axis_spacing(axis)
+            length = lengths[axis]
+            lower = self.center[axis] - length / 2.0
+            upper = lower + length
+            intervals: list[tuple[float, float, float]] = []
+            for region in self.regions:
+                bounds = region.axis_bounds(axis)
+                region_lower, region_upper = (lower, upper) if bounds is None else bounds
+                region_lower = max(region_lower, lower)
+                region_upper = min(region_upper, upper)
+                if region_upper - region_lower <= 1e-12 * length:
+                    continue
+                intervals.append((region_lower, region_upper, min(region.axis_spacing(axis), background)))
+            edges = _graded_axis_edges(lower, upper, background, intervals, self.max_ratio, axis)
+            widths = np.diff(edges)
+            if np.allclose(widths, widths[0], rtol=1e-12, atol=0.0):
+                # Reproduce the uniform policy's edge expression bit for bit when the axis came out
+                # uniform, so a region-free GradedGrid is indistinguishable from UniformGrid.
+                edge_arrays.append(lower + float(widths[0]) * jnp.arange(widths.shape[0] + 1))
+            else:
+                edge_arrays.append(jnp.asarray(edges))
+            self._check_axis(np.asarray(edge_arrays[-1], dtype=np.float32), axis)
+        return RectilinearGrid(x_edges=edge_arrays[0], y_edges=edge_arrays[1], z_edges=edge_arrays[2])
+
+    def resolve(self, shape: tuple[int, int, int]) -> "RectilinearGrid":
+        """Reject cell-count resolution: a graded grid is defined by its physical extent.
+
+        Raises:
+            ValueError: Always. Call :meth:`resolve_extent` with the physical side lengths, or let
+                ``fdtdx.place_objects`` do it from the simulation volume's ``partial_real_shape``.
+        """
+        raise ValueError(
+            f"GradedGrid cannot be resolved from a cell count (got shape {shape}): the number of "
+            "cells is an output of the grading, not an input. Call resolve_extent((Lx, Ly, Lz)) "
+            "with the physical side lengths in metres, or give the SimulationVolume a "
+            "partial_real_shape and let place_objects resolve the grid."
+        )
+
+    def _check_axis(self, edges: np.ndarray, axis: int) -> None:
+        """Verify the ratio bound on the edges actually handed to the solver."""
+        widths = np.diff(edges)
+        if np.any(widths <= 0):
+            index = int(np.argmin(widths))
+            raise ValueError(
+                f"Graded grid axis {axis} produced a non-positive cell width at "
+                f"{_format_length(float(edges[index]))}. The refinement spacing is too small for the "
+                "floating point resolution of the domain."
+            )
+        ratios = np.maximum(widths[1:] / widths[:-1], widths[:-1] / widths[1:])
+        if ratios.size and float(ratios.max()) > self.max_ratio * (1.0 + 1e-3):
+            index = int(np.argmax(ratios))
+            raise ValueError(
+                f"Graded grid axis {axis} could not honour max_ratio={self.max_ratio}: neighbouring "
+                f"cells at {_format_length(float(edges[index + 1]))} differ by a factor of "
+                f"{float(ratios.max()):.3f}. There is no room for the transition — widen the gap "
+                "between the regions, make the region an integer number of its own cells wide, or "
+                "raise max_ratio."
+            )
+
+    # ------------------------------------------------------------------
+    # Convenience properties (mirror the other policies' interface)
+    # ------------------------------------------------------------------
+
+    def axis_spacing(self, axis: int) -> float:
+        """Background cell width in metres along one axis."""
+        return _as_axis_tuple(self.spacing, "GradedGrid.spacing")[axis]
+
+    @property
+    def is_uniform(self) -> bool:
+        """True only without regions and with one background width on all three axes."""
+        background = _as_axis_tuple(self.spacing, "GradedGrid.spacing")
+        return len(self.regions) == 0 and background[0] == background[1] == background[2]
+
+    @property
+    def min_spacing(self) -> float:
+        """Finest requested cell width in metres.
+
+        This is the pre-resolution estimate used for a CFL bound before placement.  The realized grid
+        can be slightly finer, because a region whose width is not a whole number of target cells is
+        filled with slightly smaller cells; the solver always takes its time step from the resolved
+        ``RectilinearGrid``, which sees the true finest cell.
+        """
+        background = _as_axis_tuple(self.spacing, "GradedGrid.spacing")
+        finest = min(background)
+        for region in self.regions:
+            for axis in range(3):
+                finest = min(finest, region.axis_spacing(axis))
+        return finest
+
+    # ------------------------------------------------------------------
+    # Reporting
+    # ------------------------------------------------------------------
+
+    def summary_stats(self, real_shape: tuple[float, float, float]) -> dict[str, Any]:
+        """Return the per-axis numbers of the grid this policy would build for ``real_shape``."""
+        grid = self.resolve_extent(real_shape)
+        cells: list[int] = []
+        min_widths: list[float] = []
+        max_widths: list[float] = []
+        ratios: list[float] = []
+        for axis in range(3):
+            widths = np.asarray(grid.cell_widths(axis), dtype=np.float64)
+            cells.append(int(widths.shape[0]))
+            min_widths.append(float(widths.min()))
+            max_widths.append(float(widths.max()))
+            if widths.shape[0] > 1:
+                pairwise = np.maximum(widths[1:] / widths[:-1], widths[:-1] / widths[1:])
+                ratios.append(float(pairwise.max()))
+            else:
+                ratios.append(1.0)
+        return {
+            "cells": tuple(cells),
+            "total_cells": int(cells[0] * cells[1] * cells[2]),
+            "min_width": tuple(min_widths),
+            "max_width": tuple(max_widths),
+            "max_ratio_observed": tuple(ratios),
+            "max_ratio": float(self.max_ratio),
+            "ratio_ok": all(ratio <= self.max_ratio * (1.0 + 1e-3) for ratio in ratios),
+            "num_regions": len(self.regions),
+        }
+
+    def summary(self, real_shape: tuple[float, float, float]) -> str:
+        """Return a short human-readable description of the grid for ``real_shape``.
+
+        Args:
+            real_shape: Physical side lengths ``(Lx, Ly, Lz)`` in metres.
+
+        Returns:
+            One header line plus one line per axis, giving the cell count, the smallest and largest
+            cell width, and the largest neighbouring-width ratio that was realized.
+        """
+        stats = self.summary_stats(real_shape)
+        background = _as_axis_tuple(self.spacing, "GradedGrid.spacing")
+        background_text = (
+            _format_length(background[0])
+            if background[0] == background[1] == background[2]
+            else ", ".join(_format_length(value) for value in background)
+        )
+        lines = [
+            f"GradedGrid: background {background_text}, {stats['num_regions']} refinement region(s), "
+            f"max ratio {self.max_ratio:g}, {stats['total_cells']:,} cells total"
+        ]
+        for axis, name in enumerate("xyz"):
+            lines.append(
+                f"  {name}: {stats['cells'][axis]:,} cells, width "
+                f"{_format_length(stats['min_width'][axis])} .. {_format_length(stats['max_width'][axis])}, "
+                f"largest neighbour ratio {stats['max_ratio_observed'][axis]:.3f}"
+            )
+        lines.append("  ratio bound honoured" if stats["ratio_ok"] else "  RATIO BOUND VIOLATED")
+        return "\n".join(lines)
 
 
 @autoinit
