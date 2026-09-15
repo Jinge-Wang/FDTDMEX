@@ -43,7 +43,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import numpy as np
 
@@ -162,18 +162,23 @@ def _json_default(obj: Any) -> Any:
     return repr(obj)
 
 
-def _expand_points(params: Mapping[str, Sequence[Any]] | Sequence[Mapping[str, Any]]) -> tuple[list[dict], list[str]]:
+def _expand_points(
+    params: Mapping[str, Sequence[Any]] | Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Turn the ``params`` argument into an explicit point list plus the parameter-name order."""
+    points: list[dict[str, Any]] = []
+    names: list[str] = []
+
     if isinstance(params, Mapping):
-        names = list(params.keys())
+        grid = cast("Mapping[str, Sequence[Any]]", params)
+        names = list(grid.keys())
         if not names:
             return [], []
-        values = [list(params[name]) for name in names]
+        values = [list(grid[name]) for name in names]
         points = [dict(zip(names, combo)) for combo in itertools.product(*values)]
         return points, names
 
     points = [dict(point) for point in params]
-    names = []
     for point in points:
         for name in point:
             if name not in names:
@@ -209,7 +214,7 @@ def run_sweep(
     evaluate: Callable[..., Mapping[str, Any]],
     *,
     cache_dir: str | Path | None = None,
-    backend: str | None = None,
+    backend: Literal["mlx", "jax"] | None = None,
     max_workers: int = 1,
     tag: str = "",
     show_progress: bool = False,
@@ -277,7 +282,7 @@ def run_sweep(
                     continue
 
             arrays, objects, config = build(**point)
-            ctx = use_backend(backend) if backend is not None else contextlib.nullcontext()  # ty: ignore
+            ctx = use_backend(backend) if backend is not None else contextlib.nullcontext()
             with ctx:
                 state = run_fdtd(arrays=arrays, objects=objects, config=config, show_progress=show_progress)
 
