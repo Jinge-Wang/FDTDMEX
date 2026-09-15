@@ -31,7 +31,7 @@ from fdtdx.mlx.inject import inject_sources_E, inject_sources_H
 from fdtdx.mlx.kernels import build_kernel_cores, kernel_eligible
 from fdtdx.mlx.source_freeze import SourcePlan
 from fdtdx.mlx.state import MLXState
-from fdtdx.mlx.stop import StopPlan, aligned_check_every, should_stop
+from fdtdx.mlx.stop import StopPlan, aligned_check_every, make_stop_check
 from fdtdx.mlx.update import _update_E, _update_H
 
 
@@ -136,6 +136,7 @@ def run_forward_mlx(
     # Align the stop check to the eval cadence so a check never adds a synchronisation point of
     # its own (0 = never check: no plan, or a pure time-step plan).
     check_every = aligned_check_every(stop_plan, eval_every)
+    stop_check = make_stop_check(stop_plan, state, detector_buffers) if check_every else None
     steps_run = num_steps
 
     # Per-step "does any detector record this step?" mask. When false the whole interpolation +
@@ -201,11 +202,9 @@ def run_forward_mlx(
 
         # Stop check on the eval boundary: the fields are already evaluated here, so this costs one
         # reduction plus the single scalar sync inside ``should_stop``.
-        if check_every and (n + 1) % check_every == 0:
-            assert stop_plan is not None
-            if should_stop(stop_plan, state, detector_buffers, n + 1):
-                steps_run = n + 1
-                break
+        if stop_check is not None and (n + 1) % check_every == 0 and stop_check(n + 1):
+            steps_run = n + 1
+            break
 
     leaves = [state.E, state.H, state.psi_E, state.psi_H]
     if dispersive:

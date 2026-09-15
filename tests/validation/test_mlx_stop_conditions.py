@@ -5,8 +5,8 @@ short Gaussian pulse — through both backends via ``fdtdx.use_backend`` and che
 contract (refs #39):
 
 - ``EnergyThresholdCondition`` stops both backends on the same energy crossing. JAX samples the
-  condition every step; MLX samples it every ``STOP_CHECK_EVERY`` steps (the loop's ``mx.eval``
-  cadence), so MLX may overshoot by up to one check interval and never more.
+  condition every step; MLX samples it on its check cadence (the loop's ``mx.eval`` boundaries),
+  so MLX may overshoot by up to one check interval and never more.
 - When the crossing is already satisfied at ``min_steps`` and ``min_steps`` sits on the check
   cadence, both backends stop on exactly the same step — then E, H and the recorded detector
   array must agree to the usual float32 parity tolerance.
@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 
 import fdtdx
-from fdtdx.backend.dispatch import STOP_CHECK_EVERY
+from fdtdx.backend.dispatch import stop_check_every
 from fdtdx.backend.platform import is_apple_silicon, mlx_available
 from fdtdx.fdtd.stop_conditions import (
     DetectorConvergenceCondition,
@@ -56,7 +56,12 @@ _CROSSING_MIN_STEPS = 100
 # ...already satisfied at a min_steps that sits on the check cadence, so both backends stop on
 # exactly that step and the fields at the stop are directly comparable.
 _ALIGNED_MIN_STEPS = 144
-assert _ALIGNED_MIN_STEPS % STOP_CHECK_EVERY == 0
+_CHECK_EVERY = stop_check_every()
+
+needs_default_cadence = pytest.mark.skipif(
+    _ALIGNED_MIN_STEPS % _CHECK_EVERY != 0,
+    reason=f"FDTDMEX_STOP_CHECK_EVERY={_CHECK_EVERY} does not divide the calibrated min_steps",
+)
 
 
 def _build():
@@ -130,8 +135,8 @@ def test_energy_threshold_stops_within_one_check_interval(placed):
     assert step_m < config.time_steps_total, step_m
     # MLX samples the condition only on its check cadence, so it stops on the first check point at
     # or after the JAX stop step -- never earlier, never a full interval later.
-    assert step_m % STOP_CHECK_EVERY == 0
-    assert step_j <= step_m < step_j + STOP_CHECK_EVERY, (step_j, step_m)
+    assert step_m % _CHECK_EVERY == 0
+    assert step_j <= step_m < step_j + _CHECK_EVERY, (step_j, step_m)
 
     # Detector shape contract: the full time_steps_total buffer on both backends, with the rows for
     # steps that never ran left at their reset() zeros.
@@ -144,6 +149,7 @@ def test_energy_threshold_stops_within_one_check_interval(placed):
     assert _rel(rec_j[:step_j], rec_m[:step_j]) < _RTOL
 
 
+@needs_default_cadence
 def test_aligned_stop_matches_jax_element_wise(placed):
     """min_steps on the check cadence: identical stop step, so E/H/detectors must match exactly."""
     _, _, config, _ = placed
@@ -183,6 +189,7 @@ def test_time_step_condition_runs_every_step(placed):
     assert rec_m[-1, 0] > 0.0
 
 
+@needs_default_cadence
 def test_detector_convergence_condition_matches_jax(placed):
     """DetectorConvergenceCondition served from the live MLX detector buffers.
 

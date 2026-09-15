@@ -234,9 +234,27 @@ def run_forward_from_plans(
     return state, detector_states, steps_run
 
 
-#: Stop-check cadence requested by :func:`_run_mlx_forward`; the loop snaps it to a multiple of its
-#: own ``eval_every`` so a check never adds a synchronisation point.
+#: Default stop-check cadence in steps; the loop snaps it to a multiple of its own ``eval_every``
+#: so a check never adds a synchronisation point of its own.
 STOP_CHECK_EVERY = 8
+
+
+def stop_check_every() -> int:
+    """Steps between stopping-condition checks (env ``FDTDMEX_STOP_CHECK_EVERY``, default 8).
+
+    A check is one fused reduction over E/H plus a scalar sync, on a step where the loop already
+    synchronises. Measured on an M4 Pro, 96^3 isotropic box, Metal kernel on, 200 steps (median of
+    five): 2619 steps/s with no condition, 2242 at the default cadence of 8 (-14 %), 2406 at 16
+    (-8 %), 2504 at 32 (-4 %). Raising the cadence buys that throughput back and costs stop
+    precision: a run can overshoot the JAX stop step by up to one interval.
+    """
+    raw = os.environ.get("FDTDMEX_STOP_CHECK_EVERY", "")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            logger.warning(f"ignoring invalid FDTDMEX_STOP_CHECK_EVERY={raw!r}, using {STOP_CHECK_EVERY}")
+    return STOP_CHECK_EVERY
 
 
 def _run_mlx_forward(arrays, objects, config, stopping_condition=None):
@@ -258,7 +276,7 @@ def _run_mlx_forward(arrays, objects, config, stopping_condition=None):
         (jnp.asarray(0, dtype=jnp.int32), arrays),
         config,
         objects,
-        check_every=STOP_CHECK_EVERY,
+        check_every=stop_check_every(),
     )
 
     # periodic_axes is needed during bridging so the non-uniform aniso width padding wraps to

@@ -169,36 +169,61 @@ def aligned_check_every(plan: StopPlan | None, eval_every: int) -> int:
     return max(eval_every, (plan.check_every // eval_every) * eval_every)
 
 
-def should_stop(plan: StopPlan, state, detector_buffers: dict, steps_done: int) -> bool:
-    """Evaluate ``plan`` after ``steps_done`` steps; ``True`` means break out of the time loop.
+def make_stop_check(plan: StopPlan | None, state, detector_buffers: dict):
+    """Build the host-side stop check, or ``None`` when the loop never has to check.
 
-    Costs one device reduction and one scalar ``.item()`` sync. Called only at the loop's
-    ``mx.eval`` boundaries, where the arrays are evaluated anyway.
+    Returns ``check(steps_done) -> bool``. Everything that can be hoisted is hoisted here: the
+    energy reduction is wrapped in ``mx.compile`` once, so the element-wise chain fuses into one
+    pass over E and H instead of streaming a handful of temporaries through DRAM. A check then
+    costs that one pass plus the scalar ``.item()``, at a step where the loop already synchronises.
+
+    The closure reads ``state.E`` / ``state.H`` and the detector buffer at call time, so it sees
+    the arrays the loop has rebound since.
     """
     import mlx.core as mx  # local: keeps the gating helpers above importable without a Metal device
 
-    if plan.kind == "time" or steps_done < plan.min_steps:
-        return False
+    if plan is None or not plan.needs_checks:
+        return None
 
     if plan.kind == "energy":
         from fdtdx.mlx.metrics import compute_energy_mlx
 
         # Same formula as EnergyThresholdCondition: sum of compute_energy over the *whole* domain,
         # PML region included, from the post-step E/H and the inverse permittivity/permeability.
-        total_energy = mx.sum(compute_energy_mlx(state.E, state.H, state.inv_eps, state.inv_mu))
-        return bool(total_energy.item() < plan.threshold)
+        inv_eps, inv_mu = state.inv_eps, state.inv_mu
+
+        def _total_energy(E, H):
+            return mx.sum(compute_energy_mlx(E, H, inv_eps, inv_mu))
+
+        reduce_energy = mx.compile(_total_energy)
+
+        def check_energy(steps_done: int) -> bool:
+            if steps_done < plan.min_steps:
+                return False
+            return bool(reduce_energy(state.E, state.H).item() < plan.threshold)
+
+        return check_energy
 
     # DetectorConvergenceCondition: L2 distance between the amplitude spectrum of the last full
-    # period and the mean of the `prev_periods` before it, read straight out of the live buffer.
+    # period and the mean of the ``prev_periods`` before it, read straight out of the live buffer.
     assert plan.detector_name is not None
-    readings = next(iter(detector_buffers[plan.detector_name].values()))  # (time_steps_total, 1)
-    spp, periods, total = plan.spp, plan.prev_periods, readings.shape[0]
-    start_ref = min(max(steps_done - (periods + 1) * spp, 0), total - periods * spp)
-    start_last = min(max(steps_done - spp, 0), total - spp)
+    name = plan.detector_name
+    buffer_key = next(iter(detector_buffers[name]))
+    spp, periods = plan.spp, plan.prev_periods
 
-    ref = readings[start_ref : start_ref + periods * spp, 0].reshape(periods, spp)
-    last = readings[start_last : start_last + spp, 0]
-    fft_ref = mx.abs(mx.fft.rfft(mx.mean(ref, axis=0), n=spp))
-    fft_last = mx.abs(mx.fft.rfft(last, n=spp))
-    distance = mx.sqrt(mx.sum(mx.square(fft_ref - fft_last)))
-    return bool(distance.item() < plan.threshold)
+    def check_detector(steps_done: int) -> bool:
+        if steps_done < plan.min_steps:
+            return False
+        readings = detector_buffers[name][buffer_key]  # (time_steps_total, 1)
+        total = readings.shape[0]
+        # Same clamped windows as the JAX condition's dynamic_slice bounds.
+        start_ref = min(max(steps_done - (periods + 1) * spp, 0), total - periods * spp)
+        start_last = min(max(steps_done - spp, 0), total - spp)
+        ref = readings[start_ref : start_ref + periods * spp, 0].reshape(periods, spp)
+        last = readings[start_last : start_last + spp, 0]
+        fft_ref = mx.abs(mx.fft.rfft(mx.mean(ref, axis=0), n=spp))
+        fft_last = mx.abs(mx.fft.rfft(last, n=spp))
+        distance = mx.sqrt(mx.sum(mx.square(fft_ref - fft_last)))
+        return bool(distance.item() < plan.threshold)
+
+    return check_detector
