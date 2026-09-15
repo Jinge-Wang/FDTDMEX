@@ -12,6 +12,7 @@ Forward-first, Metal-native FDTD electromagnetics on Apple Silicon (MLX).
 - [Materials & anisotropy](materials-anisotropy.md) — full-tensor heterogeneous ε/µ and Drude–Lorentz dispersion.
 - [Subpixel smoothing](subpixel-smoothing.md) — Kottke/Farjadpour effective-tensor averaging.
 - [Mode solver](mode-solver.md) — native full-vectorial finite-difference mode solver and overlap.
+- [Analysis utilities](analysis-utilities.md) — resonance finder (filter diagonalisation), Lorentzian line fits, and the parameter-sweep runner.
 
 ## Performance & orchestration
 - [Performance](performance.md) — scaling vs JAX-CPU, the roofline, and the bandwidth-floor model.
