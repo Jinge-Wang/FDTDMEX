@@ -45,10 +45,14 @@ so that, writing a complex frequency ``f_c = frequency - i*decay_rate``, the mod
 
 * **Frequency sign** — the ``exp(-i*omega*t)`` (physics / harminv) convention. ``frequency`` is an
   ordinary frequency in Hz, not an angular frequency. For a *complex* record, ``+f`` and ``-f`` are
-  physically distinct and only the ones inside the search band are returned; a *real* record carries
-  every mode as a ``±f`` pair, and searching a band of positive frequencies returns the ``+f``
-  member, with the amplitude of the ``cos`` it belongs to split evenly between the pair (a real
-  ``A*cos(2*pi*f*t)`` is reported with ``amplitude = A/2``, as harminv reports it).
+  physically distinct modes; a *real* record carries every mode as a ``±f`` pair, and searching a
+  band of positive frequencies returns the ``+f`` member, with the amplitude of the ``cos`` it
+  belongs to split evenly between the pair (a real ``A*cos(2*pi*f*t)`` is reported with
+  ``amplitude = A/2``, as harminv reports it).
+* **The band is a preference, not a window** — like harminv, the search is *biased* to
+  ``[f_min, f_max]`` but can return a mode outside it (most often the ``-f`` partner of a real
+  record's strongest line). Filter the returned list on ``frequency``, or pick the largest
+  ``amplitude``, when a hard window matters.
 * **Decay sign** — ``decay_rate`` is in Hz, the same units as ``frequency``, and is **positive for a
   decaying mode** (the field envelope falls as ``exp(-2*pi*decay_rate*t)``, the energy as
   ``exp(-4*pi*decay_rate*t)``). A negative value means the fit found a growing mode, which in a
