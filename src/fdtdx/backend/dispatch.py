@@ -14,9 +14,10 @@ Routing:
 
 Feature gating lives in ``_unsupported_reason`` / ``_unsupported_reason_arrays``. The MLX path covers iso/diag/full-tensor anisotropy (incl. lossy + 9-tensor
 conductivity), CPML + periodic + PEC/PMC boundaries, dipole + (tilted) TFSF plane sources, the four
-detector types, non-uniform (rectilinear) grids, and Drude-Lorentz (ADE) dispersion.
-Still gated to JAX: gradients, dispersive/randomized plane sources, Bloch/complex propagation, and
-mode sources/detectors.
+detector types, non-uniform (rectilinear) grids, Drude-Lorentz (ADE) dispersion, and the three
+built-in stopping conditions (``fdtdx.mlx.stop``).
+Still gated to JAX: gradients, dispersive/randomized plane sources, Bloch/complex propagation,
+mode sources/detectors, and any other ``StoppingCondition`` subclass.
 """
 
 from __future__ import annotations
@@ -71,7 +72,13 @@ def _unsupported_reason(config, objects, stopping_condition) -> str | None:
     if config.gradient_config is not None:
         return "gradient computation requested (MLX backend is forward-only)"
     if stopping_condition is not None:
-        return "custom stopping_condition not supported by the MLX backend yet"
+        # TimeStep / EnergyThreshold / DetectorConvergence are reduced to a StopPlan and evaluated
+        # at the loop's eval cadence; any other subclass keeps the JAX fallback.
+        from fdtdx.mlx.stop import stop_condition_unsupported_reason
+
+        reason = stop_condition_unsupported_reason(stopping_condition, config, objects)
+        if reason is not None:
+            return reason
     if getattr(config, "use_complex_fields", None) is True:
         return "forced complex fields not supported by the MLX backend yet"
     # Mirror-symmetry reduction (config.symmetry) lives in the JAX curl/halo code
@@ -179,29 +186,39 @@ def maybe_run_mlx_forward(arrays, objects, config, key, stopping_condition):
     backend = select_backend(arrays, objects, config, stopping_condition)
     if backend is not Backend.MLX:
         return None
-    return _run_mlx_forward(arrays, objects, config)
+    return _run_mlx_forward(arrays, objects, config, stopping_condition)
 
 
 def run_forward_from_plans(
-    state, source_plans, detector_plans, num_steps, courant, *, simulate_boundaries=True, progress=None
+    state,
+    source_plans,
+    detector_plans,
+    num_steps,
+    courant,
+    *,
+    simulate_boundaries=True,
+    stop_plan=None,
+    progress=None,
 ):
     """Run the MLX forward time loop from an already-resolved ``MLXState`` + frozen plans.
 
     This is the post-freeze tail of :func:`_run_mlx_forward`, factored out so the HDF5 IO layer
     (``fdtdmex.io.sim_run``) can drive a run from a *deserialized* state + plans — no
-    ``ObjectContainer`` and no re-resolution needed. Returns ``(final_state, detector_states)``
-    where ``detector_states`` is the host (jnp) ``{name: {key: array}}`` mapping, or ``None`` when
-    there are no detectors.
+    ``ObjectContainer`` and no re-resolution needed. Returns
+    ``(final_state, detector_states, steps_run)`` where ``detector_states`` is the host (jnp)
+    ``{name: {key: array}}`` mapping (or ``None`` when there are no detectors) and ``steps_run`` is
+    the number of steps actually executed — ``num_steps`` unless ``stop_plan`` ended the run early.
 
-    ``progress``, when given, is forwarded to the time loop and called ``progress(step, num_steps)``
-    for streamed run telemetry (default ``None`` = no telemetry, no overhead).
+    ``stop_plan`` is an optional :class:`fdtdx.mlx.stop.StopPlan`; ``progress``, when given, is
+    forwarded to the time loop and called ``progress(step, num_steps)`` for streamed run telemetry
+    (default ``None`` = no telemetry, no overhead).
     """
     from fdtdx.mlx.bridge import buffers_to_detector_states
     from fdtdx.mlx.detector_freeze import allocate_buffers
     from fdtdx.mlx.loop import run_forward_mlx
 
     detector_buffers = allocate_buffers(detector_plans)
-    state, detector_buffers = run_forward_mlx(
+    state, detector_buffers, steps_run = run_forward_mlx(
         state,
         source_plans,
         detector_plans,
@@ -210,22 +227,39 @@ def run_forward_from_plans(
         float(courant),
         simulate_boundaries=simulate_boundaries,
         use_metal_kernel=_metal_kernel_enabled(),
+        stop_plan=stop_plan,
         progress=progress,
     )
     detector_states = buffers_to_detector_states(detector_buffers) if detector_plans else None
-    return state, detector_states
+    return state, detector_states, steps_run
 
 
-def _run_mlx_forward(arrays, objects, config):
+#: Stop-check cadence requested by :func:`_run_mlx_forward`; the loop snaps it to a multiple of its
+#: own ``eval_every`` so a check never adds a synchronisation point.
+STOP_CHECK_EVERY = 8
+
+
+def _run_mlx_forward(arrays, objects, config, stopping_condition=None):
     import jax.numpy as jnp
 
     from fdtdx.fdtd.update import get_wrap_padding_axes
     from fdtdx.mlx.bridge import to_array_container, to_mlx_state
     from fdtdx.mlx.detector_freeze import freeze_detectors
     from fdtdx.mlx.source_freeze import freeze_sources
+    from fdtdx.mlx.stop import build_stop_plan
 
     # Match checkpointed_fdtd: zero dynamic fields + detector states before stepping.
     arrays = arrays.reset()
+
+    # Same (0, arrays) pair checkpointed_fdtd feeds to the condition's setup(), so the resolved
+    # defaults and the pre-run validation are upstream's.
+    stop_plan = build_stop_plan(
+        stopping_condition,
+        (jnp.asarray(0, dtype=jnp.int32), arrays),
+        config,
+        objects,
+        check_every=STOP_CHECK_EVERY,
+    )
 
     # periodic_axes is needed during bridging so the non-uniform aniso width padding wraps to
     # match the field padding, so resolve it before building the state.
@@ -234,8 +268,14 @@ def _run_mlx_forward(arrays, objects, config):
     source_plans = freeze_sources(objects, config, arrays)
     detector_plans = freeze_detectors(objects, config)
     num_steps = int(config.time_steps_total)
+    if stop_plan is not None:
+        num_steps = min(num_steps, stop_plan.max_steps)
     c = float(config.courant_number)
 
-    state, detector_states = run_forward_from_plans(state, source_plans, detector_plans, num_steps, c)
+    state, detector_states, steps_run = run_forward_from_plans(
+        state, source_plans, detector_plans, num_steps, c, stop_plan=stop_plan
+    )
     out_arrays = to_array_container(arrays, state, detector_states, objects=objects)
-    return jnp.asarray(num_steps, dtype=jnp.int32), out_arrays
+    # Same contract as the JAX early-stop path: the returned time step is the number of steps that
+    # actually ran, and detector rows for steps that never ran keep their reset() zeros.
+    return jnp.asarray(steps_run, dtype=jnp.int32), out_arrays
