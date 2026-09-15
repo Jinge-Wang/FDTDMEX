@@ -50,6 +50,7 @@ from fdtdx.dispersion import (
     compute_pole_coefficients_per_axis,
     compute_pole_coefficients_tensor,
 )
+from fdtdx.dispersion_fit import FitResult, check_stability, fit_dispersion, read_refractiveindex_yaml
 from fdtdx.fdtd.backward import full_backward
 from fdtdx.fdtd.container import ArrayContainer, FieldState, ObjectContainer, ParameterContainer, SimulationState
 from fdtdx.fdtd.initialization import apply_params, place_objects, resolve_object_constraints
@@ -206,6 +207,7 @@ __all__ = [
     "FieldProjectionCartesianDetector",
     "FieldProjectionKSpaceDetector",
     "FieldState",
+    "FitResult",
     "GDSLayerObject",
     "GDSLayerSpec",
     "GDSPortSpec",
@@ -281,6 +283,7 @@ __all__ = [
     "boundary_objects_from_config",
     "calculate_sparam",
     "calculate_sparams",
+    "check_stability",
     "circular_brush",
     "compute_energy",
     "compute_eps_spectrum_from_coefficients",
@@ -303,6 +306,7 @@ __all__ = [
     "extruded_polygon_from_gds",
     "extruded_polygon_from_gds_path",
     "field",
+    "fit_dispersion",
     "frozen_field",
     "frozen_private_field",
     "full_backward",
@@ -324,6 +328,7 @@ __all__ = [
     "plot_setup_from_side",
     "plot_smatrix",
     "private_field",
+    "read_refractiveindex_yaml",
     "resolve_object_constraints",
     "run_fdtd",
     "setup_sparams_simulation",
