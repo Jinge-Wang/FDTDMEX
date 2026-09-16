@@ -58,6 +58,8 @@ API
     fdtdx.FieldProjectionAngleDetector
     fdtdx.FieldProjectionCartesianDetector
     fdtdx.FieldProjectionKSpaceDetector
+    fdtdx.find_resonances
+    fdtdx.fit_lorentzian
     fdtdx.FieldState
     fdtdx.frozen_field
     fdtdx.frozen_private_field
@@ -75,6 +77,7 @@ API
     fdtdx.import_from_json
     fdtdx.LinearReconstructEveryK
     fdtdx.Logger
+    fdtdx.LorentzianFit
     fdtdx.LorentzPole
     fdtdx.Material
     fdtdx.metric_efficiency
@@ -112,6 +115,7 @@ API
     fdtdx.PositionConstraint
     fdtdx.PoyntingFluxDetector
     fdtdx.private_field
+    fdtdx.q_from_ringdown
     fdtdx.QuasiUniformGrid
     fdtdx.RealCoordinateConstraint
     fdtdx.Recorder
@@ -119,7 +123,9 @@ API
     fdtdx.RectilinearGrid
     fdtdx.RemoveFloatingMaterial
     fdtdx.resolve_object_constraints
+    fdtdx.Resonance
     fdtdx.run_fdtd
+    fdtdx.run_sweep
     fdtdx.Scene
     fdtdx.setup_sparams_simulation
     fdtdx.SimulationConfig
@@ -137,6 +143,7 @@ API
     fdtdx.StandardToInversePermittivityRange
     fdtdx.StandardToPlusOneMinusOneRange
     fdtdx.SubpixelSmoothedProjection
+    fdtdx.SweepResult
     fdtdx.TanhProjection
     fdtdx.TemporalProfile
     fdtdx.TemporalWindow

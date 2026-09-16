@@ -157,8 +157,16 @@ from fdtdx.utils.plot_field_slice import plot_field_slice, plot_field_slice_comp
 from fdtdx.utils.plot_material import plot_material, plot_material_from_side
 from fdtdx.utils.plot_modes import plot_mode, plot_mode_from_source
 from fdtdx.utils.plot_setup import plot_setup, plot_setup_from_side
+from fdtdx.utils.resonance import (
+    LorentzianFit,
+    Resonance,
+    find_resonances,
+    fit_lorentzian,
+    q_from_ringdown,
+)
 from fdtdx.utils.smatrix import SMatrixResult, plot_smatrix
 from fdtdx.utils.sparams import PortSpec, calculate_sparam, calculate_sparams, setup_sparams_simulation
+from fdtdx.utils.sweep import SweepResult, run_sweep
 
 # PeriodicBoundary is now an alias for BlochBoundary with bloch_vector=(0,0,0)
 PeriodicBoundary = BlochBoundary
@@ -218,6 +226,7 @@ __all__ = [
     "LinearReconstructEveryK",
     "Logger",
     "LorentzPole",
+    "LorentzianFit",
     "Material",
     "ModeExpansionResult",
     "ModeOverlapDetector",
@@ -246,6 +255,7 @@ __all__ = [
     "RecordingState",
     "RectilinearGrid",
     "RemoveFloatingMaterial",
+    "Resonance",
     "SMatrixResult",
     "Scene",
     "SimulationConfig",
@@ -260,6 +270,7 @@ __all__ = [
     "StandardToInversePermittivityRange",
     "StandardToPlusOneMinusOneRange",
     "SubpixelSmoothedProjection",
+    "SweepResult",
     "TFSFPlaneSourceRegion",
     "TanhProjection",
     "TemporalProfile",
@@ -299,6 +310,8 @@ __all__ = [
     "extruded_polygon_from_gds",
     "extruded_polygon_from_gds_path",
     "field",
+    "find_resonances",
+    "fit_lorentzian",
     "frozen_field",
     "frozen_private_field",
     "full_backward",
@@ -320,8 +333,10 @@ __all__ = [
     "plot_setup_from_side",
     "plot_smatrix",
     "private_field",
+    "q_from_ringdown",
     "resolve_object_constraints",
     "run_fdtd",
+    "run_sweep",
     "setup_sparams_simulation",
     "smooth_cross_section_2d",
     "smooth_inverse_permittivity",
