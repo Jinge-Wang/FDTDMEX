@@ -16,8 +16,16 @@ Welcome to the Advanced guides!
 
       Learn how to set up and run two-dimensional simulations within the 3D-Framework
 
+   .. grid-item-card:: 2. Multiphysics coupling
+      :link: coupling
+      :link-type: doc
+
+      Feed a finite-element temperature field into the material loader (thermo-optic tuning),
+      with coverage flags and a perturbation applied after the interface blend
+
 .. toctree::
    :maxdepth: 2
    :hidden:
 
    notebooks/advanced/01_2d_simulation.ipynb
+   coupling

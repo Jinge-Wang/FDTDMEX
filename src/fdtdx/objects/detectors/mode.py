@@ -481,8 +481,11 @@ class ModeOverlapDetector(BaseModeOverlapDetector):
     #: (straight waveguide).
     bend_radius: float | None = frozen_field(default=None)
 
-    #: Physical axis index (0=x, 1=y, 2=z) pointing from the waveguide center toward the center of
-    #: curvature. Must differ from the propagation axis. Required when bend_radius is set.
+    #: Physical axis index (0=x, 1=y, 2=z) **normal to the plane in which the bend lies** - a ring in
+    #: the xy-plane bends about z. The radius grows along the *other* transverse axis, with the sign
+    #: of ``bend_radius`` saying which way. This is Tidy3D's ``ModeSpec.bend_axis`` convention, which
+    #: both mode backends follow (settled 2026-09-09; the wording here said the radial axis before).
+    #: Must differ from the propagation axis. Required when bend_radius is set.
     bend_axis: int | None = frozen_field(default=None)
 
     #: Symmetry-plane condition at the min edge of each transverse axis (the two non-propagation
