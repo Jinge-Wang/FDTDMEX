@@ -42,7 +42,10 @@ def sim_postproc(results_path: str | Path) -> dict[str, Any]:
         results_path: Path to a ``results.hdf5`` from :func:`fdtdmex.io.sim_run`.
 
     Returns:
-        ``{"num_steps": int, "backend": str, "detectors": {name: {key: {summary...}}}}``.
+        ``{"num_steps": int, "steps_run": int, "backend": str, "detectors": {...}}``. ``steps_run``
+        is the number of steps the engine actually executed — below ``num_steps`` when a stopping
+        condition ended the run early (older result files without the attribute report
+        ``num_steps``).
     """
     import h5py
 
@@ -51,6 +54,7 @@ def sim_postproc(results_path: str | Path) -> dict[str, Any]:
 
     with h5py.File(results_path, "r") as f:
         result["num_steps"] = int(f.attrs.get("num_steps", -1))
+        result["steps_run"] = int(f.attrs.get("steps_run", result["num_steps"]))
         result["backend"] = str(f.attrs.get("backend", "unknown"))
         if "detector_states" in f:
             for name in f["detector_states"].keys():

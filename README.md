@@ -24,7 +24,10 @@ The forward engine is **complete, fast, and validated element-wise vs JAX-CPU**,
 - Gradients / inverse design (by design — the MLX backend is forward-only; inverse design stays on JAX/CUDA).
 - Mode sources / detectors route the forward time loop to JAX (the native mode solver they call is done).
 - Bloch / complex (nonzero-k) propagation; dispersive / randomized plane sources.
+- Custom `StoppingCondition` subclasses of your own. The three fdtdx built-ins — `TimeStepCondition`, `EnergyThresholdCondition`, `DetectorConvergenceCondition` — **do** run on Metal; the dispatcher matches on the exact type, so anything else (including a subclass of one of the three, which may override `__call__`) falls back to JAX.
 - Non–Apple-Silicon platforms (everything runs on JAX).
+
+**Stopping conditions on Metal.** JAX evaluates the condition inside its `while_loop`, once per step. The MLX loop is eager, so an every-step evaluation would mean a GPU sync every step; instead the condition is reduced to a plain stop plan before the loop and checked every **8 steps**, on the synchronisation points the loop already has. The only behavioural difference is that a run can overshoot the JAX stop step by up to one check interval; step counting and the detector-array shape contract (rows for steps that never ran stay zero) are identical. The check costs ~14 % of loop throughput on a 96³ isotropic box — set `FDTDMEX_STOP_CHECK_EVERY=32` to cut that to ~4 % at the cost of a proportionally larger overshoot. See [docs/performance.md](docs/performance.md).
 
 ## Why a Mac fork
 

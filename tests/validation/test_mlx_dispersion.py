@@ -106,7 +106,7 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
     source_plans = freeze_sources(oc, config, arr)
     detector_plans = freeze_detectors(oc, config)
     detector_buffers = allocate_buffers(detector_plans)
-    state, detector_buffers = run_forward_mlx(
+    state, detector_buffers, _ = run_forward_mlx(
         state,
         source_plans,
         detector_plans,

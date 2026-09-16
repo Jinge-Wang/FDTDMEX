@@ -10,7 +10,7 @@ can run end-to-end without a Mac/GPU.
 
 Layout of ``results.hdf5``::
 
-    /                               attrs: schema_version, num_steps, backend
+    /                               attrs: schema_version, num_steps, steps_run, backend
     /detector_states/<name>/<key>   the per-detector recorded arrays
     /config/json                    a copy of the provenance JSON (if present in the config file)
 """
@@ -28,12 +28,21 @@ from loguru import logger
 from ._hdf5 import SCHEMA_VERSION, read_array_store, read_json
 
 
-def _write_results(path: Path, detector_states: dict, num_steps: int, backend: str, config_json_bytes=None) -> Path:
+def _write_results(
+    path: Path,
+    detector_states: dict,
+    num_steps: int,
+    backend: str,
+    config_json_bytes=None,
+    steps_run: int | None = None,
+) -> Path:
     import h5py
 
     with h5py.File(path, "w") as f:
         f.attrs["schema_version"] = SCHEMA_VERSION
         f.attrs["num_steps"] = int(num_steps)
+        # Steps actually executed: below num_steps when a stopping condition ended the run early.
+        f.attrs["steps_run"] = int(num_steps if steps_run is None else steps_run)
         f.attrs["backend"] = backend
         ds = f.create_group("detector_states")
         for name, bufs in (detector_states or {}).items():
@@ -88,13 +97,13 @@ def sim_run(
         config_json_bytes = np.asarray(f["config"]["json"]) if "config" in f else None
 
     payload = deserialize(skeleton, array_store)
-    _, detector_states = run_forward_from_plans(
+    _, detector_states, steps_run = run_forward_from_plans(
         payload["state"], payload["source_plans"], payload["detector_plans"], num_steps, courant, progress=progress
     )
     detector_states = {
         name: {k: np.asarray(v) for k, v in bufs.items()} for name, bufs in (detector_states or {}).items()
     }
 
-    out = _write_results(results_path, detector_states, num_steps, "mlx", config_json_bytes)
-    logger.info(f"sim_run: wrote results HDF5 → {out} (backend=mlx, {num_steps} steps)")
+    out = _write_results(results_path, detector_states, num_steps, "mlx", config_json_bytes, steps_run=steps_run)
+    logger.info(f"sim_run: wrote results HDF5 → {out} (backend=mlx, {steps_run}/{num_steps} steps run)")
     return out

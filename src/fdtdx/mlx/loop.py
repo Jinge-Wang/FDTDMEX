@@ -12,6 +12,9 @@ inject E -> H-core -> inject H), so (a) the compiled graph is static across step
 leapfrog ordering is preserved exactly: the H update reads the source-injected E^{n+1}. The cores
 are functional (return new arrays), keeping the Yee update race-free. The lazy MLX graph is bounded
 with periodic ``mx.eval``.
+
+An optional ``stop_plan`` (:mod:`fdtdx.mlx.stop`) ends the run early. It is sampled only on those
+``mx.eval`` boundaries, so the hot path keeps exactly the synchronisation points it had before.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from fdtdx.mlx.inject import inject_sources_E, inject_sources_H
 from fdtdx.mlx.kernels import build_kernel_cores, kernel_eligible
 from fdtdx.mlx.source_freeze import SourcePlan
 from fdtdx.mlx.state import MLXState
+from fdtdx.mlx.stop import StopPlan, aligned_check_every, make_stop_check
 from fdtdx.mlx.update import _update_E, _update_H
 
 
@@ -107,9 +111,18 @@ def run_forward_mlx(
     eval_every: int = 8,
     compile_step: bool = True,
     use_metal_kernel: bool = False,
+    stop_plan: StopPlan | None = None,
     progress: Callable[[int, int], None] | None = None,
-) -> tuple[MLXState, dict[str, dict[str, mx.array]]]:
-    """Advance ``state`` ``num_steps`` steps, recording detectors; return state + buffers.
+) -> tuple[MLXState, dict[str, dict[str, mx.array]], int]:
+    """Advance ``state`` up to ``num_steps`` steps, recording detectors.
+
+    Returns ``(state, detector_buffers, steps_run)``; ``steps_run`` is ``num_steps`` unless a
+    ``stop_plan`` ended the run early.
+
+    ``stop_plan`` (see :mod:`fdtdx.mlx.stop`) is evaluated only at the ``eval_every``
+    synchronisation points — its ``check_every`` is snapped down to a multiple of ``eval_every``,
+    so a check adds one reduction + one scalar sync on a boundary where the loop already
+    synchronises and nothing at all in between. A ``"time"`` plan needs no checks at all.
 
     ``progress``, when given, is called ``progress(step, num_steps)`` with ``step`` monotonic
     ``1 → num_steps``, throttled to ~200 calls total. It only reads the Python loop counter (no
@@ -120,6 +133,11 @@ def run_forward_mlx(
     dispersive = state.dispersive_c1 is not None
     e_core, h_core = _build_cores(state, c, simulate_boundaries, compile_step, use_metal_kernel)
     progress_stride = max(1, num_steps // 200) if progress else 0
+    # Align the stop check to the eval cadence so a check never adds a synchronisation point of
+    # its own (0 = never check: no plan, or a pure time-step plan).
+    check_every = aligned_check_every(stop_plan, eval_every)
+    stop_check = make_stop_check(stop_plan, state, detector_buffers) if check_every else None
+    steps_run = num_steps
 
     # Per-step "does any detector record this step?" mask. When false the whole interpolation +
     # accumulation block is skipped (it interpolated only to be discarded). Detector DFT
@@ -182,10 +200,16 @@ def run_forward_mlx(
         if progress and ((n + 1) % progress_stride == 0 or n + 1 == num_steps):
             progress(n + 1, num_steps)
 
+        # Stop check on the eval boundary: the fields are already evaluated here, so this costs one
+        # reduction plus the single scalar sync inside the check.
+        if stop_check is not None and (n + 1) % check_every == 0 and stop_check(n + 1):
+            steps_run = n + 1
+            break
+
     leaves = [state.E, state.H, state.psi_E, state.psi_H]
     if dispersive:
         leaves += [state.dispersive_P_curr, state.dispersive_P_prev]
     for bufs in detector_buffers.values():
         leaves.extend(bufs.values())
     mx.eval(*leaves)
-    return state, detector_buffers
+    return state, detector_buffers, steps_run

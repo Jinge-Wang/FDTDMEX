@@ -81,7 +81,7 @@ def _mlx_out(arrays, oc, config, use_metal_kernel):
     detector_buffers = allocate_buffers(detector_plans)
     num_steps = int(config.time_steps_total)
     c = float(config.courant_number)
-    state, detector_buffers = run_forward_mlx(
+    state, detector_buffers, _ = run_forward_mlx(
         state,
         source_plans,
         detector_plans,
