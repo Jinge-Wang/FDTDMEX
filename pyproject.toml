@@ -40,7 +40,7 @@ viz = ["plotly>=7.0.0", "pyvista>=0.48.4", "trame>=3.13.2"]
 # MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
 mcp = ["mcp>=1.28.1", "h5py>=3.16.0", "pydantic>=2.13.5", "plotly>=7.0.0"]
 dev = [
-    "black>=26.5.1",
+    "black>=26.10.1",
     "ipykernel>=7.3.0",
     "pre-commit>=4.6.2",
     "pymdown-extensions>=11.0.2",
