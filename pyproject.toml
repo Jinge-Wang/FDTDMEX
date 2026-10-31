@@ -16,7 +16,7 @@ dependencies = [
     "moviepy@git+https://github.com/Zulko/moviepy@7ffa4f00376237137a25fe1c777355c37753e9af",
     "optax>=0.2.4",
     "equinox>=0.13.8",
-    "trimesh>=5.1.0",
+    "trimesh>=5.2.0",
     "scipy>=1.17.1",
     "seaborn>=0.13.2",
     "matplotlib>=3.11.1",
@@ -34,32 +34,32 @@ dependencies = [
 # mode_backend="tidy3d" for fully tensorial media, bends, or dev-time cross-checks.
 tidy3d = ["tidy3d>=2.12.0"]
 # Config schema + HDF5 sim_init/sim_run/sim_postproc IO layer (the agentic hand-off seam).
-io = ["h5py>=3.16.0", "pydantic>=2.13.5"]
+io = ["h5py>=3.16.0", "pydantic>=2.14.1"]
 # 3D / web visualization (WS-D), kept optional so the core stays lean.
-viz = ["plotly>=7.0.0", "pyvista>=0.48.4", "trame>=3.13.2"]
+viz = ["plotly>=7.1.0", "pyvista>=0.49.1", "trame>=4.0.0"]
 # MCP server for LLM orchestration (WS-D). Builds on the io + viz layers.
-mcp = ["mcp>=1.28.1", "h5py>=3.16.0", "pydantic>=2.13.5", "plotly>=7.0.0"]
+mcp = ["mcp>=2.3.0", "h5py>=3.16.0", "pydantic>=2.14.1", "plotly>=7.1.0"]
 dev = [
-    "black>=26.5.1",
-    "ipykernel>=7.3.0",
-    "pre-commit>=4.6.2",
-    "pymdown-extensions>=11.0.2",
+    "black>=26.10.1",
+    "ipykernel>=7.4.0",
+    "pre-commit>=4.7.0",
+    "pymdown-extensions>=12.3",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
-    "ruff>=0.16.5",
-    "tox-uv>=1.36.0",
-    "pydoclint>=0.9.1",
+    "ruff>=0.17.2",
+    "tox-uv>=1.37.0",
+    "pydoclint>=0.11.1",
     # Held at <9.0 deliberately: Sphinx 9 autodoc calls
     # sphinx.util.inspect.object_description on class attributes, and the
     # pytreeclass field descriptors (DispersionModel.poles, DrudePole.damping,
     # .orientation, .plasma_frequency) raise ValueError from their repr, which
     # aborts the strict docs build. Dependabot's proposed <10.0 is otherwise fine.
-    "sphinx<9.0",
+    "sphinx<10.0",
     "sphinx-autobuild>=2025.8.25",
     "sphinx-book-theme>=1.4.0",
     "nbsphinx>=0.9.8",
     # Held with sphinx: 3.6.1+ requires sphinx>=9.0.4 (see the sphinx pin above).
-    "sphinx-autodoc-typehints>=3.2.0",
+    "sphinx-autodoc-typehints>=3.6.1",
     "myst_nb>=1.4.0",
     "sphinx-copybutton>=0.5.2",
     "chex>=0.1.91",
